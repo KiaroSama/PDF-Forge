@@ -1,0 +1,48 @@
+# --- PDF Forge ignore rules ---
+
+# Local secret registry (never commit).
+/secrets.md
+
+# Private AI explanation file (never commit, even if absent).
+explain-AI.md
+
+# Strictly local-only protected directories at any depth.
+.ignoreme/
+**/.ignoreme/
+
+# Local AI assistant configuration (never commit, at any depth).
+.claude/
+.kiro/
+.codex/
+**/.claude/
+**/.kiro/
+**/.codex/
+
+# Python caches and build artifacts.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environment created by Run.ps1.
+.venv/
+
+# Runtime logs.
+logs/
+
+# Test / coverage artifacts.
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary PDF Forge working files.
+.pdfforge_*.tmp
+
+# OS / editor junk.
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/

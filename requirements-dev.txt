@@ -1,0 +1,4 @@
+# PDF Forge development dependencies.
+# Install with: .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+-r requirements.txt
+pytest
