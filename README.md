@@ -102,10 +102,11 @@ that only one output file will be created and asked to confirm.
 
 ### Merge multiple PDFs
 
-Selecting `2` in the main menu opens the merge workflow:
+Selecting `2` in the main menu opens the merge submenu (same style as Page
+tools):
 
 ```
-Merge source:
+PDF Forge Merge:
   1. Add PDF files one by one [1]
   2. Use all PDFs from a folder
   0. Back

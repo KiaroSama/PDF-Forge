@@ -1527,9 +1527,9 @@ def _choose_output_dir(default_folder: Path) -> Optional[Path]:
 # --------------------------------------------------------------------------- #
 
 def _show_merge_source_menu() -> None:
-    """Render the merge-source selection menu."""
+    """Render the merge submenu in the same style as the Page tools submenu."""
     print()
-    print(colorize("Merge source:", Color.BOLD + Color.LIGHT_BLUE))
+    print(colorize(f"{APP_NAME} Merge:", Color.BOLD + Color.LIGHT_BLUE))
     print(f"  {colorize('1.', Color.LIGHT_BLUE)} Add PDF files one by one "
           f"{colorize('[1]', Color.GREEN)}")
     print(f"  {colorize('2.', Color.LIGHT_BLUE)} Use all PDFs from a folder")
@@ -1740,7 +1740,6 @@ def _default_merge_output(mode: str, sources: Sequence[Path]) -> Path:
 def operation_merge_pdfs() -> None:
     """Interactive flow for merging multiple PDFs into a single new PDF."""
     reset_questions()
-    print_heading("\n== Merge multiple PDFs ==")
     logger.info("Operation started: Merge multiple PDFs.")
 
     # 1) Choose the input mode.
@@ -1749,7 +1748,7 @@ def operation_merge_pdfs() -> None:
     while True:
         _show_merge_source_menu()
         choice = _input(
-            colorize("Select a source ", Color.BOLD)
+            colorize("Select an option ", Color.BOLD)
             + colorize("[1]", Color.GREEN)
             + " "
             + back_text("back=0, quit=exit")
