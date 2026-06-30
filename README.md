@@ -1,5 +1,7 @@
 # PDF Forge
 
+[![CI](https://github.com/KiaroSama/PDF-Forge/actions/workflows/ci.yml/badge.svg)](https://github.com/KiaroSama/PDF-Forge/actions/workflows/ci.yml)
+
 PDF Forge is a safe local CLI tool to extract, split, and merge PDF files. It is
 an interactive, Windows-friendly command-line utility: pull a custom selection
 of pages into a new document, break a large PDF into fixed-size page-range
@@ -260,6 +262,7 @@ README.md             This file
 CHANGELOG.md          Version history
 LICENSE               MIT license
 .gitignore
+.github/              GitHub Actions CI and Dependabot config
 tests/                Automated tests
 logs/                 Created at runtime
 ```
@@ -273,6 +276,15 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m pytest -q
 ```
+
+## Continuous integration
+
+Every push and pull request to `main` runs the test suite on GitHub Actions
+(`.github/workflows/ci.yml`) across Linux and Windows on Python 3.10, 3.11,
+3.12, and 3.13. The badge at the top of this file shows the current status. The
+workflow simply installs the runtime and development dependencies and runs
+`pytest`, the same command you can run locally. Dependabot
+(`.github/dependabot.yml`) keeps the Actions and Python dependencies current.
 
 ## Troubleshooting
 

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a gap indicator for long lists).
 - `natural_sort_key` helper providing natural, case-insensitive, stable
   ordering.
+- GitHub Actions CI (`.github/workflows/ci.yml`) running the test suite on Linux
+  and Windows across Python 3.10-3.13, and a Dependabot config
+  (`.github/dependabot.yml`) for the Actions and pip ecosystems.
 
 ### Changed
 - Folder-based merge ordering now uses **natural sorting** (case-insensitive and
