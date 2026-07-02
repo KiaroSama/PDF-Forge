@@ -511,3 +511,108 @@ def test_merge_unicode_persian_paths(tmp_path):
     assert out.exists()
     assert file_hash(a) == hash_a
     assert file_hash(b) == hash_b
+
+
+# --------------------------------------------------------------------------- #
+# Image conversion: quality mapping, naming, PNG rendering, image-only PDF
+# --------------------------------------------------------------------------- #
+
+def test_image_dpi_for_quality():
+    assert app.image_dpi_for_quality("low") == 96
+    assert app.image_dpi_for_quality("MEDIUM") == 150
+    assert app.image_dpi_for_quality("High") == 300
+    with pytest.raises(ValueError):
+        app.image_dpi_for_quality("ultra")
+
+
+def test_build_page_image_name():
+    # Page number is used verbatim, with no zero-padding.
+    assert app.build_page_image_name(2) == "2.png"
+    assert app.build_page_image_name(10) == "10.png"
+
+
+def test_default_image_output_names(tmp_path):
+    src = tmp_path / "Report.pdf"
+    assert app.default_images_output_dir(src) == tmp_path / "Report_images"
+    assert app.default_image_pdf_output(src) == tmp_path / "Report_image.pdf"
+
+
+def test_render_all_pages_to_pngs(tmp_path):
+    from PIL import Image
+
+    src = make_pdf(tmp_path / "doc.pdf", 3)
+    pdf, n = app.open_pdfium_document(src)
+    try:
+        assert n == 3
+        created = app.render_pages_to_pngs(pdf, list(range(n)), tmp_path / "imgs", dpi=96)
+    finally:
+        pdf.close()
+
+    assert sorted(p.name for p in created) == ["1.png", "2.png", "3.png"]
+    for path in created:
+        with Image.open(path) as im:
+            im.verify()  # Confirms each PNG is valid and not truncated.
+
+
+def test_render_selected_pages_named_by_page_number(tmp_path):
+    src = make_pdf(tmp_path / "doc.pdf", 12)
+    pdf, n = app.open_pdfium_document(src)
+    try:
+        # Pages 2 and 10 (0-based indices 1 and 9).
+        created = app.render_pages_to_pngs(pdf, [1, 9], tmp_path / "imgs", dpi=96)
+    finally:
+        pdf.close()
+    # Each file is named after its own page number.
+    assert sorted(p.name for p in created) == ["10.png", "2.png"]
+
+
+def test_render_pdf_to_image_pdf(tmp_path):
+    src = make_pdf(tmp_path / "doc.pdf", 4)
+    original_hash = file_hash(src)
+    pdf, n = app.open_pdfium_document(src)
+    out = tmp_path / "image_only.pdf"
+    try:
+        written = app.render_pdf_to_image_pdf(pdf, n, out, dpi=96)
+    finally:
+        pdf.close()
+
+    assert written == 4
+    reader = PdfReader(str(out))
+    assert len(reader.pages) == 4
+    assert reader.is_encrypted is False
+    # The rasterized output has no extractable text (non-editable).
+    assert reader.pages[0].extract_text().strip() == ""
+    # Source is untouched.
+    assert file_hash(src) == original_hash
+
+
+def test_png_temp_cleanup_on_failure(tmp_path, monkeypatch):
+    src = make_pdf(tmp_path / "doc.pdf", 2)
+    pdf, _n = app.open_pdfium_document(src)
+    out_dir = tmp_path / "imgs"
+
+    def boom(*_args, **_kwargs):
+        raise app.PdfOpenError("simulated image validation failure")
+
+    monkeypatch.setattr(app, "_validate_image_file", boom)
+    try:
+        with pytest.raises(app.PdfOpenError):
+            app.render_pages_to_pngs(pdf, [0], out_dir, dpi=96)
+    finally:
+        pdf.close()
+
+    # No final image and no leftover temp files.
+    assert list(out_dir.glob("*.png")) == []
+    assert list(out_dir.glob(".pdfforge_*")) == []
+
+
+def test_image_conversion_unicode_persian_paths(tmp_path):
+    folder = tmp_path / "اسناد"  # "documents"
+    folder.mkdir()
+    src = make_pdf(folder / "گزارش.pdf", 2)  # "report"
+    pdf, n = app.open_pdfium_document(src)
+    try:
+        created = app.render_pages_to_pngs(pdf, list(range(n)), folder / "تصاویر", dpi=96)
+    finally:
+        pdf.close()
+    assert sorted(p.name for p in created) == ["1.png", "2.png"]

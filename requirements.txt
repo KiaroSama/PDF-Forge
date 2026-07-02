@@ -1,3 +1,12 @@
 # PDF Forge runtime dependencies.
-# Pinned to a known-good major version for reproducible installs.
+# Pinned to known-good versions for reproducible installs.
+
+# PDF structure manipulation (extract, split, merge).
 pypdf==5.1.0
+
+# PDF page rendering for image conversion (permissive license, no external
+# binaries). Used to rasterize pages to PNG and to build image-only PDFs.
+pypdfium2==5.11.0
+
+# Image encoding: saves PNG page images and assembles image-only PDFs.
+pillow==12.3.0

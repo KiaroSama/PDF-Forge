@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/KiaroSama/PDF-Forge/actions/workflows/ci.yml/badge.svg)](https://github.com/KiaroSama/PDF-Forge/actions/workflows/ci.yml)
 
-PDF Forge is a safe local CLI tool to extract, split, and merge PDF files. It is
-an interactive, Windows-friendly command-line utility: pull a custom selection
-of pages into a new document, break a large PDF into fixed-size page-range
-files, or combine several PDFs into one. The original PDFs are never modified,
-overwritten, or deleted.
+PDF Forge is a safe local CLI tool to extract, split, merge, and convert PDF
+files. It is an interactive, Windows-friendly command-line utility: pull a
+custom selection of pages into a new document, break a large PDF into
+fixed-size page-range files, combine several PDFs into one, or convert pages to
+images. The original PDFs are never modified, overwritten, or deleted.
 
 ## What it does
 
@@ -16,7 +16,14 @@ overwritten, or deleted.
   output folder.
 - **Merge multiple PDFs** into one new file, either by adding paths one by one
   or by combining every PDF in a folder.
-- Preserves the original page content (no rasterizing or re-encoding).
+- **Convert a PDF to images (PNG)** — export all pages, or a chosen selection,
+  as PNG files (one file per page, named after the page number).
+- **Convert a PDF to an image-only PDF** — rasterize every page and rebuild the
+  document so the text is no longer selectable or editable.
+- Three image-quality levels (Low 96 DPI, Medium 150 DPI, High 300 DPI) for both
+  conversion tools.
+- Preserves the original page content for extract/split/merge (no rasterizing or
+  re-encoding).
 - Writes output safely using temporary files and atomic renames, and never
   overwrites existing files.
 
@@ -24,8 +31,12 @@ overwritten, or deleted.
 
 - Windows with PowerShell.
 - Python 3.10 or newer (`py` or `python` on the `PATH`).
-- The launcher creates a local virtual environment and installs
-  [`pypdf`](https://pypi.org/project/pypdf/) automatically on first run.
+- The launcher creates a local virtual environment and installs the
+  dependencies automatically on first run:
+  [`pypdf`](https://pypi.org/project/pypdf/) (page tools and merge),
+  [`pypdfium2`](https://pypi.org/project/pypdfium2/) (page rendering), and
+  [`Pillow`](https://pypi.org/project/pillow/) (image encoding). All three ship
+  as prebuilt wheels, so no external tools are required.
 
 ## How to run it
 
@@ -59,6 +70,8 @@ You can also run the application directly once the environment exists:
 PDF Forge Main menu:
   1. Page tools [1]
   2. Merge multiple PDFs
+  3. PDF to images (PNG)
+  4. PDF to image-only PDF
   0. Exit
 ```
 
@@ -168,6 +181,68 @@ Main menu -> 2 (Merge) -> 2 (Use all PDFs from a folder)
   -> C:\docs\report-parts\report-parts_merged.pdf
 ```
 
+### PDF to images (PNG)
+
+Selecting `3` in the main menu opens the image-export submenu (same style as
+Page tools):
+
+```
+PDF Forge PDF to images:
+  1. All pages to PNG [1]
+  2. Selected pages to PNG
+  0. Back
+```
+
+**Sub-option 1 — All pages to PNG**
+
+1. Enter the source PDF path.
+2. Choose the output image quality (`1` Low / `2` Medium / `3` High; Enter =
+   Medium).
+3. Review the summary (source, total pages, quality, output folder) and pick the
+   output folder (Enter accepts the default beside the source).
+4. Confirm. Every page is rendered to its own PNG.
+
+**Sub-option 2 — Selected pages to PNG**
+
+1. Enter the source PDF path.
+2. Choose the output image quality.
+3. Enter a page-selection expression (same syntax as extract, without the `|`
+   separator), e.g. `5`, `10-20`, or `10-20,25,30-50`.
+4. Review the summary and pick the output folder.
+5. Confirm. Each selected page is rendered to its own PNG.
+
+Each PNG is named after its page number, so page 2 becomes `2.png`. Images are
+written into a folder named `<source>_images` beside the source PDF (a unique
+folder such as `<source>_images_2` is used if one already exists).
+
+```
+Main menu -> 3 (PDF to images) -> 1 (All pages to PNG)
+  Source PDF path: C:\docs\report.pdf
+  Output image quality [2]: 3
+  -> C:\docs\report_images\1.png, 2.png, 3.png, ...
+```
+
+### PDF to image-only PDF
+
+Selecting `4` in the main menu rasterizes an entire PDF and rebuilds it as an
+image-only document. This makes the content non-editable: the text becomes
+images and is no longer selectable or searchable. The output is typically larger
+than the source.
+
+1. Enter the source PDF path.
+2. Choose the output image quality.
+3. Review the summary and pick the output path (Enter accepts
+   `<source>_image.pdf` beside the source).
+4. Confirm. Every page is rasterized at the chosen quality and combined into one
+   PDF.
+
+```
+Main menu -> 4 (PDF to image-only PDF)
+  Source PDF path: C:\docs\contract.pdf
+  Output image quality [2]: 2
+  -> C:\docs\contract_image.pdf   (rasterized, not editable)
+```
+
 ## Page-selection examples
 
 | Input              | Result                                             |
@@ -213,6 +288,19 @@ error message instead of a crash.
 - Folder mode: `<folder-name>_merged.pdf` inside the selected folder.
 - If the default already exists, a unique name such as `..._merged_2.pdf` is
   used.
+
+**PDF to images (PNG)** – saved into a folder beside the source PDF:
+
+- Folder: `<source>_images` (a unique folder such as `<source>_images_2` is used
+  if needed).
+- Files are named after the page number: `1.png`, `2.png`, `10.png` (no
+  zero-padding). Selected-page exports keep each page's real number, so
+  exporting pages 1, 3, 5 produces `1.png`, `3.png`, `5.png`.
+
+**PDF to image-only PDF** – a single rasterized file:
+
+- `<source>_image.pdf` beside the source PDF (a unique name such as
+  `<source>_image_2.pdf` is used if needed).
 
 ## Safety guarantees
 

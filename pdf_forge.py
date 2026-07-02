@@ -36,7 +36,12 @@ from typing import List, Optional, Sequence, Tuple
 
 APP_NAME = "PDF Forge"            # User-facing application name (never change spelling).
 LOG_PREFIX = "PDF Forge"          # Log filename prefix.
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
+
+# Image-conversion quality presets mapped to a render resolution in DPI.
+# Rendering scale is DPI / 72 (PDF user-space is 72 units per inch).
+IMAGE_QUALITY_DPI = {"low": 96, "medium": 150, "high": 300}
+DEFAULT_IMAGE_QUALITY = "medium"
 
 # Module level logger; configured by setup_logging().
 logger = logging.getLogger("pdf_forge")
@@ -609,6 +614,37 @@ def pad_width_for(total_pages: int) -> int:
     return max(3, len(str(total_pages)))
 
 
+def image_dpi_for_quality(quality: str) -> int:
+    """Return the render DPI for a quality name ('low' / 'medium' / 'high').
+
+    Raises:
+        ValueError: when the quality name is not recognized.
+    """
+    key = quality.strip().lower()
+    if key not in IMAGE_QUALITY_DPI:
+        raise ValueError(f"Unknown image quality: {quality!r}")
+    return IMAGE_QUALITY_DPI[key]
+
+
+def build_page_image_name(page_number: int) -> str:
+    """Return the PNG filename for a 1-based page number (e.g. 2 -> ``2.png``).
+
+    Files are named after the page number itself, as requested, with no
+    zero-padding, so page 2 becomes ``2.png``.
+    """
+    return f"{page_number}.png"
+
+
+def default_images_output_dir(source: Path) -> Path:
+    """Default folder (pre-uniqueness) for PNG page images of ``source``."""
+    return source.parent / f"{source.stem}_images"
+
+
+def default_image_pdf_output(source: Path) -> Path:
+    """Default path (pre-uniqueness) for the rasterized image-only PDF."""
+    return source.parent / f"{source.stem}_image.pdf"
+
+
 def unique_file_path(path: Path) -> Path:
     """Return a non-existing file path, adding ``_2``, ``_3`` suffixes if needed."""
     if not path.exists():
@@ -949,6 +985,239 @@ def resolves_to_same_file(a: Path, b: Path) -> bool:
             os.path.realpath(str(a)) == os.path.realpath(str(b))
     except OSError:
         return False
+
+
+# --------------------------------------------------------------------------- #
+# Image rendering layer (pypdfium2 + Pillow)
+# --------------------------------------------------------------------------- #
+
+# PDFium document-load error code indicating a password is required.
+# (Equivalent to pypdfium2.raw.FPDF_ERR_PASSWORD.)
+_PDFIUM_ERR_PASSWORD = 4
+
+
+def _import_pdfium():
+    """Import pypdfium2 lazily so the core module imports without the dependency."""
+    try:
+        import pypdfium2 as pdfium  # type: ignore
+        return pdfium
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise RuntimeError(
+            "The 'pypdfium2' library is required for image conversion but is not "
+            "installed. Run the application through Run.ps1 to install dependencies."
+        ) from exc
+
+
+def _import_pillow():
+    """Import Pillow lazily so the core module imports without the dependency."""
+    try:
+        from PIL import Image  # type: ignore
+        return Image
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise RuntimeError(
+            "The 'Pillow' library is required for image conversion but is not "
+            "installed. Run the application through Run.ps1 to install dependencies."
+        ) from exc
+
+
+def open_pdfium_document(path: Path, password_prompt=None):
+    """Open a PDF for rendering with pypdfium2, handling encryption.
+
+    Returns:
+        A ``(document, page_count)`` tuple. The caller is responsible for
+        closing the document with ``document.close()``.
+
+    Raises:
+        PdfOpenError: with a clear message on any failure.
+    """
+    pdfium = _import_pdfium()
+
+    logger.debug("Opening PDF for rendering: '%s'", path)
+    try:
+        pdf = pdfium.PdfDocument(str(path))
+    except pdfium.PdfiumError as exc:
+        # A password-required document is the only case we can recover from.
+        if getattr(exc, "err_code", None) == _PDFIUM_ERR_PASSWORD and password_prompt is not None:
+            logger.info("PDF is encrypted; prompting for a password (render path).")
+            password = password_prompt()
+            if password is None:
+                raise PdfOpenError(
+                    "The PDF is encrypted and no password was provided."
+                ) from exc
+            try:
+                pdf = pdfium.PdfDocument(str(path), password=password)
+            except pdfium.PdfiumError as exc2:
+                logger.error("Render open failed after password for '%s': %s", path, exc2)
+                raise PdfOpenError(
+                    "The PDF is encrypted and could not be opened with the "
+                    "provided password."
+                ) from exc2
+            finally:
+                # The password is never logged or stored.
+                del password
+        else:
+            logger.error("Render open failed for '%s': %s", path, exc)
+            raise PdfOpenError(
+                f"The PDF could not be opened for rendering: {exc}"
+            ) from exc
+    except OSError as exc:
+        logger.error("OS error opening '%s' for rendering: %s", path, exc)
+        raise PdfOpenError(f"Could not open the file: {exc}") from exc
+
+    try:
+        page_count = len(pdf)
+    except Exception as exc:  # noqa: BLE001
+        pdf.close()
+        raise PdfOpenError(f"The PDF page count could not be determined: {exc}") from exc
+
+    if page_count < 1:
+        pdf.close()
+        raise PdfOpenError("The PDF contains no pages.")
+
+    logger.info("Opened PDF for rendering '%s' (%d page(s)).", path, page_count)
+    return pdf, page_count
+
+
+def _validate_image_file(path: Path) -> None:
+    """Reopen a freshly written image and confirm it is a valid, non-empty file."""
+    Image = _import_pillow()
+    if path.stat().st_size <= 0:
+        raise PdfOpenError("Output validation failed: the image file is empty.")
+    with Image.open(path) as image:
+        image.verify()  # Raises if the image is truncated or corrupt.
+
+
+def _render_page_to_rgb_image(pdf, page_index: int, dpi: int):
+    """Render one 0-based page to an RGB PIL image at the given DPI."""
+    Image = _import_pillow()  # Ensure Pillow is present before rendering.
+    scale = dpi / 72.0
+    page = pdf[page_index]
+    try:
+        bitmap = page.render(scale=scale)
+        try:
+            image = bitmap.to_pil().convert("RGB")
+        finally:
+            bitmap.close()
+    finally:
+        page.close()
+    return image
+
+
+def render_pages_to_pngs(pdf, pages_zero_based: Sequence[int], out_dir: Path,
+                         dpi: int, progress=None) -> List[Path]:
+    """Render the given 0-based pages to PNG files named after their page number.
+
+    Each page is written safely (temporary file -> validate -> atomic rename) and
+    never overwrites an existing file. Returns the list of created file paths.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    started = time.perf_counter()
+    total = len(pages_zero_based)
+    created: List[Path] = []
+    logger.debug("Rendering %d page(s) to PNG at %d DPI in '%s'.", total, dpi, out_dir)
+
+    for index, page_index in enumerate(pages_zero_based, start=1):
+        page_number = page_index + 1
+        image = _render_page_to_rgb_image(pdf, page_index, dpi)
+        final_path = unique_file_path(out_dir / build_page_image_name(page_number))
+
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            suffix=".tmp", prefix=".pdfforge_", dir=str(out_dir)
+        )
+        os.close(tmp_fd)
+        tmp_path = Path(tmp_name)
+        try:
+            image.save(tmp_path, "PNG")
+            _validate_image_file(tmp_path)
+            os.replace(tmp_path, final_path)
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                logger.warning("Failed to remove temporary file: %s", tmp_path)
+            raise
+        finally:
+            image.close()
+
+        created.append(final_path)
+        logger.debug("Wrote page %d -> '%s'.", page_number, final_path.name)
+        if progress is not None:
+            progress(index, total)
+
+    elapsed = time.perf_counter() - started
+    logger.info(
+        "Rendered %d PNG(s) at %d DPI into '%s' in %.2fs.",
+        len(created), dpi, out_dir, elapsed,
+    )
+    return created
+
+
+def render_pdf_to_image_pdf(pdf, page_count: int, out_path: Path, dpi: int,
+                            progress=None) -> int:
+    """Rasterize every page and assemble the images into one image-only PDF.
+
+    Every page is rendered to an image at the given DPI, then Pillow writes all
+    images into a single PDF (temporary file -> validate -> atomic rename). The
+    result contains no selectable text, which is the point: the output is not
+    editable. Returns the number of pages written.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    started = time.perf_counter()
+    logger.debug(
+        "Rasterizing %d page(s) at %d DPI into image-only PDF '%s'.",
+        page_count, dpi, out_path,
+    )
+
+    images = []
+    try:
+        for page_index in range(page_count):
+            images.append(_render_page_to_rgb_image(pdf, page_index, dpi))
+            if progress is not None:
+                progress(page_index + 1, page_count)
+
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            suffix=".tmp", prefix=".pdfforge_", dir=str(out_path.parent)
+        )
+        os.close(tmp_fd)
+        tmp_path = Path(tmp_name)
+        try:
+            # 'resolution' sets the DPI metadata so each rasterized page keeps
+            # its original physical size (pixels / dpi == original inches).
+            images[0].save(
+                tmp_path,
+                "PDF",
+                save_all=True,
+                append_images=images[1:],
+                resolution=float(dpi),
+            )
+            # Reuse the merged-PDF validation: openable, not encrypted, page count.
+            _validate_merged_pdf(tmp_path, expected_pages=page_count)
+            os.replace(tmp_path, out_path)
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                logger.warning("Failed to remove temporary file: %s", tmp_path)
+            raise
+    finally:
+        for image in images:
+            try:
+                image.close()
+            except Exception:  # noqa: BLE001 - closing must never mask errors
+                pass
+
+    elapsed = time.perf_counter() - started
+    logger.info(
+        "Wrote image-only PDF '%s' (%d page(s)) at %d DPI in %.2fs.",
+        out_path, page_count, dpi, elapsed,
+    )
+    return page_count
 
 
 # --------------------------------------------------------------------------- #
@@ -1837,6 +2106,319 @@ def operation_merge_pdfs() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Operation 4/5: PDF -> images (PNG) and PDF -> image-only PDF
+# --------------------------------------------------------------------------- #
+
+def prompt_image_quality() -> Optional[int]:
+    """Ask for the output image quality; return the render DPI or None (Back).
+
+    Presented as an inline numbered question (same style as other operation
+    prompts). Medium is the default: pressing Enter selects it.
+    """
+    prompt = question_prompt(
+        "Output image quality",
+        details=(
+            f"1=Low ({IMAGE_QUALITY_DPI['low']} DPI), "
+            f"2=Medium ({IMAGE_QUALITY_DPI['medium']} DPI), "
+            f"3=High ({IMAGE_QUALITY_DPI['high']} DPI)"
+        ),
+        default="2",
+    )
+    choices = {"1": "low", "2": "medium", "3": "high"}
+    while True:
+        raw = _input(prompt).strip().lower()
+        if raw == "":
+            raw = "2"  # Enter selects Medium.
+        if raw == "0":
+            return None
+        if raw in ("exit", "quit"):
+            raise _ExitRequested()
+        if raw in choices:
+            quality = choices[raw]
+            dpi = IMAGE_QUALITY_DPI[quality]
+            logger.info("Image quality selected: %s (%d DPI).", quality, dpi)
+            return dpi
+        print_error("Invalid quality. Please choose 1, 2, or 3.")
+
+
+def operation_images_all_pages() -> None:
+    """Render every page of a PDF to a PNG named after its page number."""
+    reset_questions()
+    print_heading("\n== PDF to images: all pages ==")
+    logger.info("Operation started: PDF to images (all pages).")
+
+    try:
+        source = prompt_source_pdf()
+    except _ExitRequested:
+        raise
+    if source is None:
+        return
+
+    dpi = prompt_image_quality()
+    if dpi is None:
+        return
+
+    try:
+        pdf, total_pages = open_pdfium_document(source, password_prompt=prompt_password)
+    except (PdfOpenError, RuntimeError) as exc:
+        print_error(str(exc))
+        logger.error("Failed to open '%s' for rendering: %s", source, exc)
+        return
+
+    try:
+        print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
+        default_folder = unique_dir_path(default_images_output_dir(source))
+
+        print_heading("\nSummary")
+        print_kv("Source file", source.name, Color.CYAN)
+        print_kv("Total source pages", total_pages, Color.GOLD)
+        print_kv("Pages to export", f"all ({total_pages})", Color.LIME)
+        print_kv("Image format", "PNG", Color.ORANGE)
+        print_kv("Quality", f"{dpi} DPI", Color.PINK)
+        print_kv("Output directory", default_folder, Color.AQUA)
+
+        out_dir = _choose_output_dir(default_folder)
+        if out_dir is None:
+            print_warning("Returning to menu.")
+            return
+
+        if not ask_yes_no("Create these images now?", default_yes=True):
+            print_warning("Cancelled. Returning to menu.")
+            logger.info("PDF-to-images (all) cancelled at confirmation.")
+            return
+
+        pages_zero_based = list(range(total_pages))
+        _render_pngs_and_report(pdf, pages_zero_based, out_dir, dpi)
+    finally:
+        pdf.close()
+
+
+def operation_images_selected_pages() -> None:
+    """Render a chosen selection of pages to PNGs named after their page number."""
+    reset_questions()
+    print_heading("\n== PDF to images: selected pages ==")
+    logger.info("Operation started: PDF to images (selected pages).")
+
+    try:
+        source = prompt_source_pdf()
+    except _ExitRequested:
+        raise
+    if source is None:
+        return
+
+    dpi = prompt_image_quality()
+    if dpi is None:
+        return
+
+    try:
+        pdf, total_pages = open_pdfium_document(source, password_prompt=prompt_password)
+    except (PdfOpenError, RuntimeError) as exc:
+        print_error(str(exc))
+        logger.error("Failed to open '%s' for rendering: %s", source, exc)
+        return
+
+    try:
+        print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
+
+        selection_prompt = question_prompt(
+            "Pages to export as images",
+            details="e.g. 5 or 10-20 or 10-20,25,30-50",
+        )
+        while True:
+            expression = _input(selection_prompt).strip()
+            if expression == "0":
+                return
+            if expression.lower() in ("exit", "quit"):
+                raise _ExitRequested()
+            try:
+                result = parse_page_selection(expression, total_pages)
+                break
+            except PageSelectionError as exc:
+                print_error(f"Invalid selection: {exc}")
+
+        if result.duplicates_removed:
+            print_warning("Duplicate pages were removed; first occurrence kept.")
+        logger.info(
+            "Image selection parsed: expression='%s' pages=%d",
+            expression, len(result.pages),
+        )
+
+        default_folder = unique_dir_path(default_images_output_dir(source))
+
+        print_heading("\nSummary")
+        print_kv("Source file", source.name, Color.CYAN)
+        print_kv("Total source pages", total_pages, Color.GOLD)
+        print_kv("Pages to export", summarize_ranges(result.pages), Color.LIME)
+        print_kv("Image count", len(result.pages), Color.MAGENTA)
+        print_kv("Image format", "PNG", Color.ORANGE)
+        print_kv("Quality", f"{dpi} DPI", Color.PINK)
+        print_kv("Output directory", default_folder, Color.AQUA)
+
+        out_dir = _choose_output_dir(default_folder)
+        if out_dir is None:
+            print_warning("Returning to menu.")
+            return
+
+        if not ask_yes_no("Create these images now?", default_yes=True):
+            print_warning("Cancelled. Returning to menu.")
+            logger.info("PDF-to-images (selected) cancelled at confirmation.")
+            return
+
+        pages_zero_based = [p - 1 for p in result.pages]
+        _render_pngs_and_report(pdf, pages_zero_based, out_dir, dpi)
+    finally:
+        pdf.close()
+
+
+def _render_pngs_and_report(pdf, pages_zero_based: Sequence[int], out_dir: Path,
+                            dpi: int) -> None:
+    """Render pages to PNGs, then report the result (shared by both PNG flows)."""
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print_error(f"Could not create output directory: {exc}")
+        logger.error("Failed to create output dir '%s': %s", out_dir, exc)
+        return
+
+    try:
+        created = render_pages_to_pngs(
+            pdf,
+            pages_zero_based,
+            out_dir,
+            dpi,
+            progress=lambda c, t: _print_progress("Rendering pages", c, t),
+        )
+    except Exception as exc:  # noqa: BLE001 - present a clean message, log details
+        print_error(f"Failed to render images: {exc}")
+        logger.exception("PNG rendering failed for output '%s'", out_dir)
+        return
+
+    print_success(
+        f"Done. Created {len(created)} image(s) in:\n  {out_dir}"
+    )
+    logger.info("PDF-to-images complete: images=%d dir='%s'", len(created), out_dir)
+
+
+def _show_pdf_to_images_menu() -> None:
+    """Render the PDF-to-images submenu in the Page tools submenu style."""
+    print()
+    print(colorize(f"{APP_NAME} PDF to images:", Color.BOLD + Color.LIGHT_BLUE))
+    print(f"  {colorize('1.', Color.LIGHT_BLUE)} All pages to PNG "
+          f"{colorize('[1]', Color.GREEN)}")
+    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Selected pages to PNG")
+    print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
+    print()
+
+
+def pdf_to_images_menu() -> None:
+    """Run the PDF-to-images submenu loop (mirrors the Page tools submenu)."""
+    while True:
+        _show_pdf_to_images_menu()
+        choice = _input(
+            colorize("Select an option ", Color.BOLD)
+            + colorize("[1]", Color.GREEN)
+            + " "
+            + back_text("back=0, quit=exit")
+            + colorize(": ", Color.WHITE)
+        ).strip().lower()
+
+        if choice == "":
+            choice = "1"  # Enter selects option 1.
+
+        if choice == "0":
+            return
+        if choice in ("exit", "quit"):
+            raise _ExitRequested()
+
+        logger.debug("PDF-to-images menu selection: '%s'", choice)
+        try:
+            if choice == "1":
+                operation_images_all_pages()
+            elif choice == "2":
+                operation_images_selected_pages()
+            else:
+                print_error("Invalid option. Please choose 1, 2, or 0.")
+                continue
+        except KeyboardInterrupt:
+            print_warning("\nOperation interrupted. Returning to menu.")
+            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
+
+
+def operation_pdf_to_image_pdf() -> None:
+    """Rasterize a whole PDF and rebuild it as an image-only (non-editable) PDF."""
+    reset_questions()
+    print_heading("\n== PDF to image-only PDF ==")
+    logger.info("Operation started: PDF to image-only PDF.")
+
+    try:
+        source = prompt_source_pdf()
+    except _ExitRequested:
+        raise
+    if source is None:
+        return
+
+    dpi = prompt_image_quality()
+    if dpi is None:
+        return
+
+    try:
+        pdf, total_pages = open_pdfium_document(source, password_prompt=prompt_password)
+    except (PdfOpenError, RuntimeError) as exc:
+        print_error(str(exc))
+        logger.error("Failed to open '%s' for rendering: %s", source, exc)
+        return
+
+    try:
+        print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
+        default_path = unique_file_path(default_image_pdf_output(source))
+
+        print_heading("\nSummary")
+        print_kv("Source file", source.name, Color.CYAN)
+        print_kv("Total source pages", total_pages, Color.GOLD)
+        print_kv("Quality", f"{dpi} DPI", Color.PINK)
+        print_kv("Result", "image-only PDF (not editable)", Color.LIME)
+        print_kv("Default output", default_path, Color.AQUA)
+
+        out_path = _choose_output_file(default_path, source)
+        if out_path is None:
+            print_warning("Returning to menu.")
+            return
+
+        print_warning(
+            "The output will be rasterized: text becomes images and is no longer "
+            "selectable or editable. This usually increases the file size."
+        )
+        if not ask_yes_no("Create image-only PDF?", default_yes=True):
+            print_warning("Cancelled. Returning to menu.")
+            logger.info("PDF-to-image-PDF cancelled at confirmation.")
+            return
+
+        logger.info(
+            "Image-only PDF start: pages=%d dpi=%d output='%s'",
+            total_pages, dpi, out_path,
+        )
+        try:
+            written = render_pdf_to_image_pdf(
+                pdf,
+                total_pages,
+                out_path,
+                dpi,
+                progress=lambda c, t: _print_progress("Rasterizing pages", c, t),
+            )
+        except Exception as exc:  # noqa: BLE001 - clean message, log details
+            print_error(f"Failed to create the image-only PDF: {exc}")
+            logger.exception("Image-only PDF failed for output '%s'", out_path)
+            return
+
+        print_success(
+            f"Done. Wrote {written} rasterized page(s) to:\n  {out_path}"
+        )
+        logger.info("Image-only PDF complete: output='%s' pages=%d", out_path, written)
+    finally:
+        pdf.close()
+
+
+# --------------------------------------------------------------------------- #
 # Main menu loop
 # --------------------------------------------------------------------------- #
 
@@ -1847,6 +2429,8 @@ def show_menu() -> None:
     print(f"  {colorize('1.', Color.LIGHT_BLUE)} Page tools "
           f"{colorize('[1]', Color.GREEN)}")
     print(f"  {colorize('2.', Color.LIGHT_BLUE)} Merge multiple PDFs")
+    print(f"  {colorize('3.', Color.LIGHT_BLUE)} PDF to images (PNG)")
+    print(f"  {colorize('4.', Color.LIGHT_BLUE)} PDF to image-only PDF")
     print(f"  {colorize('0.', Color.LIGHT_BLUE)} Exit")
     print()
 
@@ -1927,8 +2511,12 @@ def main_menu() -> int:
                 page_tools_menu()
             elif choice == "2":
                 operation_merge_pdfs()
+            elif choice == "3":
+                pdf_to_images_menu()
+            elif choice == "4":
+                operation_pdf_to_image_pdf()
             else:
-                print_error("Invalid option. Please choose 1, 2, or 0.")
+                print_error("Invalid option. Please choose 1, 2, 3, 4, or 0.")
                 continue
         except _ExitRequested:
             print_success("Goodbye.")

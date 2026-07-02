@@ -5,6 +5,30 @@ All notable changes to PDF Forge are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-03
+
+### Added
+- **PDF to images (PNG)** main-menu tool with a submenu:
+  - All pages to PNG — renders every page to its own PNG.
+  - Selected pages to PNG — renders a chosen page selection.
+  - Each PNG is named after its page number (page 2 -> `2.png`), written into a
+    `<source>_images` folder beside the source.
+- **PDF to image-only PDF** main-menu tool that rasterizes every page and
+  rebuilds the document so the text is no longer selectable or editable.
+- Three image-quality levels for both conversion tools: Low (96 DPI), Medium
+  (150 DPI, default), and High (300 DPI).
+- New runtime dependencies `pypdfium2` (page rendering) and `Pillow` (image
+  encoding), both permissively licensed prebuilt wheels with no external tools.
+- Pure/core helpers (`image_dpi_for_quality`, `build_page_image_name`,
+  `default_images_output_dir`, `default_image_pdf_output`) and an image
+  rendering I/O layer, all covered by tests including PNG rendering, image-only
+  PDF integrity, temp-file cleanup on failure, and Unicode paths.
+
+### Changed
+- Image outputs use the same safety pattern as the rest of the app
+  (temporary file -> validate -> atomic rename, never overwrite) and the same
+  thorough UTC logging.
+
 ## [1.2.0] - 2026-06-30
 
 ### Added
@@ -67,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   virtual environment, and installs dependencies on first run.
 - Automated test suite.
 
+[1.3.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.3.0
 [1.2.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.2.0
 [1.1.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.1.0
 [1.0.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.0.0
