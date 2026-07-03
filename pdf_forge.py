@@ -1332,7 +1332,6 @@ def operation_extract_pages() -> None:
     '|' separators, each group becomes its own separate output PDF.
     """
     reset_questions()
-    print_heading("\n== Extract selected pages ==")
     logger.info("Operation started: Extract selected pages.")
 
     try:
@@ -1592,7 +1591,6 @@ def _choose_output_file(default_path: Path, source: Path) -> Optional[Path]:
 def operation_split_chunks() -> None:
     """Interactive flow for splitting a PDF into fixed-size page chunks."""
     reset_questions()
-    print_heading("\n== Split PDF into fixed-size chunks ==")
     logger.info("Operation started: Split PDF into fixed-size chunks.")
 
     try:
@@ -2144,8 +2142,7 @@ def prompt_image_quality() -> Optional[int]:
 def operation_images_all_pages() -> None:
     """Render every page of a PDF to a PNG named after its page number."""
     reset_questions()
-    print_heading("\n== PDF to images: all pages ==")
-    logger.info("Operation started: PDF to images (all pages).")
+    logger.info("Operation started: All pages to PNG.")
 
     try:
         source = prompt_source_pdf()
@@ -2196,8 +2193,7 @@ def operation_images_all_pages() -> None:
 def operation_images_selected_pages() -> None:
     """Render a chosen selection of pages to PNGs named after their page number."""
     reset_questions()
-    print_heading("\n== PDF to images: selected pages ==")
-    logger.info("Operation started: PDF to images (selected pages).")
+    logger.info("Operation started: Selected pages to PNG.")
 
     try:
         source = prompt_source_pdf()
@@ -2347,7 +2343,6 @@ def pdf_to_images_menu() -> None:
 def operation_pdf_to_image_pdf() -> None:
     """Rasterize a whole PDF and rebuild it as an image-only (non-editable) PDF."""
     reset_questions()
-    print_heading("\n== PDF to image-only PDF ==")
     logger.info("Operation started: PDF to image-only PDF.")
 
     try:
