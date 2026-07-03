@@ -295,9 +295,14 @@ How it works:
 4. Choose the candidate(s) to remove (e.g. `1`, or `1,3` for several).
 5. Review the summary and pick the output path (Enter accepts
    `<source>_nowatermark.pdf` beside the source).
-6. Confirm. The watermark's paint calls are removed from every page, content
-   streams are recompressed, and a new file is written. The original is never
-   modified.
+6. Confirm. The watermark's paint calls are removed from every page, the
+   now-unused watermark image is physically dropped, duplicate objects are
+   merged, and a new file is written. The original is never modified.
+
+Removal is **visually lossless**: the page images and text are preserved exactly
+(retained images are never re-encoded), so only the watermark disappears. Because
+the unused watermark image is deleted and objects are deduplicated, the output is
+usually a little smaller than the source.
 
 ```
 Main menu -> 5 (Remove image watermark)

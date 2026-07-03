@@ -1434,6 +1434,16 @@ def remove_watermark_images(reader, signatures_to_remove, out_path: Path,
         if progress is not None:
             progress(index + 1, total)
 
+    # Physically drop the now-unreferenced watermark image(s) and merge any
+    # duplicate objects to keep the file compact. This only removes unused
+    # objects and dedupes identical ones; it never re-encodes retained image
+    # data, so the visible content stays byte-for-byte lossless.
+    try:
+        writer.compress_identical_objects()
+        logger.debug("Compacted objects (removed unreferenced, merged duplicates).")
+    except Exception:  # noqa: BLE001 - optimization is best-effort
+        logger.warning("Object compaction step failed; writing without it.")
+
     tmp_fd, tmp_name = tempfile.mkstemp(
         suffix=".tmp", prefix=".pdfforge_", dir=str(out_path.parent)
     )

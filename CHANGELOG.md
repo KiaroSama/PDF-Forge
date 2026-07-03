@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Content streams are recompressed and the output is written safely; the
   original PDF is never modified. Only repeated image watermarks are supported
   (not text watermarks, optional-content layers, or flattened scans).
+  The removed watermark image is physically dropped (not left as an unused
+  object) and duplicate objects are merged, so the output is typically smaller
+  than the source. Removal is visually lossless: retained page images are never
+  re-encoded (verified byte-identical), only the watermark's paint call and its
+  now-unused object are removed.
 - New runtime dependencies `pypdfium2` (page rendering) and `Pillow` (image
   encoding), both permissively licensed prebuilt wheels with no external tools.
 - Pure/core helpers (`image_dpi_for_quality`, `build_page_image_name`,
