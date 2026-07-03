@@ -40,8 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Operation titles are shown as plain headings (no `== ... ==` decoration).
 
 ### Fixed
-- In the merge flow, pressing `0` (Back) while adding source files now returns
-  to the merge submenu instead of jumping all the way to the main menu.
+- Merge back navigation: the merge submenu is now the single Back hub for the
+  whole operation. Pressing `0` at any step (source picker, output path) or
+  cancelling at confirmation returns to the merge submenu instead of jumping
+  straight to the main menu. Only `0` at the merge submenu returns to the main
+  menu, matching how every other menu behaves (one level back per `0`).
 
 ## [1.2.0] - 2026-06-30
 

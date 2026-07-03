@@ -2011,9 +2011,10 @@ def operation_merge_pdfs() -> None:
     reset_questions()
     logger.info("Operation started: Merge multiple PDFs.")
 
-    # 1) Choose the input mode.
-    mode: Optional[str] = None
-    sources: Optional[List[Path]] = None
+    # The merge source menu is the hub for this operation. Every step below it
+    # (source picker, output, confirmation, and completion) returns here, so
+    # pressing 0 always goes back exactly one level. Only 0 at this menu returns
+    # to the main menu.
     while True:
         _show_merge_source_menu()
         choice = _input(
@@ -2026,7 +2027,7 @@ def operation_merge_pdfs() -> None:
         if choice == "":
             choice = "1"
         if choice == "0":
-            return
+            return  # Back to the main menu.
         if choice in ("exit", "quit"):
             raise _ExitRequested()
         if choice == "1":
@@ -2038,18 +2039,27 @@ def operation_merge_pdfs() -> None:
         else:
             print_error("Invalid option. Please choose 1, 2, or 0.")
             continue
-        if sources:
-            break
-        # The source picker returned Back (0): go back one step to this
-        # submenu instead of jumping all the way to the main menu.
-        logger.info("Merge source picker cancelled; re-showing the merge menu.")
 
-    logger.info(
-        "Merge source selected: mode=%s files=%d", mode, len(sources)
-    )
+        if not sources:
+            # Back (0) from the source picker: re-show this submenu.
+            logger.info("Merge source picker cancelled; re-showing the merge menu.")
+            continue
 
-    # 2) Open every source up front. Fail the whole operation before writing if
-    #    any source cannot be opened, so no partial output is ever created.
+        # Run a single merge. It returns here (to the merge menu) whether it
+        # completed, was cancelled with 0, or failed to open a source.
+        _run_merge_with_sources(mode, sources)
+
+
+def _run_merge_with_sources(mode: str, sources: List[Path]) -> None:
+    """Open, preview, confirm, and write a single merge for the given sources.
+
+    Any cancellation (0 at output or a 'no' confirmation) or failure returns
+    normally, so the caller's merge menu is shown again (one level back).
+    """
+    logger.info("Merge source selected: mode=%s files=%d", mode, len(sources))
+
+    # Open every source up front. Fail before writing if any source cannot be
+    # opened, so no partial output is ever created.
     readers = []
     total_pages = 0
     current = sources[0]
@@ -2068,15 +2078,15 @@ def operation_merge_pdfs() -> None:
         len(sources), total_pages, _describe_merge_sort_mode(mode),
     )
 
-    # 3) Choose the output path (Enter accepts a safe default beside the source).
+    # Choose the output path (Enter accepts a safe default beside the source).
     default_path = unique_file_path(_default_merge_output(mode, sources))
     out_path = _choose_output_file_for_merge(default_path, sources)
     if out_path is None:
-        print_warning("Returning to menu.")
+        print_warning("Returning to the merge menu.")
         logger.info("Merge cancelled at output selection.")
         return
 
-    # 4) Show the full merge summary, then confirm.
+    # Show the full merge summary, then confirm.
     _print_merge_summary(mode, sources, total_pages, out_path)
     logger.info(
         "Merge summary: pdfs=%d pages=%d sort=%s output='%s'",
@@ -2084,7 +2094,7 @@ def operation_merge_pdfs() -> None:
     )
 
     if not ask_yes_no("Create merged PDF?", default_yes=True):
-        print_warning("Cancelled. Returning to menu.")
+        print_warning("Cancelled. Returning to the merge menu.")
         logger.info("Merge cancelled at confirmation by user.")
         return
 
