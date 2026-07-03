@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Image outputs use the same safety pattern as the rest of the app
   (temporary file -> validate -> atomic rename, never overwrite) and the same
   thorough UTC logging.
+- Bumped `pypdf` from 5.1.0 to 6.14.2. The only breaking change in pypdf 6.0
+  was dropping Python 3.8 support, which does not affect this project
+  (Python 3.10+ is required). All APIs used here are unchanged.
 
 ## [1.2.0] - 2026-06-30
 
