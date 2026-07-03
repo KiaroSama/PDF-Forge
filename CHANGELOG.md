@@ -39,6 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than the source. Removal is visually lossless: retained page images are never
   re-encoded (verified byte-identical), only the watermark's paint call and its
   now-unused object are removed.
+- **Delete pages** main-menu tool (submenu: single file or batch). Pages to
+  delete use the extraction syntax (single values and combined ranges, e.g.
+  `10-20,25,30-50`). Single-file mode rejects pages that do not exist. Batch
+  mode processes every PDF in a folder **per file**: only the requested pages
+  that exist in a given file are deleted (each becomes its own
+  `<name>_deleted_....pdf`), pages beyond a file's length are skipped for that
+  file with a note, and files with none of the requested pages (or where the
+  request would remove every page) are skipped with a note; a final summary
+  reports processed/skipped/failed counts. Deletion is lossless (kept pages are
+  copied, not re-encoded) and the original files are never modified.
 - New runtime dependencies `pypdfium2` (page rendering) and `Pillow` (image
   encoding), both permissively licensed prebuilt wheels with no external tools.
 - Pure/core helpers (`image_dpi_for_quality`, `build_page_image_name`,

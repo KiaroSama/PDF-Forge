@@ -485,6 +485,88 @@ def parse_multi_file_selection(expression: str, total_pages: int) -> List[PageGr
     return groups
 
 
+def parse_delete_pages(expression: str) -> List[int]:
+    """Parse a page expression into a sorted, de-duplicated list of page numbers.
+
+    Supports the same forms as extraction (``5``, ``1,2``, ``10-20``,
+    ``10-20,25,30-50``) but applies **no upper bound**: the document length is
+    checked later, per file, so a batch can target pages that exist in some
+    files and not others.
+
+    Raises:
+        PageSelectionError: with a clear, user-facing message on any problem.
+    """
+    if expression is None or expression.strip() == "":
+        raise PageSelectionError("The page selection is empty.")
+
+    pages: set = set()
+    for raw_element in expression.split(","):
+        element = raw_element.strip()
+        if element == "":
+            raise PageSelectionError(
+                "Empty element found. Do not leave blank values between commas."
+            )
+        if "-" in element:
+            parts = element.split("-")
+            if len(parts) != 2:
+                raise PageSelectionError(
+                    f"Invalid range '{element}'. Use the form START-END (e.g. 10-20)."
+                )
+            start_text, end_text = parts[0].strip(), parts[1].strip()
+            if not (start_text.isdigit() and end_text.isdigit()):
+                raise PageSelectionError(
+                    f"Invalid range '{element}'. Both ends must be positive whole numbers."
+                )
+            start, end = int(start_text), int(end_text)
+            if start < 1 or end < 1:
+                raise PageSelectionError(
+                    f"Invalid range '{element}'. Page numbers start at 1."
+                )
+            if start > end:
+                raise PageSelectionError(
+                    f"Reversed range '{element}'. The start must not be greater than the end."
+                )
+            pages.update(range(start, end + 1))
+        else:
+            if not element.isdigit():
+                raise PageSelectionError(
+                    f"Invalid page '{element}'. Use positive whole numbers only."
+                )
+            page = int(element)
+            if page < 1:
+                raise PageSelectionError(
+                    f"Invalid page '{element}'. Page numbers start at 1."
+                )
+            pages.add(page)
+    return sorted(pages)
+
+
+def compute_deletion(total_pages: int, requested_pages: Sequence[int]):
+    """Split a deletion request against a document of ``total_pages`` pages.
+
+    Returns ``(present, missing, kept_zero_based)`` where:
+        * ``present``  - requested pages that exist (1-based, sorted)
+        * ``missing``  - requested pages beyond the document (1-based, sorted)
+        * ``kept_zero_based`` - 0-based indices to keep, in original order
+    """
+    requested = sorted(set(requested_pages))
+    present = [p for p in requested if 1 <= p <= total_pages]
+    missing = [p for p in requested if p > total_pages]
+    to_delete = set(present)
+    kept_zero_based = [i for i in range(total_pages) if (i + 1) not in to_delete]
+    return present, missing, kept_zero_based
+
+
+def build_delete_output_name(source_stem: str, selection_text: str,
+                             max_stem_length: int = 120) -> str:
+    """Build a length-safe output filename for a page-deletion result."""
+    fragment = sanitize_selection_text(selection_text)
+    descriptive = f"{source_stem}_deleted_{fragment}.pdf"
+    if len(descriptive) <= max_stem_length:
+        return descriptive
+    return f"{source_stem}_pages_deleted.pdf"
+
+
 def compute_chunks(
     total_pages: int,
     chunk_size: int,
@@ -3079,6 +3161,269 @@ def operation_remove_watermark() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Operation 7: delete pages (single PDF or batch folder)
+# --------------------------------------------------------------------------- #
+
+def _prompt_delete_selection() -> Optional[List[int]]:
+    """Prompt for the pages to delete. Returns the parsed list or None (Back)."""
+    prompt = question_prompt(
+        "Pages to delete",
+        details="e.g. 5 or 10-20 or 10-20,25,30-50",
+    )
+    while True:
+        raw = _input(prompt).strip()
+        if raw == "0":
+            return None
+        if raw.lower() in ("exit", "quit"):
+            raise _ExitRequested()
+        try:
+            return parse_delete_pages(raw)
+        except PageSelectionError as exc:
+            print_error(f"Invalid selection: {exc}")
+
+
+def operation_delete_pages_single() -> None:
+    """Delete selected pages from a single PDF into a new file."""
+    reset_questions()
+    print_heading("\nDelete pages: single file")
+    logger.info("Operation started: Delete pages (single file).")
+
+    try:
+        source = prompt_source_pdf()
+    except _ExitRequested:
+        raise
+    if source is None:
+        return
+
+    try:
+        reader = open_source_pdf(source, password_prompt=prompt_password)
+    except (PdfOpenError, RuntimeError) as exc:
+        print_error(str(exc))
+        logger.error("Failed to open '%s': %s", source, exc)
+        return
+
+    total_pages = len(reader.pages)
+    print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
+
+    # Ask for the pages, rejecting any that do not exist in this document.
+    while True:
+        requested = _prompt_delete_selection()
+        if requested is None:
+            return
+        present, missing, kept = compute_deletion(total_pages, requested)
+        if missing:
+            print_error(
+                f"These pages do not exist (document has {total_pages}): "
+                f"{summarize_ranges(missing)}. Please re-enter."
+            )
+            continue
+        if not present:
+            print_error("No pages selected.")
+            continue
+        if not kept:
+            print_error(
+                "That would delete every page. A PDF must keep at least one page."
+            )
+            continue
+        break
+
+    selection_text = summarize_ranges(present)
+    default_name = build_delete_output_name(source.stem, selection_text)
+    default_path = unique_file_path(source.parent / default_name)
+
+    print_heading("\nSummary")
+    print_kv("Source file", source.name, Color.CYAN)
+    print_kv("Total source pages", total_pages, Color.GOLD)
+    print_kv("Pages to delete", f"{selection_text}  ({len(present)} page(s))", Color.RED)
+    print_kv("Pages remaining", len(kept), Color.LIME)
+    print_kv("Default output", default_path, Color.AQUA)
+
+    out_path = _choose_output_file(default_path, source)
+    if out_path is None:
+        print_warning("Returning to menu.")
+        return
+
+    if not ask_yes_no("Create the new PDF without those pages?", default_yes=True):
+        print_warning("Cancelled. Returning to menu.")
+        logger.info("Delete-pages (single) cancelled at confirmation.")
+        return
+
+    logger.info(
+        "Delete-pages start: source='%s' delete=%s keep=%d output='%s'",
+        source, selection_text, len(kept), out_path,
+    )
+    try:
+        written = write_pages_to_pdf(
+            reader, kept, out_path,
+            progress=lambda c, t: _print_progress("Writing pages", c, t),
+        )
+    except Exception as exc:  # noqa: BLE001 - clean message, log details
+        print_error(f"Failed to create the output PDF: {exc}")
+        logger.exception("Delete-pages failed for output '%s'", out_path)
+        return
+
+    print_success(
+        f"Done. Deleted {len(present)} page(s); kept {written}:\n  {out_path}"
+    )
+    logger.info("Delete-pages complete: output='%s' kept=%d", out_path, written)
+
+
+def operation_delete_pages_batch() -> None:
+    """Delete selected pages from every PDF in a folder (one new file per PDF).
+
+    Pages are matched per file: a file is only touched for the pages it actually
+    has. Pages that do not exist in a given file are skipped for that file and
+    reported in a note. Files with none of the requested pages, or where the
+    request would remove every page, are skipped with a note.
+    """
+    reset_questions()
+    print_heading("\nDelete pages: batch folder")
+    logger.info("Operation started: Delete pages (batch folder).")
+
+    pdfs = prompt_source_folder_pdfs()
+    if pdfs is None:
+        return
+
+    requested = _prompt_delete_selection()
+    if requested is None:
+        return
+
+    folder = pdfs[0].parent
+    selection_text = summarize_ranges(requested)
+
+    print_heading("\nSummary")
+    print_kv("Folder", folder, Color.CYAN)
+    print_kv("PDF files", len(pdfs), Color.MAGENTA)
+    print_kv("Pages to delete", selection_text, Color.RED)
+    print_note(
+        "For each file, only the requested pages that exist are deleted. Pages "
+        "beyond a file's length are skipped for that file (a note is shown)."
+    )
+    print_kv("Per-file output", "<name>_deleted_... .pdf beside each PDF", Color.AQUA)
+    print(colorize("\n  Files:", Color.GRAY))
+    _print_merge_order(pdfs)
+
+    if not ask_yes_no("Delete these pages from all matching PDFs?", default_yes=True):
+        print_warning("Cancelled. Returning to menu.")
+        logger.info("Delete-pages (batch) cancelled at confirmation.")
+        return
+
+    logger.info(
+        "Delete-pages batch start: folder='%s' files=%d delete=%s",
+        folder, len(pdfs), selection_text,
+    )
+    print()
+    processed = skipped = failed = total_deleted = 0
+    for index, src in enumerate(pdfs, start=1):
+        print_info(f"[{index}/{len(pdfs)}] {src.name}")
+        try:
+            reader = open_source_pdf(src, password_prompt=prompt_password)
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(f"  Skipped (could not open): {exc}")
+            logger.error("Delete-pages batch: failed to open '%s': %s", src, exc)
+            failed += 1
+            continue
+
+        total = len(reader.pages)
+        present, missing, kept = compute_deletion(total, requested)
+
+        if not present:
+            print_note(
+                f"  Note: none of the requested pages exist here "
+                f"(has {total} page(s)); skipped."
+            )
+            logger.info("Delete-pages batch: '%s' has no requested pages; skipped.", src)
+            skipped += 1
+            continue
+        if not kept:
+            print_note(
+                f"  Note: the request covers all {total} page(s); skipped to keep "
+                "a valid PDF."
+            )
+            logger.info("Delete-pages batch: '%s' would be emptied; skipped.", src)
+            skipped += 1
+            continue
+
+        out_name = build_delete_output_name(src.stem, summarize_ranges(present))
+        out_path = unique_file_path(src.parent / out_name)
+        if resolves_to_same_file(out_path, src):
+            out_path = unique_file_path(src.parent / f"{src.stem}_pages_deleted.pdf")
+        try:
+            written = write_pages_to_pdf(reader, kept, out_path)
+        except Exception as exc:  # noqa: BLE001 - keep the batch going
+            print_error(f"  Failed: {exc}")
+            logger.exception("Delete-pages batch write failed for '%s'", src)
+            failed += 1
+            continue
+
+        total_deleted += len(present)
+        processed += 1
+        print_success(
+            f"  -> deleted {len(present)} page(s) [{summarize_ranges(present)}]; "
+            f"kept {written} -> {out_path.name}"
+        )
+        if missing:
+            print_note(
+                f"  Note: pages not in this file were skipped: "
+                f"{summarize_ranges(missing)} (has {total} page(s))."
+            )
+
+    print_success(
+        f"Done. Processed {processed} file(s), skipped {skipped}, failed {failed}; "
+        f"{total_deleted} page(s) deleted in total."
+    )
+    logger.info(
+        "Delete-pages batch complete: processed=%d skipped=%d failed=%d deleted=%d",
+        processed, skipped, failed, total_deleted,
+    )
+
+
+def _show_delete_pages_menu() -> None:
+    """Render the delete-pages submenu in the Page tools submenu style."""
+    print()
+    print(colorize(f"{APP_NAME} Delete pages:", Color.BOLD + Color.LIGHT_BLUE))
+    print(f"  {colorize('1.', Color.LIGHT_BLUE)} Single PDF "
+          f"{colorize('[1]', Color.GREEN)}")
+    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Batch: all PDFs in a folder")
+    print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
+    print()
+
+
+def delete_pages_menu() -> None:
+    """Run the delete-pages submenu loop (mirrors the Page tools submenu)."""
+    while True:
+        _show_delete_pages_menu()
+        choice = _input(
+            colorize("Select an option ", Color.BOLD)
+            + colorize("[1]", Color.GREEN)
+            + " "
+            + back_text("back=0, quit=exit")
+            + colorize(": ", Color.WHITE)
+        ).strip().lower()
+
+        if choice == "":
+            choice = "1"  # Enter selects option 1.
+
+        if choice == "0":
+            return
+        if choice in ("exit", "quit"):
+            raise _ExitRequested()
+
+        logger.debug("Delete-pages menu selection: '%s'", choice)
+        try:
+            if choice == "1":
+                operation_delete_pages_single()
+            elif choice == "2":
+                operation_delete_pages_batch()
+            else:
+                print_error("Invalid option. Please choose 1, 2, or 0.")
+                continue
+        except KeyboardInterrupt:
+            print_warning("\nOperation interrupted. Returning to menu.")
+            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
+
+
+# --------------------------------------------------------------------------- #
 # Main menu loop
 # --------------------------------------------------------------------------- #
 
@@ -3092,6 +3437,7 @@ def show_menu() -> None:
     print(f"  {colorize('3.', Color.LIGHT_BLUE)} PDF to images (PNG)")
     print(f"  {colorize('4.', Color.LIGHT_BLUE)} PDF to image-only PDF")
     print(f"  {colorize('5.', Color.LIGHT_BLUE)} Remove image watermark")
+    print(f"  {colorize('6.', Color.LIGHT_BLUE)} Delete pages")
     print(f"  {colorize('0.', Color.LIGHT_BLUE)} Exit")
     print()
 
@@ -3178,8 +3524,10 @@ def main_menu() -> int:
                 pdf_to_image_pdf_menu()
             elif choice == "5":
                 operation_remove_watermark()
+            elif choice == "6":
+                delete_pages_menu()
             else:
-                print_error("Invalid option. Please choose 1-5 or 0.")
+                print_error("Invalid option. Please choose 1-6 or 0.")
                 continue
         except _ExitRequested:
             print_success("Goodbye.")

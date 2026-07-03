@@ -670,6 +670,57 @@ def test_remove_watermark_images(tmp_path):
     assert target_sig not in {c.signature for c in candidates_after}
 
 
+# --------------------------------------------------------------------------- #
+# Delete pages: parsing, deletion computation, naming, integrity
+# --------------------------------------------------------------------------- #
+
+def test_parse_delete_pages():
+    assert app.parse_delete_pages("5") == [5]
+    assert app.parse_delete_pages("3,1,2") == [1, 2, 3]           # sorted + unique
+    assert app.parse_delete_pages("10-12,11") == [10, 11, 12]     # overlap dedup
+    # No upper bound: large page numbers are allowed (checked per file later).
+    assert app.parse_delete_pages("999") == [999]
+    for bad in ["", "  ", "0", "-1", "abc", "1,,2", "20-10", "1-2-3"]:
+        with pytest.raises(app.PageSelectionError):
+            app.parse_delete_pages(bad)
+
+
+def test_compute_deletion():
+    present, missing, kept = app.compute_deletion(10, [2, 4, 99])
+    assert present == [2, 4]
+    assert missing == [99]
+    assert kept == [0, 2, 4, 5, 6, 7, 8, 9]  # 0-based, pages 2 and 4 removed
+
+    # Deleting everything leaves nothing to keep.
+    present, missing, kept = app.compute_deletion(3, [1, 2, 3])
+    assert present == [1, 2, 3] and missing == [] and kept == []
+
+    # Nothing requested exists in the document.
+    present, missing, kept = app.compute_deletion(3, [7, 8])
+    assert present == [] and missing == [7, 8] and kept == [0, 1, 2]
+
+
+def test_build_delete_output_name():
+    assert app.build_delete_output_name("Doc", "10-20, 25") == "Doc_deleted_10-20_25.pdf"
+    long_sel = ", ".join(str(i) for i in range(1, 80))
+    assert app.build_delete_output_name("Doc", long_sel) == "Doc_pages_deleted.pdf"
+
+
+def test_delete_pages_end_to_end(tmp_path):
+    src = make_pdf(tmp_path / "doc.pdf", 6)
+    original_hash = file_hash(src)
+    reader = app.open_source_pdf(src)
+
+    _present, _missing, kept = app.compute_deletion(6, [2, 5])  # delete pages 2 and 5
+    out = tmp_path / "trimmed.pdf"
+    written = app.write_pages_to_pdf(reader, kept, out)
+
+    assert written == 4
+    assert len(PdfReader(str(out)).pages) == 4
+    # Source untouched.
+    assert file_hash(src) == original_hash
+
+
 def test_remove_watermark_preserves_other_pages(tmp_path):
     # Two shared images: one on all 3 pages (watermark), one only on page 1.
     src = make_repeated_image_pdf(tmp_path / "wm.pdf", 3)

@@ -23,6 +23,8 @@ images. The original PDFs are never modified, overwritten, or deleted.
 - **Remove an image watermark** — detect images that repeat across pages,
   preview them, and remove the one you choose from every page while keeping the
   text and all other content intact.
+- **Delete pages** — remove one or more pages (single values or combined ranges)
+  from a single PDF or, in batch, from every PDF in a folder.
 - Three image-quality levels (Low 96 DPI, Medium 150 DPI, High 300 DPI) for both
   conversion tools.
 - Preserves the original page content for extract/split/merge (no rasterizing or
@@ -76,6 +78,7 @@ PDF Forge Main menu:
   3. PDF to images (PNG)
   4. PDF to image-only PDF
   5. Remove image watermark
+  6. Delete pages
   0. Exit
 ```
 
@@ -318,6 +321,57 @@ Main menu -> 5 (Remove image watermark)
 cannot remove text-based watermarks, optional-content layers, or a watermark
 that is baked into a scanned/flattened page image. Because you confirm the
 candidate from a preview, legitimate repeated logos are not removed by accident.
+
+### Delete pages
+
+Selecting `6` in the main menu removes pages from PDFs. It opens a submenu (same
+style as the others):
+
+```
+PDF Forge Delete pages:
+  1. Single PDF [1]
+  2. Batch: all PDFs in a folder
+  0. Back
+```
+
+The pages to delete use the same syntax as extraction: single values and
+combined ranges, e.g. `5`, `10-20`, or `10-20,25,30-50`.
+
+**Sub-option 1 — Single PDF**
+
+1. Enter the source PDF path.
+2. Enter the pages to delete. Pages that do not exist in the document are
+   rejected so you can re-enter.
+3. Review the summary (pages to delete, pages remaining) and pick the output
+   path (Enter accepts `<source>_deleted_....pdf` beside the source).
+4. Confirm. A new PDF is written with those pages removed; the original is never
+   modified.
+
+**Sub-option 2 — Batch: all PDFs in a folder**
+
+1. Enter a folder path (every `*.pdf` directly inside it is processed).
+2. Enter the pages to delete.
+3. Review the summary and confirm.
+4. Each PDF is handled **per file**: only the requested pages that actually
+   exist in that file are deleted, and each file becomes its own
+   `<name>_deleted_....pdf`. When some requested pages are beyond a file's
+   length, they are skipped for that file and a **note** explains what happened.
+   Files that contain none of the requested pages, or where the request would
+   remove every page, are skipped with a note. A per-file progress line and a
+   final summary (processed / skipped / failed and total pages deleted) are
+   shown.
+
+```
+Main menu -> 6 (Delete pages) -> 2 (Batch), delete 4-6, on a/b/c.pdf:
+  [1/3] a.pdf  -> deleted 3 page(s) [4-6]; kept 7 -> a_deleted_4-6.pdf
+  [2/3] b.pdf  -> deleted 2 page(s) [4-5]; kept 3 -> b_deleted_4-5.pdf
+                 Note: pages not in this file were skipped: 6 (has 5 page(s)).
+  [3/3] c.pdf  Note: none of the requested pages exist here (has 3 page(s)); skipped.
+  Done. Processed 2 file(s), skipped 1, failed 0; 5 page(s) deleted in total.
+```
+
+Deletion is lossless: the kept pages are copied as-is (no re-encoding), so image
+and text quality is preserved.
 
 ## Page-selection examples
 
