@@ -40,8 +40,8 @@ htmlcov/
 # Temporary PDF Forge working files.
 .pdfforge_*.tmp
 
-# Local state: watermark-preview cleanup registry.
-.pdfforge_preview_cleanup
+# Project-local scratch folder (watermark previews, etc.).
+/temp/
 
 # OS / editor junk.
 Thumbs.db

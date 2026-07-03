@@ -2907,74 +2907,27 @@ def pdf_to_image_pdf_menu() -> None:
 # Operation 6: remove a repeated image watermark
 # --------------------------------------------------------------------------- #
 
-def _preview_registry_path() -> Path:
-    """Path of the small file that tracks preview folders pending cleanup."""
-    return Path(__file__).resolve().parent / ".pdfforge_preview_cleanup"
+def _temp_dir() -> Path:
+    """The project-local scratch folder (``PDF Forge/temp``).
 
-
-def _read_preview_registry() -> List[str]:
-    path = _preview_registry_path()
-    try:
-        if path.exists():
-            return [
-                line.strip()
-                for line in path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-    except OSError as exc:
-        logger.warning("Could not read preview registry: %s", exc)
-    return []
-
-
-def _write_preview_registry(entries: Sequence[str]) -> None:
-    path = _preview_registry_path()
-    try:
-        if entries:
-            path.write_text("\n".join(entries) + "\n", encoding="utf-8")
-        elif path.exists():
-            path.unlink()
-    except OSError as exc:
-        logger.warning("Could not update preview registry: %s", exc)
-
-
-def _register_preview_dir(preview_dir: Path) -> None:
-    """Record a preview folder so it can be cleaned up later if left behind."""
-    entries = _read_preview_registry()
-    key = str(preview_dir)
-    if key not in entries:
-        entries.append(key)
-        _write_preview_registry(entries)
-
-
-def _delete_preview_dir(preview_dir: Path) -> None:
-    """Delete a preview folder now and drop it from the cleanup registry."""
-    shutil.rmtree(preview_dir, ignore_errors=True)
-    remaining = [e for e in _read_preview_registry() if e != str(preview_dir)]
-    _write_preview_registry(remaining)
-
-
-def cleanup_stale_previews() -> None:
-    """Remove any watermark-preview folders left over from a previous run.
-
-    Called once at startup so a folder that was not cleaned up (for example after
-    an unexpected exit) is removed the next time the launcher starts.
+    Used for transient files such as watermark preview images. It lives next to
+    the script so it is always in a known, writable location regardless of where
+    the source PDF is.
     """
-    entries = _read_preview_registry()
-    if not entries:
-        return
-    remaining: List[str] = []
-    removed = 0
-    for entry in entries:
-        candidate = Path(entry)
-        if candidate.exists():
-            shutil.rmtree(candidate, ignore_errors=True)
-            if candidate.exists():
-                remaining.append(entry)  # Could not remove; keep for next time.
-            else:
-                removed += 1
-    _write_preview_registry(remaining)
-    if removed:
-        logger.info("Removed %d stale watermark-preview folder(s) at startup.", removed)
+    return Path(__file__).resolve().parent / "temp"
+
+
+def cleanup_temp_dir() -> None:
+    """Remove the project-local temp folder and its contents at startup.
+
+    Ensures any preview images left behind by a previous run (for example after
+    an unexpected exit) are cleared. The folder is recreated on demand.
+    """
+    temp = _temp_dir()
+    if temp.exists():
+        shutil.rmtree(temp, ignore_errors=True)
+        if not temp.exists():
+            logger.info("Cleared temp folder at startup: %s", temp)
 
 
 def operation_remove_watermark() -> None:
@@ -2982,10 +2935,10 @@ def operation_remove_watermark() -> None:
 
     Only image-based watermarks that repeat across pages can be removed. The
     text layer and all other content are preserved. Preview images are written
-    to a folder beside the source PDF so you can confirm which image to remove
-    before any change is made; that folder is removed automatically when the
-    operation finishes (or on the next launch). The original PDF is never
-    modified.
+    to the project-local ``temp`` folder (``PDF Forge/temp``) so you can confirm
+    which image to remove before any change is made; that folder is removed
+    automatically when the operation finishes, and any leftovers are cleared on
+    the next launch. The original PDF is never modified.
     """
     reset_questions()
     print_heading("\nRemove image watermark")
@@ -3018,14 +2971,13 @@ def operation_remove_watermark() -> None:
         logger.info("Watermark scan found no repeated images in '%s'.", source)
         return
 
-    # Export previews to a folder beside the source PDF so they are easy to find.
-    # Fall back to a temporary folder if that location is not writable.
-    preview_dir = unique_dir_path(source.parent / f"{source.stem}_wm_preview")
+    # Export previews to the project-local temp folder (always in a known place).
+    # Fall back to the system temp folder if that location is not writable.
+    preview_dir = unique_dir_path(_temp_dir() / f"{source.stem}_wm_preview")
     try:
         preview_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
         preview_dir = Path(tempfile.mkdtemp(prefix="pdfforge_wm_preview_"))
-    _register_preview_dir(preview_dir)
     logger.info("Watermark previews at: %s", preview_dir)
     print_heading("\nWatermark candidates")
     for idx, cand in enumerate(candidates, start=1):
@@ -3038,8 +2990,8 @@ def operation_remove_watermark() -> None:
         print_kv(f"[{idx}] {cand.width}x{cand.height}px", detail, Color.LIME)
 
     print_note(
-        "Preview images were created next to your PDF. Open them to check each "
-        f"candidate:\n  {preview_dir}\n"
+        "Preview images were created in the temp folder. Open them to check "
+        f"each candidate:\n  {preview_dir}\n"
         "(this folder is removed automatically when the operation finishes)"
     )
 
@@ -3115,8 +3067,15 @@ def operation_remove_watermark() -> None:
             "Watermark removal complete: pages=%d output='%s'", modified, out_path
         )
     finally:
-        # Remove the preview folder and drop it from the cleanup registry.
-        _delete_preview_dir(preview_dir)
+        # Remove the preview folder now that the operation is done, and drop the
+        # temp parent too if it is now empty.
+        shutil.rmtree(preview_dir, ignore_errors=True)
+        try:
+            temp = _temp_dir()
+            if temp.exists() and not any(temp.iterdir()):
+                temp.rmdir()
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -3249,8 +3208,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         logger.warning("Persistent file logging is unavailable; using console fallback.")
 
-    # Remove any watermark-preview folders left behind by a previous run.
-    cleanup_stale_previews()
+    # Clear the project-local temp folder (e.g. leftover preview images).
+    cleanup_temp_dir()
 
     print_banner(APP_NAME)
     if log_path is not None:

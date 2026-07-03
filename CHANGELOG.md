@@ -25,12 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (150 DPI, default), and High (300 DPI).
 - **Remove image watermark** main-menu tool. It detects image XObjects that
   repeat across pages (grouped by a cheap width/height/raw-length signature),
-  ranks them by page coverage, writes a PNG preview of each candidate to a
-  folder beside the source PDF for visual confirmation, and removes the chosen
+  ranks them by page coverage, writes a PNG preview of each candidate to the
+  project-local `temp` folder for visual confirmation, and removes the chosen
   image's paint calls from every page while preserving the text and all other
   content. The preview folder is removed automatically when the operation
-  finishes, and any preview folder left behind by an unexpected exit is cleaned
-  up on the next launch.
+  finishes, and the `temp` folder is cleared at startup so nothing is left
+  behind after an unexpected exit.
   Content streams are recompressed and the output is written safely; the
   original PDF is never modified. Only repeated image watermarks are supported
   (not text watermarks, optional-content layers, or flattened scans).

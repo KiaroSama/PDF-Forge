@@ -289,9 +289,10 @@ How it works:
 2. PDF Forge scans the document and lists the images that repeat across pages,
    ranked by how many pages they cover (the watermark is usually the top
    candidate at or near 100%).
-3. A **preview PNG** of each candidate is written to a temporary folder so you
-   can open them and confirm which image is the watermark before removing
-   anything.
+3. A **preview PNG** of each candidate is written to the project-local `temp`
+   folder (`PDF Forge/temp`) so you can open them and confirm which image is the
+   watermark before removing anything. That folder is removed automatically when
+   the operation finishes, and cleared at startup if anything was left behind.
 4. Choose the candidate(s) to remove (e.g. `1`, or `1,3` for several).
 5. Review the summary and pick the output path (Enter accepts
    `<source>_nowatermark.pdf` beside the source).
