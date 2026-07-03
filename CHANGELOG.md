@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stopping the batch.
 - Three image-quality levels for both conversion tools: Low (96 DPI), Medium
   (150 DPI, default), and High (300 DPI).
+- **Remove image watermark** main-menu tool. It detects image XObjects that
+  repeat across pages (grouped by a cheap width/height/raw-length signature),
+  ranks them by page coverage, writes a PNG preview of each candidate to a
+  temporary folder for visual confirmation, and removes the chosen image's paint
+  calls from every page while preserving the text and all other content.
+  Content streams are recompressed and the output is written safely; the
+  original PDF is never modified. Only repeated image watermarks are supported
+  (not text watermarks, optional-content layers, or flattened scans).
 - New runtime dependencies `pypdfium2` (page rendering) and `Pillow` (image
   encoding), both permissively licensed prebuilt wheels with no external tools.
 - Pure/core helpers (`image_dpi_for_quality`, `build_page_image_name`,

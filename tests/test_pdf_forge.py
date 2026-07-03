@@ -616,3 +616,66 @@ def test_image_conversion_unicode_persian_paths(tmp_path):
     finally:
         pdf.close()
     assert sorted(p.name for p in created) == ["1.png", "2.png"]
+
+
+# --------------------------------------------------------------------------- #
+# Watermark removal: index parsing, candidate scanning, removal
+# --------------------------------------------------------------------------- #
+
+def make_repeated_image_pdf(path: Path, pages: int, size=(120, 80),
+                            color=(200, 0, 0)) -> Path:
+    """Create a PDF with the same image on every page (a stand-in watermark)."""
+    from PIL import Image
+
+    images = [Image.new("RGB", size, color) for _ in range(pages)]
+    images[0].save(path, "PDF", save_all=True, append_images=images[1:])
+    return path
+
+
+def test_parse_index_list():
+    assert app.parse_index_list("1", 3) == [1]
+    assert app.parse_index_list("1,3", 3) == [1, 3]
+    assert app.parse_index_list("3,1,3", 3) == [1, 3]  # dedup + sort
+    for bad in ["", "   ", "0", "4", "abc", "1,,2", "-1", "1.5"]:
+        with pytest.raises(ValueError):
+            app.parse_index_list(bad, 3)
+
+
+def test_scan_watermark_candidates(tmp_path):
+    src = make_repeated_image_pdf(tmp_path / "wm.pdf", 3)
+    reader = PdfReader(str(src))
+    candidates, total = app.scan_watermark_candidates(reader.pages)
+    assert total == 3
+    assert len(candidates) >= 1
+    top = candidates[0]
+    assert top.pages == {1, 2, 3}          # image repeats on every page
+    assert (top.width, top.height) == (120, 80)
+
+
+def test_remove_watermark_images(tmp_path):
+    src = make_repeated_image_pdf(tmp_path / "wm.pdf", 3)
+    reader = PdfReader(str(src))
+    candidates, _ = app.scan_watermark_candidates(reader.pages)
+    target_sig = candidates[0].signature
+
+    out = tmp_path / "clean.pdf"
+    modified = app.remove_watermark_images(reader, [target_sig], out)
+
+    assert modified == 3
+    result = PdfReader(str(out))
+    assert len(result.pages) == 3
+    assert result.is_encrypted is False
+    # The repeated image is gone: no candidate with that signature remains.
+    candidates_after, _ = app.scan_watermark_candidates(result.pages, min_pages=2)
+    assert target_sig not in {c.signature for c in candidates_after}
+
+
+def test_remove_watermark_preserves_other_pages(tmp_path):
+    # Two shared images: one on all 3 pages (watermark), one only on page 1.
+    src = make_repeated_image_pdf(tmp_path / "wm.pdf", 3)
+    reader = PdfReader(str(src))
+    candidates, _ = app.scan_watermark_candidates(reader.pages)
+    out = tmp_path / "clean.pdf"
+    app.remove_watermark_images(reader, [candidates[0].signature], out)
+    # Output still opens and keeps its page count (no pages dropped).
+    assert len(PdfReader(str(out)).pages) == 3

@@ -576,6 +576,31 @@ def parse_chunk_size(text: str) -> int:
     return number
 
 
+def parse_index_list(expression: str, count: int) -> List[int]:
+    """Parse a comma-separated 1-based index list (e.g. ``1,3``) into ints.
+
+    Validates every index is within ``1..count``. Duplicates are removed and
+    the result is returned in ascending order.
+
+    Raises:
+        ValueError: with a clear, user-facing message on any problem.
+    """
+    if expression is None or expression.strip() == "":
+        raise ValueError("No selection entered.")
+    seen = set()
+    for raw in expression.split(","):
+        token = raw.strip()
+        if token == "":
+            raise ValueError("Empty value between commas.")
+        if not token.isdigit():
+            raise ValueError(f"Invalid number '{token}'. Use whole numbers only.")
+        value = int(token)
+        if value < 1 or value > count:
+            raise ValueError(f"Choice {value} is out of range (1..{count}).")
+        seen.add(value)
+    return sorted(seen)
+
+
 def sanitize_selection_text(expression: str) -> str:
     """Convert a page-selection expression into a filename-safe fragment.
 
@@ -1218,6 +1243,222 @@ def render_pdf_to_image_pdf(pdf, page_count: int, out_path: Path, dpi: int,
         out_path, page_count, dpi, elapsed,
     )
     return page_count
+
+
+# --------------------------------------------------------------------------- #
+# Watermark removal layer (repeated image XObjects)
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class WatermarkCandidate:
+    """A repeated image XObject that may be a watermark.
+
+    Images are grouped by a lightweight signature ``(width, height, length)``
+    where ``length`` is the raw (undecoded) stream length. Identical images
+    referenced from many pages therefore collapse into one candidate without
+    decoding any pixels, which keeps scanning fast even on large documents.
+    """
+
+    signature: Tuple[int, int, int]
+    pages: set                 # 1-based page numbers where the image appears.
+    width: int
+    height: int
+    sample_page_index: int     # 0-based page used to render a preview.
+
+
+def _iter_page_image_xobjects(page):
+    """Yield ``(name, image_object)`` for each image XObject on a page."""
+    resources = page.get("/Resources")
+    if not resources:
+        return
+    xobjects = resources.get_object().get("/XObject")
+    if not xobjects:
+        return
+    for name, ref in xobjects.get_object().items():
+        obj = ref.get_object()
+        if obj.get("/Subtype") == "/Image":
+            yield str(name), obj
+
+
+def _stream_raw_length(image_obj) -> int:
+    """Return the raw (encoded) stream length without decoding pixels.
+
+    Prefers the stored raw buffer; falls back to the declared ``/Length``.
+    Used only to build a cheap image signature, so an occasional 0 is harmless.
+    """
+    data = getattr(image_obj, "_data", None)
+    if data:
+        return len(data)
+    try:
+        length = image_obj.get("/Length")
+        if length is not None:
+            return int(length.get_object() if hasattr(length, "get_object") else length)
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
+
+
+def _image_signature(image_obj) -> Tuple[int, int, int]:
+    """Return a cheap ``(width, height, raw-length)`` signature for an image.
+
+    Identical images referenced from many pages share the same signature
+    without decoding any pixels, which keeps scanning fast on large documents.
+    """
+    return (
+        int(image_obj.get("/Width", 0)),
+        int(image_obj.get("/Height", 0)),
+        _stream_raw_length(image_obj),
+    )
+
+
+def scan_watermark_candidates(pages, min_pages: int = 2, max_candidates: int = 10):
+    """Find image XObjects that repeat across pages (watermark candidates).
+
+    Returns ``(candidates, total_pages)`` where candidates are sorted by page
+    coverage (descending) and then by image area. Only images that appear on at
+    least ``min_pages`` pages are returned.
+    """
+    from collections import defaultdict
+
+    groups = defaultdict(lambda: {"pages": set(), "w": 0, "h": 0, "sample": None})
+    total = len(pages)
+    for index, page in enumerate(pages):
+        for _name, obj in _iter_page_image_xobjects(page):
+            sig = _image_signature(obj)
+            group = groups[sig]
+            group["pages"].add(index + 1)
+            group["w"], group["h"] = sig[0], sig[1]
+            if group["sample"] is None:
+                group["sample"] = index
+
+    candidates = [
+        WatermarkCandidate(sig, g["pages"], g["w"], g["h"], g["sample"])
+        for sig, g in groups.items()
+        if len(g["pages"]) >= min_pages
+    ]
+    candidates.sort(
+        key=lambda c: (len(c.pages), c.width * c.height), reverse=True
+    )
+    logger.debug(
+        "Watermark scan: %d repeated image group(s) over %d page(s).",
+        len(candidates), total,
+    )
+    return candidates[:max_candidates], total
+
+
+def export_watermark_preview(pages, candidate: WatermarkCandidate, out_path: Path) -> bool:
+    """Save a PNG preview of a candidate image. Returns True on success.
+
+    The preview is decoded from the candidate's sample page using Pillow via
+    pypdf's image extraction, matched by pixel dimensions.
+    """
+    page = pages[candidate.sample_page_index]
+    try:
+        for image_file in page.images:
+            pil = image_file.image
+            if pil is None:
+                continue
+            if pil.width == candidate.width and pil.height == candidate.height:
+                pil.convert("RGB").save(out_path, "PNG")
+                return True
+    except Exception as exc:  # noqa: BLE001 - preview is best-effort
+        logger.warning("Preview export failed for %s: %s", candidate.signature, exc)
+    return False
+
+
+def remove_watermark_images(reader, signatures_to_remove, out_path: Path,
+                            progress=None) -> int:
+    """Remove the paint calls for the given image signatures from every page.
+
+    For each page, the ``<name> Do`` operators that draw a matching image are
+    dropped from the content stream and the image is removed from the page
+    resources. Content streams are recompressed to avoid file-size bloat. The
+    result is written safely (temporary file -> validate -> atomic rename).
+    Returns the number of pages modified.
+    """
+    _PdfReader, _PdfWriter, _PdfReadError = _import_pypdf()
+    from pypdf import PdfWriter
+    from pypdf.generic import ContentStream, NameObject
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    started = time.perf_counter()
+    targets = set(signatures_to_remove)
+
+    writer = PdfWriter()
+    writer.append(reader)
+
+    total = len(writer.pages)
+    expected_pages = total
+    modified = 0
+    dropped_ops = 0
+
+    for index, page in enumerate(writer.pages):
+        resources = page.get("/Resources")
+        xobjects = resources.get_object().get("/XObject") if resources else None
+        names_to_drop = set()
+        if xobjects:
+            xobjects = xobjects.get_object()
+            for name, obj in _iter_page_image_xobjects(page):
+                if _image_signature(obj) in targets:
+                    names_to_drop.add(name)
+
+        if not names_to_drop:
+            if progress is not None:
+                progress(index + 1, total)
+            continue
+
+        content = ContentStream(page.get_contents(), writer)
+        kept_ops = []
+        for operands, operator in content.operations:
+            if operator == b"Do" and operands and str(operands[0]) in names_to_drop:
+                dropped_ops += 1
+                continue  # Drop the paint call; balanced q/cm/Q remain harmless.
+            kept_ops.append((operands, operator))
+        content.operations = kept_ops
+        page[NameObject("/Contents")] = writer._add_object(content)
+
+        # Also drop the now-unused image from the page resources.
+        for name in names_to_drop:
+            key = NameObject(name)
+            if key in xobjects:
+                del xobjects[key]
+
+        try:
+            page.compress_content_streams()
+        except Exception:  # noqa: BLE001 - compression is best-effort
+            logger.warning("Content compression failed on page %d.", index + 1)
+
+        modified += 1
+        if progress is not None:
+            progress(index + 1, total)
+
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        suffix=".tmp", prefix=".pdfforge_", dir=str(out_path.parent)
+    )
+    tmp_path = Path(tmp_name)
+    logger.debug("Temporary watermark-removal file: '%s'", tmp_path)
+    try:
+        with os.fdopen(tmp_fd, "wb") as handle:
+            writer.write(handle)
+        _validate_written_pdf(tmp_path, expected_pages=expected_pages)
+        os.replace(tmp_path, out_path)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            logger.warning("Failed to remove temporary file: %s", tmp_path)
+        raise
+
+    elapsed = time.perf_counter() - started
+    logger.info(
+        "Watermark removal: modified=%d page(s), dropped=%d paint op(s), "
+        "output='%s' in %.2fs.",
+        modified, dropped_ops, out_path, elapsed,
+    )
+    return modified
 
 
 # --------------------------------------------------------------------------- #
@@ -2653,6 +2894,143 @@ def pdf_to_image_pdf_menu() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Operation 6: remove a repeated image watermark
+# --------------------------------------------------------------------------- #
+
+def operation_remove_watermark() -> None:
+    """Detect repeated image watermarks, preview them, and remove the chosen one.
+
+    Only image-based watermarks that repeat across pages can be removed. The
+    text layer and all other content are preserved. Preview images are written
+    to a temporary folder so you can confirm which image to remove before any
+    change is made; the original PDF is never modified.
+    """
+    reset_questions()
+    print_heading("\nRemove image watermark")
+    logger.info("Operation started: Remove image watermark.")
+
+    try:
+        source = prompt_source_pdf()
+    except _ExitRequested:
+        raise
+    if source is None:
+        return
+
+    try:
+        reader = open_source_pdf(source, password_prompt=prompt_password)
+    except (PdfOpenError, RuntimeError) as exc:
+        print_error(str(exc))
+        logger.error("Failed to open '%s': %s", source, exc)
+        return
+
+    total_pages = len(reader.pages)
+    print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
+    print_info("Scanning for repeated images (watermark candidates)...")
+    candidates, total = scan_watermark_candidates(reader.pages)
+
+    if not candidates:
+        print_warning(
+            "No repeated images were found. This tool only removes image-based "
+            "watermarks that repeat across pages (not text or flattened scans)."
+        )
+        logger.info("Watermark scan found no repeated images in '%s'.", source)
+        return
+
+    # Export previews to a temporary folder so the user can visually confirm.
+    preview_dir = Path(tempfile.mkdtemp(prefix="pdfforge_wm_preview_"))
+    logger.info("Watermark previews at: %s", preview_dir)
+    print_heading("\nWatermark candidates")
+    for idx, cand in enumerate(candidates, start=1):
+        coverage = len(cand.pages)
+        percent = int(coverage * 100 / total) if total else 0
+        preview_path = preview_dir / f"candidate_{idx}.png"
+        ok = export_watermark_preview(reader.pages, cand, preview_path)
+        detail = f"on {coverage}/{total} pages ({percent}%)"
+        detail += f" - preview: {preview_path.name}" if ok else " - preview unavailable"
+        print_kv(f"[{idx}] {cand.width}x{cand.height}px", detail, Color.LIME)
+
+    print_note(f"Open the preview images to see each candidate:\n  {preview_dir}")
+
+    try:
+        # Let the user pick which candidate(s) to remove.
+        sel_prompt = question_prompt(
+            "Watermark(s) to remove",
+            details="e.g. 1 or 1,3",
+            back="cancel=0, quit=exit",
+        )
+        indices: List[int] = []
+        while True:
+            raw = _input(sel_prompt).strip()
+            if raw == "0" or raw == "":
+                print_warning("Cancelled. Returning to menu.")
+                return
+            if raw.lower() in ("exit", "quit"):
+                raise _ExitRequested()
+            try:
+                indices = parse_index_list(raw, len(candidates))
+                break
+            except ValueError as exc:
+                print_error(str(exc))
+
+        chosen = [candidates[i - 1] for i in indices]
+        chosen_sigs = [c.signature for c in chosen]
+        affected_pages = set()
+        for c in chosen:
+            affected_pages |= c.pages
+
+        default_path = unique_file_path(source.parent / f"{source.stem}_nowatermark.pdf")
+        out_path = _choose_output_file(default_path, source)
+        if out_path is None:
+            print_warning("Returning to menu.")
+            return
+
+        print_heading("\nSummary")
+        print_kv("Source file", source.name, Color.CYAN)
+        print_kv("Watermarks to remove", len(chosen), Color.MAGENTA)
+        for i, c in zip(indices, chosen):
+            print(
+                colorize(f"    [{i}] ", Color.GREEN + Color.BOLD)
+                + colorize(f"{c.width}x{c.height}px on {len(c.pages)} page(s)", Color.LIME)
+            )
+        print_kv("Pages affected", len(affected_pages), Color.GOLD)
+        print_kv("Output", out_path, Color.AQUA)
+        logger.info(
+            "Watermark removal chosen: candidates=%s pages=%d output='%s'",
+            indices, len(affected_pages), out_path,
+        )
+
+        if not ask_yes_no("Remove the selected watermark(s)?", default_yes=True):
+            print_warning("Cancelled. Returning to menu.")
+            logger.info("Watermark removal cancelled at confirmation.")
+            return
+
+        try:
+            modified = remove_watermark_images(
+                reader,
+                chosen_sigs,
+                out_path,
+                progress=lambda c, t: _print_progress("Cleaning pages", c, t),
+            )
+        except Exception as exc:  # noqa: BLE001 - clean message, log details
+            print_error(f"Failed to remove the watermark: {exc}")
+            logger.exception("Watermark removal failed for output '%s'", out_path)
+            return
+
+        print_success(
+            f"Done. Removed watermark from {modified} page(s):\n  {out_path}"
+        )
+        logger.info(
+            "Watermark removal complete: pages=%d output='%s'", modified, out_path
+        )
+    finally:
+        # Clean up the temporary preview folder.
+        try:
+            shutil.rmtree(preview_dir, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # Main menu loop
 # --------------------------------------------------------------------------- #
 
@@ -2665,6 +3043,7 @@ def show_menu() -> None:
     print(f"  {colorize('2.', Color.LIGHT_BLUE)} Merge multiple PDFs")
     print(f"  {colorize('3.', Color.LIGHT_BLUE)} PDF to images (PNG)")
     print(f"  {colorize('4.', Color.LIGHT_BLUE)} PDF to image-only PDF")
+    print(f"  {colorize('5.', Color.LIGHT_BLUE)} Remove image watermark")
     print(f"  {colorize('0.', Color.LIGHT_BLUE)} Exit")
     print()
 
@@ -2749,8 +3128,10 @@ def main_menu() -> int:
                 pdf_to_images_menu()
             elif choice == "4":
                 pdf_to_image_pdf_menu()
+            elif choice == "5":
+                operation_remove_watermark()
             else:
-                print_error("Invalid option. Please choose 1, 2, 3, 4, or 0.")
+                print_error("Invalid option. Please choose 1-5 or 0.")
                 continue
         except _ExitRequested:
             print_success("Goodbye.")

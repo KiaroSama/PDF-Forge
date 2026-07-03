@@ -20,6 +20,9 @@ images. The original PDFs are never modified, overwritten, or deleted.
   as PNG files (one file per page, named after the page number).
 - **Convert a PDF to an image-only PDF** — rasterize every page and rebuild the
   document so the text is no longer selectable or editable.
+- **Remove an image watermark** — detect images that repeat across pages,
+  preview them, and remove the one you choose from every page while keeping the
+  text and all other content intact.
 - Three image-quality levels (Low 96 DPI, Medium 150 DPI, High 300 DPI) for both
   conversion tools.
 - Preserves the original page content for extract/split/merge (no rasterizing or
@@ -72,6 +75,7 @@ PDF Forge Main menu:
   2. Merge multiple PDFs
   3. PDF to images (PNG)
   4. PDF to image-only PDF
+  5. Remove image watermark
   0. Exit
 ```
 
@@ -272,6 +276,42 @@ Main menu -> 4 (PDF to image-only PDF) -> 1 (Single PDF)
   Output image quality [2]: 2
   -> C:\docs\contract_image.pdf   (rasterized, not editable)
 ```
+
+### Remove image watermark
+
+Selecting `5` in the main menu removes an **image-based** watermark that repeats
+across pages (for example a site/scanlation badge stamped on every page). The
+text layer and all other content are preserved.
+
+How it works:
+
+1. Enter the source PDF path.
+2. PDF Forge scans the document and lists the images that repeat across pages,
+   ranked by how many pages they cover (the watermark is usually the top
+   candidate at or near 100%).
+3. A **preview PNG** of each candidate is written to a temporary folder so you
+   can open them and confirm which image is the watermark before removing
+   anything.
+4. Choose the candidate(s) to remove (e.g. `1`, or `1,3` for several).
+5. Review the summary and pick the output path (Enter accepts
+   `<source>_nowatermark.pdf` beside the source).
+6. Confirm. The watermark's paint calls are removed from every page, content
+   streams are recompressed, and a new file is written. The original is never
+   modified.
+
+```
+Main menu -> 5 (Remove image watermark)
+  Source PDF path: C:\books\volume.pdf
+  Watermark candidates:
+    [1] 899x674px  on 231/231 pages (100%) - preview: candidate_1.png
+  Watermark(s) to remove: 1
+  -> C:\books\volume_nowatermark.pdf
+```
+
+**Limits:** this only removes image watermarks that repeat across pages. It
+cannot remove text-based watermarks, optional-content layers, or a watermark
+that is baked into a scanned/flattened page image. Because you confirm the
+candidate from a preview, legitimate repeated logos are not removed by accident.
 
 ## Page-selection examples
 
