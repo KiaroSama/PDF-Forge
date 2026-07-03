@@ -3082,13 +3082,12 @@ def operation_remove_watermark() -> None:
         sel_prompt = question_prompt(
             "Watermark(s) to remove",
             details="e.g. 1 or 1,3",
-            back="cancel=0, quit=exit",
         )
         indices: List[int] = []
         while True:
             raw = _input(sel_prompt).strip()
             if raw == "0" or raw == "":
-                print_warning("Cancelled. Returning to menu.")
+                print_warning("Returning to menu.")
                 return
             if raw.lower() in ("exit", "quit"):
                 raise _ExitRequested()

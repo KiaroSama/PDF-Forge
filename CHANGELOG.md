@@ -66,6 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Operation titles are shown as plain headings (no `== ... ==` decoration).
 
 ### Fixed
+- Consistent Back control: the watermark selection prompt now shows the standard
+  orange `back=0` hint (was `cancel=0`), matching every other prompt. `0` goes
+  back exactly one level everywhere.
 - Merge back navigation: the merge submenu is now the single Back hub for the
   whole operation. Pressing `0` at any step (source picker, output path) or
   cancelling at confirmation returns to the merge submenu instead of jumping
