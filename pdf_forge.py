@@ -2032,16 +2032,17 @@ def operation_merge_pdfs() -> None:
         if choice == "1":
             mode = "files"
             sources = prompt_merge_source_files()
-            break
-        if choice == "2":
+        elif choice == "2":
             mode = "folder"
             sources = prompt_merge_source_folder()
+        else:
+            print_error("Invalid option. Please choose 1, 2, or 0.")
+            continue
+        if sources:
             break
-        print_error("Invalid option. Please choose 1, 2, or 0.")
-
-    if not sources:
-        logger.info("Merge cancelled before source selection completed.")
-        return
+        # The source picker returned Back (0): go back one step to this
+        # submenu instead of jumping all the way to the main menu.
+        logger.info("Merge source picker cancelled; re-showing the merge menu.")
 
     logger.info(
         "Merge source selected: mode=%s files=%d", mode, len(sources)
@@ -2139,6 +2140,39 @@ def prompt_image_quality() -> Optional[int]:
             logger.info("Image quality selected: %s (%d DPI).", quality, dpi)
             return dpi
         print_error("Invalid quality. Please choose 1, 2, or 3.")
+
+
+def prompt_source_folder_pdfs() -> Optional[List[Path]]:
+    """Prompt for a folder and return its PDFs in natural order, or None (Back).
+
+    Used by the batch image tools. Requires at least one PDF directly inside the
+    folder (non-recursive). Entering ``0`` goes back one step.
+    """
+    prompt = question_prompt("Folder containing PDFs")
+    while True:
+        raw = _input(prompt)
+        cleaned = strip_surrounding_quotes(raw)
+        if cleaned == "0":
+            return None
+        if cleaned == "":
+            print_error("No folder entered. Please try again.")
+            continue
+        if cleaned.lower() in ("exit", "quit"):
+            raise _ExitRequested()
+
+        folder = Path(cleaned)
+        if not folder.exists():
+            print_error(f"Path does not exist: {cleaned}")
+            continue
+        if not folder.is_dir():
+            print_error("The path is not a folder.")
+            continue
+
+        pdfs = discover_pdfs_in_folder(folder)
+        if not pdfs:
+            print_error("No PDF files were found in that folder.")
+            continue
+        return pdfs
 
 
 def operation_images_all_pages() -> None:
@@ -2299,6 +2333,74 @@ def _render_pngs_and_report(pdf, pages_zero_based: Sequence[int], out_dir: Path,
     logger.info("PDF-to-images complete: images=%d dir='%s'", len(created), out_dir)
 
 
+def operation_images_batch_folder() -> None:
+    """Batch: render every page of every PDF in a folder to PNG images.
+
+    Each PDF is converted independently into its own ``<name>_images`` folder.
+    A failure on one file is reported and skipped without stopping the batch.
+    """
+    reset_questions()
+    print_heading("\nPDF to images: batch folder")
+    logger.info("Operation started: PDF to images (batch folder).")
+
+    pdfs = prompt_source_folder_pdfs()
+    if pdfs is None:
+        return
+
+    dpi = prompt_image_quality()
+    if dpi is None:
+        return
+
+    folder = pdfs[0].parent
+    print_heading("\nSummary")
+    print_kv("Folder", folder, Color.CYAN)
+    print_kv("PDF files", len(pdfs), Color.MAGENTA)
+    print_kv("Image format", "PNG", Color.ORANGE)
+    print_kv("Quality", f"{dpi} DPI", Color.PINK)
+    print_kv("Per-file output", "<name>_images folder beside each PDF", Color.AQUA)
+    print(colorize("\n  Files:", Color.GRAY))
+    _print_merge_order(pdfs)
+
+    if not ask_yes_no("Convert all these PDFs to images?", default_yes=True):
+        print_warning("Cancelled. Returning to menu.")
+        logger.info("Batch image conversion cancelled at confirmation.")
+        return
+
+    logger.info("Batch image start: folder='%s' files=%d dpi=%d", folder, len(pdfs), dpi)
+    ok = failed = total_images = 0
+    for index, src in enumerate(pdfs, start=1):
+        print_info(f"[{index}/{len(pdfs)}] {src.name}")
+        try:
+            pdf, page_count = open_pdfium_document(src, password_prompt=prompt_password)
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(f"  Skipped (could not open): {exc}")
+            logger.error("Batch image: failed to open '%s': %s", src, exc)
+            failed += 1
+            continue
+        try:
+            out_dir = unique_dir_path(default_images_output_dir(src))
+            created = render_pages_to_pngs(
+                pdf, list(range(page_count)), out_dir, dpi,
+                progress=lambda c, t: _print_progress("  Rendering", c, t),
+            )
+            total_images += len(created)
+            ok += 1
+            print_success(f"  -> {len(created)} image(s) in {out_dir.name}")
+        except Exception as exc:  # noqa: BLE001 - keep the batch going
+            print_error(f"  Failed: {exc}")
+            logger.exception("Batch image render failed for '%s'", src)
+            failed += 1
+        finally:
+            pdf.close()
+
+    print_success(
+        f"Done. Converted {ok} file(s), {failed} failed, {total_images} image(s) total."
+    )
+    logger.info(
+        "Batch image complete: ok=%d failed=%d images=%d", ok, failed, total_images
+    )
+
+
 def _show_pdf_to_images_menu() -> None:
     """Render the PDF-to-images submenu in the Page tools submenu style."""
     print()
@@ -2306,6 +2408,7 @@ def _show_pdf_to_images_menu() -> None:
     print(f"  {colorize('1.', Color.LIGHT_BLUE)} All pages to PNG "
           f"{colorize('[1]', Color.GREEN)}")
     print(f"  {colorize('2.', Color.LIGHT_BLUE)} Selected pages to PNG")
+    print(f"  {colorize('3.', Color.LIGHT_BLUE)} Batch: all PDFs in a folder to PNG")
     print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
     print()
 
@@ -2336,8 +2439,10 @@ def pdf_to_images_menu() -> None:
                 operation_images_all_pages()
             elif choice == "2":
                 operation_images_selected_pages()
+            elif choice == "3":
+                operation_images_batch_folder()
             else:
-                print_error("Invalid option. Please choose 1, 2, or 0.")
+                print_error("Invalid option. Please choose 1, 2, 3, or 0.")
                 continue
         except KeyboardInterrupt:
             print_warning("\nOperation interrupted. Returning to menu.")
@@ -2345,10 +2450,10 @@ def pdf_to_images_menu() -> None:
 
 
 def operation_pdf_to_image_pdf() -> None:
-    """Rasterize a whole PDF and rebuild it as an image-only (non-editable) PDF."""
+    """Rasterize a single PDF and rebuild it as an image-only (non-editable) PDF."""
     reset_questions()
-    print_heading("\nPDF to image-only PDF")
-    logger.info("Operation started: PDF to image-only PDF.")
+    print_heading("\nPDF to image-only PDF: single file")
+    logger.info("Operation started: PDF to image-only PDF (single file).")
 
     try:
         source = prompt_source_pdf()
@@ -2416,6 +2521,125 @@ def operation_pdf_to_image_pdf() -> None:
         logger.info("Image-only PDF complete: output='%s' pages=%d", out_path, written)
     finally:
         pdf.close()
+
+
+def operation_image_pdf_batch_folder() -> None:
+    """Batch: rasterize every PDF in a folder into its own image-only PDF.
+
+    Each PDF becomes ``<name>_image.pdf`` beside it. A failure on one file is
+    reported and skipped without stopping the batch.
+    """
+    reset_questions()
+    print_heading("\nPDF to image-only PDF: batch folder")
+    logger.info("Operation started: PDF to image-only PDF (batch folder).")
+
+    pdfs = prompt_source_folder_pdfs()
+    if pdfs is None:
+        return
+
+    dpi = prompt_image_quality()
+    if dpi is None:
+        return
+
+    folder = pdfs[0].parent
+    print_heading("\nSummary")
+    print_kv("Folder", folder, Color.CYAN)
+    print_kv("PDF files", len(pdfs), Color.MAGENTA)
+    print_kv("Quality", f"{dpi} DPI", Color.PINK)
+    print_kv("Result", "image-only PDF per file (not editable)", Color.LIME)
+    print_kv("Per-file output", "<name>_image.pdf beside each PDF", Color.AQUA)
+    print(colorize("\n  Files:", Color.GRAY))
+    _print_merge_order(pdfs)
+
+    print_warning(
+        "Each output will be rasterized: text becomes images and is no longer "
+        "selectable or editable. This usually increases the file size."
+    )
+    if not ask_yes_no("Convert all these PDFs to image-only PDFs?", default_yes=True):
+        print_warning("Cancelled. Returning to menu.")
+        logger.info("Batch image-only PDF cancelled at confirmation.")
+        return
+
+    logger.info(
+        "Batch image-only PDF start: folder='%s' files=%d dpi=%d", folder, len(pdfs), dpi
+    )
+    ok = failed = total_pages = 0
+    for index, src in enumerate(pdfs, start=1):
+        print_info(f"[{index}/{len(pdfs)}] {src.name}")
+        try:
+            pdf, page_count = open_pdfium_document(src, password_prompt=prompt_password)
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(f"  Skipped (could not open): {exc}")
+            logger.error("Batch image-only PDF: failed to open '%s': %s", src, exc)
+            failed += 1
+            continue
+        try:
+            out_path = unique_file_path(default_image_pdf_output(src))
+            written = render_pdf_to_image_pdf(
+                pdf, page_count, out_path, dpi,
+                progress=lambda c, t: _print_progress("  Rasterizing", c, t),
+            )
+            total_pages += written
+            ok += 1
+            print_success(f"  -> {out_path.name} ({written} page(s))")
+        except Exception as exc:  # noqa: BLE001 - keep the batch going
+            print_error(f"  Failed: {exc}")
+            logger.exception("Batch image-only PDF failed for '%s'", src)
+            failed += 1
+        finally:
+            pdf.close()
+
+    print_success(
+        f"Done. Converted {ok} file(s), {failed} failed, {total_pages} page(s) total."
+    )
+    logger.info(
+        "Batch image-only PDF complete: ok=%d failed=%d pages=%d", ok, failed, total_pages
+    )
+
+
+def _show_image_pdf_menu() -> None:
+    """Render the image-only-PDF submenu in the Page tools submenu style."""
+    print()
+    print(colorize(f"{APP_NAME} PDF to image-only PDF:", Color.BOLD + Color.LIGHT_BLUE))
+    print(f"  {colorize('1.', Color.LIGHT_BLUE)} Single PDF "
+          f"{colorize('[1]', Color.GREEN)}")
+    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Batch: all PDFs in a folder")
+    print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
+    print()
+
+
+def pdf_to_image_pdf_menu() -> None:
+    """Run the image-only-PDF submenu loop (mirrors the Page tools submenu)."""
+    while True:
+        _show_image_pdf_menu()
+        choice = _input(
+            colorize("Select an option ", Color.BOLD)
+            + colorize("[1]", Color.GREEN)
+            + " "
+            + back_text("back=0, quit=exit")
+            + colorize(": ", Color.WHITE)
+        ).strip().lower()
+
+        if choice == "":
+            choice = "1"  # Enter selects option 1.
+
+        if choice == "0":
+            return
+        if choice in ("exit", "quit"):
+            raise _ExitRequested()
+
+        logger.debug("Image-only-PDF menu selection: '%s'", choice)
+        try:
+            if choice == "1":
+                operation_pdf_to_image_pdf()
+            elif choice == "2":
+                operation_image_pdf_batch_folder()
+            else:
+                print_error("Invalid option. Please choose 1, 2, or 0.")
+                continue
+        except KeyboardInterrupt:
+            print_warning("\nOperation interrupted. Returning to menu.")
+            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
 
 
 # --------------------------------------------------------------------------- #
@@ -2514,7 +2738,7 @@ def main_menu() -> int:
             elif choice == "3":
                 pdf_to_images_menu()
             elif choice == "4":
-                operation_pdf_to_image_pdf()
+                pdf_to_image_pdf_menu()
             else:
                 print_error("Invalid option. Please choose 1, 2, 3, 4, or 0.")
                 continue

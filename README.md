@@ -190,6 +190,7 @@ Page tools):
 PDF Forge PDF to images:
   1. All pages to PNG [1]
   2. Selected pages to PNG
+  3. Batch: all PDFs in a folder to PNG
   0. Back
 ```
 
@@ -211,6 +212,16 @@ PDF Forge PDF to images:
 4. Review the summary and pick the output folder.
 5. Confirm. Each selected page is rendered to its own PNG.
 
+**Sub-option 3 — Batch: all PDFs in a folder to PNG**
+
+1. Enter a folder path. Every `*.pdf` directly inside it (non-recursive, natural
+   order) is processed.
+2. Choose the output image quality (applied to all files).
+3. Review the summary (folder, file count, quality) and confirm.
+4. Every page of every PDF is rendered. Each PDF gets its own
+   `<name>_images` folder beside it. A file that cannot be opened is reported
+   and skipped; the batch continues, and totals are shown at the end.
+
 Each PNG is named after its page number, so page 2 becomes `2.png`. Images are
 written into a folder named `<source>_images` beside the source PDF (a unique
 folder such as `<source>_images_2` is used if one already exists).
@@ -224,10 +235,19 @@ Main menu -> 3 (PDF to images) -> 1 (All pages to PNG)
 
 ### PDF to image-only PDF
 
-Selecting `4` in the main menu rasterizes an entire PDF and rebuilds it as an
-image-only document. This makes the content non-editable: the text becomes
-images and is no longer selectable or searchable. The output is typically larger
-than the source.
+Selecting `4` in the main menu rasterizes PDFs and rebuilds them as image-only
+documents. This makes the content non-editable: the text becomes images and is
+no longer selectable or searchable. The output is typically larger than the
+source. It opens a submenu (same style as Page tools):
+
+```
+PDF Forge PDF to image-only PDF:
+  1. Single PDF [1]
+  2. Batch: all PDFs in a folder
+  0. Back
+```
+
+**Sub-option 1 — Single PDF**
 
 1. Enter the source PDF path.
 2. Choose the output image quality.
@@ -236,8 +256,18 @@ than the source.
 4. Confirm. Every page is rasterized at the chosen quality and combined into one
    PDF.
 
+**Sub-option 2 — Batch: all PDFs in a folder**
+
+1. Enter a folder path. Every `*.pdf` directly inside it (non-recursive, natural
+   order) is processed.
+2. Choose the output image quality (applied to all files).
+3. Review the summary and confirm.
+4. Each PDF is rasterized into its own `<name>_image.pdf` beside it. A file that
+   cannot be opened is reported and skipped; the batch continues, and totals are
+   shown at the end.
+
 ```
-Main menu -> 4 (PDF to image-only PDF)
+Main menu -> 4 (PDF to image-only PDF) -> 1 (Single PDF)
   Source PDF path: C:\docs\contract.pdf
   Output image quality [2]: 2
   -> C:\docs\contract_image.pdf   (rasterized, not editable)

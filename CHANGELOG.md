@@ -13,8 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Selected pages to PNG — renders a chosen page selection.
   - Each PNG is named after its page number (page 2 -> `2.png`), written into a
     `<source>_images` folder beside the source.
-- **PDF to image-only PDF** main-menu tool that rasterizes every page and
-  rebuilds the document so the text is no longer selectable or editable.
+- **PDF to image-only PDF** main-menu tool (submenu: single file or batch)
+  that rasterizes every page and rebuilds the document so the text is no longer
+  selectable or editable.
+- **Batch folder mode** for both conversion tools: point at a folder and convert
+  every PDF in it (natural order, non-recursive) in one run. Each PDF is
+  processed independently into its own `<name>_images` folder or
+  `<name>_image.pdf`; a file that fails to open is reported and skipped without
+  stopping the batch.
 - Three image-quality levels for both conversion tools: Low (96 DPI), Medium
   (150 DPI, default), and High (300 DPI).
 - New runtime dependencies `pypdfium2` (page rendering) and `Pillow` (image
@@ -31,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped `pypdf` from 5.1.0 to 6.14.2. The only breaking change in pypdf 6.0
   was dropping Python 3.8 support, which does not affect this project
   (Python 3.10+ is required). All APIs used here are unchanged.
+- Operation titles are shown as plain headings (no `== ... ==` decoration).
+
+### Fixed
+- In the merge flow, pressing `0` (Back) while adding source files now returns
+  to the merge submenu instead of jumping all the way to the main menu.
 
 ## [1.2.0] - 2026-06-30
 
