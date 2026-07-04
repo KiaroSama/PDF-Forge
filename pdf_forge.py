@@ -1875,7 +1875,7 @@ def _choose_output_file(default_path: Path, source: Path) -> Optional[Path]:
     Guarantees the returned path never resolves to the source PDF and never
     overwrites an existing file.
     """
-    prompt = question_prompt("Output", default=f"{default_path.name} beside source")
+    prompt = question_prompt("Output Path", default=f"{default_path.name} beside source")
     while True:
         raw = _input(prompt)
         cleaned = strip_surrounding_quotes(raw)
@@ -2256,7 +2256,7 @@ def _choose_output_file_for_merge(default_path: Path,
     Guarantees the result never resolves to any source PDF and never overwrites
     an existing file.
     """
-    prompt = question_prompt("Output", default=f"{default_path.name}")
+    prompt = question_prompt("Output Path", default=f"{default_path.name}")
     while True:
         raw = _input(prompt)
         cleaned = strip_surrounding_quotes(raw)
@@ -3082,11 +3082,14 @@ def operation_remove_watermark() -> None:
         sel_prompt = question_prompt(
             "Watermark(s) to remove",
             details="e.g. 1 or 1,3",
+            default="1",
         )
         indices: List[int] = []
         while True:
             raw = _input(sel_prompt).strip()
-            if raw == "0" or raw == "":
+            if raw == "":
+                raw = "1"  # Enter selects candidate 1 (the top match).
+            if raw == "0":
                 print_warning("Returning to menu.")
                 return
             if raw.lower() in ("exit", "quit"):

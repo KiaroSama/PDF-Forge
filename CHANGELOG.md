@@ -64,6 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was dropping Python 3.8 support, which does not affect this project
   (Python 3.10+ is required). All APIs used here are unchanged.
 - Operation titles are shown as plain headings (no `== ... ==` decoration).
+- The file-output prompt is now labelled "Output Path", and the watermark
+  candidate selection defaults to `1` (Enter picks the top match).
 
 ### Fixed
 - Consistent Back control: the watermark selection prompt now shows the standard
