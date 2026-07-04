@@ -1729,7 +1729,7 @@ def _extract_single_file(reader, source: Path, total_pages: int, group: "PageGro
     print_kv("Total source pages", total_pages, Color.GOLD)
     print_kv("Selected pages", summarize_ranges(group.pages), Color.LIME)
     print_kv("Pages to extract", len(group.pages), Color.ORANGE)
-    print_kv("Default output", default_path, Color.AQUA)
+    print_kv("Default Output Path", default_path, Color.AQUA)
 
     out_path = _choose_output_file(default_path, source)
     if out_path is None:
@@ -2323,7 +2323,7 @@ def _print_merge_summary(
     print_kv("Total PDFs", len(sources), Color.MAGENTA)
     print_kv("Total pages", total_pages, Color.GOLD)
     print_kv("Sorting mode", _describe_merge_sort_mode(mode), Color.LIME)
-    print_kv("Output path", out_path, Color.AQUA)
+    print_kv("Output Path", out_path, Color.AQUA)
     print(colorize("\n  Final merge order:", Color.GRAY))
     _print_merge_order(sources)
 
@@ -2825,7 +2825,7 @@ def operation_pdf_to_image_pdf() -> None:
         print_kv("Total source pages", total_pages, Color.GOLD)
         print_kv("Quality", f"{dpi} DPI", Color.PINK)
         print_kv("Result", "image-only PDF (not editable)", Color.LIME)
-        print_kv("Default output", default_path, Color.AQUA)
+        print_kv("Default Output Path", default_path, Color.AQUA)
 
         out_path = _choose_output_file(default_path, source)
         if out_path is None:
@@ -3121,7 +3121,7 @@ def operation_remove_watermark() -> None:
                 + colorize(f"{c.width}x{c.height}px on {len(c.pages)} page(s)", Color.LIME)
             )
         print_kv("Pages affected", len(affected_pages), Color.GOLD)
-        print_kv("Output", out_path, Color.AQUA)
+        print_kv("Output Path", out_path, Color.AQUA)
         logger.info(
             "Watermark removal chosen: candidates=%s pages=%d output='%s'",
             indices, len(affected_pages), out_path,
@@ -3238,7 +3238,7 @@ def operation_delete_pages_single() -> None:
     print_kv("Total source pages", total_pages, Color.GOLD)
     print_kv("Pages to delete", f"{selection_text}  ({len(present)} page(s))", Color.RED)
     print_kv("Pages remaining", len(kept), Color.LIME)
-    print_kv("Default output", default_path, Color.AQUA)
+    print_kv("Default Output Path", default_path, Color.AQUA)
 
     out_path = _choose_output_file(default_path, source)
     if out_path is None:
