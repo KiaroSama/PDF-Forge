@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A task that fails while the queue runs is reported and skipped without stopping
   the remaining tasks; each task prints its own result as it completes.
 - Output paths are resolved when a task is queued.
+- **Internal restructure (no behavior change):** the single `pdf_forge.py`
+  (~3.7k lines) was split by responsibility into a `pdf_forge/` package
+  (`core`, `pdf_io`, `render`, `watermark`, `ui`, `prompts`, `taskqueue`,
+  `ops_*`, `menus`, `app`). Run it with `python -m pdf_forge`; `Run.ps1` was
+  updated accordingly. The public API used by the tests is unchanged.
 
 ### Removed
 - Unused internal helpers with no call sites (`_format_pages`, `print_prompt_line`,

@@ -66,7 +66,7 @@ On the first run the launcher will:
 You can also run the application directly once the environment exists:
 
 ```powershell
-.\.venv\Scripts\python.exe pdf_forge.py
+.\.venv\Scripts\python.exe -m pdf_forge
 ```
 
 ## Menus
@@ -497,7 +497,16 @@ captures `DEBUG` and above while the console stays quiet.
 
 ```
 Run.ps1               PowerShell launcher (the only launcher)
-pdf_forge.py          Main application
+pdf_forge/            Main application package (run with: python -m pdf_forge)
+  __main__.py         Entry point
+  app.py              main()
+  menus.py            Menu rendering and the main loop
+  taskqueue.py        Batch task queue (queue, summary, run)
+  ops_*.py            Operations: pages, merge, convert, watermark
+  prompts.py          Interactive prompts and output-path pickers
+  core.py             Pure logic: page parsing, chunking, filename rules
+  pdf_io.py render.py watermark.py   I/O adapters (pypdf, pdfium, watermark)
+  ui.py logsetup.py constants.py     Terminal UI, logging, constants
 requirements.txt      Python runtime dependencies
 requirements-dev.txt  Development dependencies (pytest)
 README.md             This file

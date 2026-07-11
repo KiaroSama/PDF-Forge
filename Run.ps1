@@ -2,7 +2,7 @@
     PDF Forge - PowerShell launcher.
 
     Responsibilities:
-      * Resolve its own directory and run pdf_forge.py from there.
+      * Resolve its own directory and run the pdf_forge package from there.
       * Verify Python 3.10+ is available (prefers 'py', then 'python').
       * Create a local .venv on first run and install requirements once.
       * Use UTF-8 so Unicode / Persian output and paths work correctly.
@@ -51,7 +51,7 @@ function Fail ($msg) {
 
 # --- Resolve paths relative to this script ------------------------------- #
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$MainScript  = Join-Path $ScriptDir 'pdf_forge.py'
+$MainPackage = Join-Path $ScriptDir 'pdf_forge'
 $Requirements = Join-Path $ScriptDir 'requirements.txt'
 $VenvDir     = Join-Path $ScriptDir '.venv'
 $VenvPython  = Join-Path $VenvDir 'Scripts\python.exe'
@@ -59,8 +59,8 @@ $StampFile   = Join-Path $VenvDir '.deps_installed'
 
 Write-Good 'PDF Forge launcher starting...'
 
-if (-not (Test-Path -LiteralPath $MainScript)) {
-    Fail "Main application file not found: $MainScript"
+if (-not (Test-Path -LiteralPath (Join-Path $MainPackage '__init__.py'))) {
+    Fail "Main application package not found: $MainPackage"
 }
 
 # --- Locate a suitable base Python (3.10+) ------------------------------- #
@@ -133,12 +133,19 @@ if ($needInstall -and (Test-Path -LiteralPath $Requirements)) {
 Write-Good 'Starting PDF Forge...'
 Write-Host ''
 
-if ($AppArgs -and $AppArgs.Count -gt 0) {
-    & $VenvPython $MainScript @AppArgs
-} else {
-    & $VenvPython $MainScript
+# Run as a module from the script directory so `import pdf_forge` resolves
+# regardless of the caller's working directory.
+Push-Location -LiteralPath $ScriptDir
+try {
+    if ($AppArgs -and $AppArgs.Count -gt 0) {
+        & $VenvPython -m pdf_forge @AppArgs
+    } else {
+        & $VenvPython -m pdf_forge
+    }
+    $exitCode = $LASTEXITCODE
+} finally {
+    Pop-Location
 }
-$exitCode = $LASTEXITCODE
 
 Write-Host ''
 if ($exitCode -ne 0) {

@@ -291,7 +291,7 @@ def test_temp_cleanup_on_write_failure(tmp_path, monkeypatch):
     def boom(*_args, **_kwargs):
         raise app.PdfOpenError("simulated validation failure")
 
-    monkeypatch.setattr(app, "_validate_written_pdf", boom)
+    monkeypatch.setattr(app.pdf_io, "_validate_written_pdf", boom)
 
     with pytest.raises(app.PdfOpenError):
         app.write_pages_to_pdf(reader, [0, 1], out)
@@ -487,7 +487,7 @@ def test_merge_temp_cleanup_on_write_failure(tmp_path, monkeypatch):
     def boom(*_args, **_kwargs):
         raise app.PdfOpenError("simulated merge validation failure")
 
-    monkeypatch.setattr(app, "_validate_merged_pdf", boom)
+    monkeypatch.setattr(app.pdf_io, "_validate_merged_pdf", boom)
 
     with pytest.raises(app.PdfOpenError):
         app.write_merged_pdfs_to_pdf(readers, out)
@@ -594,7 +594,7 @@ def test_png_temp_cleanup_on_failure(tmp_path, monkeypatch):
     def boom(*_args, **_kwargs):
         raise app.PdfOpenError("simulated image validation failure")
 
-    monkeypatch.setattr(app, "_validate_image_file", boom)
+    monkeypatch.setattr(app.render, "_validate_image_file", boom)
     try:
         with pytest.raises(app.PdfOpenError):
             app.render_pages_to_pngs(pdf, [0], out_dir, dpi=96)
