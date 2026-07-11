@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their native format (zero loss); the seven JPEG levels (Very low 40 ..
   Ultra 95, plus Custom 1-100) re-encode instead, with alpha/CMYK images
   converted safely.
+- **Unlock PDF** main-menu tool (option 9): removes a PDF's open password and
+  permission restrictions into a new copy (the original is never modified).
+  An open password must be entered by the user (this is not password
+  cracking); owner-only restrictions - forbidding printing, copying, editing,
+  annotating, form filling, or page assembly - are lifted without a password,
+  and the summary lists exactly which actions were restricted. A PDF that is
+  not locked reports that there is nothing to unlock.
 
 ### Changed
 - **Single PDF engine: PyMuPDF (MuPDF).** Every operation - page tools

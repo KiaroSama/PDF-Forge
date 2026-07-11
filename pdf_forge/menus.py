@@ -10,6 +10,7 @@ from .ops_merge import *  # noqa: F401,F403
 from .ops_convert import *  # noqa: F401,F403
 from .ops_watermark import *  # noqa: F401,F403
 from .ops_compress import *  # noqa: F401,F403
+from .ops_unlock import *  # noqa: F401,F403
 
 __all__ = ['_show_pdf_to_images_menu', 'pdf_to_images_menu', '_show_image_pdf_menu', 'pdf_to_image_pdf_menu', '_show_delete_pages_menu', 'delete_pages_menu', '_show_compress_menu', 'compress_menu', 'show_menu', 'show_page_tools_menu', 'page_tools_menu', 'main_menu']
 
@@ -209,6 +210,7 @@ def show_menu() -> None:
     print(f"  {colorize('6.', Color.LIGHT_BLUE)} Delete pages")
     print(f"  {colorize('7.', Color.LIGHT_BLUE)} Compress PDF (reduce file size)")
     print(f"  {colorize('8.', Color.LIGHT_BLUE)} Extract images from PDF")
+    print(f"  {colorize('9.', Color.LIGHT_BLUE)} Unlock PDF (remove password & restrictions)")
     print(f"  {colorize('0.', Color.LIGHT_BLUE)} Exit")
     print()
 
@@ -308,8 +310,10 @@ def main_menu() -> int:
                 compress_menu()
             elif choice == "8":
                 operation_extract_images()
+            elif choice == "9":
+                operation_unlock_pdf()
             else:
-                print_error("Invalid option. Please choose 1-8 or 0.")
+                print_error("Invalid option. Please choose 1-9 or 0.")
                 continue
         except _ExitRequested:
             finalize_queue()

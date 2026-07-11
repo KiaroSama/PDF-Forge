@@ -105,6 +105,7 @@ PDF Forge Main menu:
   6. Delete pages
   7. Compress PDF (reduce file size)
   8. Extract images from PDF
+  9. Unlock PDF (remove password & restrictions)
   0. Exit
 ```
 
@@ -526,6 +527,29 @@ PDF into a folder. The original PDF is never modified.
 
 A text/vector PDF with no embedded raster images reports that there is
 nothing to extract.
+
+### Unlock PDF (remove password & restrictions)
+
+Selecting `9` in the main menu removes a PDF's password and permission
+restrictions, producing a fully unlocked copy. The original is never modified.
+This needs legitimate access — it is not password cracking:
+
+- **Open password** (needed just to open the file): you must enter it. Once
+  provided, the unlocked copy opens with no password.
+- **Owner restrictions** (the file opens freely but forbids printing, copying,
+  editing, annotating, form filling, or page assembly): removed without any
+  password — the summary lists exactly which actions were restricted.
+
+Flow:
+
+1. Enter the source PDF path (you are prompted for the open password only if
+   the file requires one).
+2. The summary shows whether an open password was present and which actions
+   were restricted. If the PDF is not locked at all, you are told there is
+   nothing to unlock.
+3. Pick the output path (Enter accepts `<source>_unlocked.pdf` beside the
+   source); the task is added to the queue and produces a copy that opens
+   freely and allows every action.
 
 ## Page-selection examples
 

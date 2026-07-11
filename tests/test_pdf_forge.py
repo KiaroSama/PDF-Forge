@@ -1099,6 +1099,93 @@ def test_extract_images_none_in_text_pdf(tmp_path):
         doc.close()
 
 
+# --------------------------------------------------------------------------- #
+# Unlock PDF (remove password & restrictions)
+# --------------------------------------------------------------------------- #
+
+def _make_owner_restricted_pdf(path, pages=2):
+    """A PDF that opens freely but forbids copying/editing (owner password)."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    for _ in range(pages):
+        page = doc.new_page()
+        page.insert_text((72, 100), "Protected document body text.")
+    allowed = int(pymupdf.PDF_PERM_ACCESSIBILITY | pymupdf.PDF_PERM_PRINT)
+    doc.save(str(path), encryption=pymupdf.PDF_ENCRYPT_AES_256,
+             owner_pw="ownersecret", permissions=allowed)
+    doc.close()
+    return path
+
+
+def test_denied_permissions_detects_restrictions(tmp_path):
+    import pymupdf
+
+    src = _make_owner_restricted_pdf(tmp_path / "owner.pdf")
+    doc = pymupdf.open(str(src))
+    try:
+        denied = app.denied_permissions(doc)
+    finally:
+        doc.close()
+    assert "copying text/images" in denied
+    assert "editing content" in denied
+    # A plain PDF has no restrictions.
+    plain = make_pdf(tmp_path / "plain.pdf", 2)
+    doc = pymupdf.open(str(plain))
+    try:
+        assert app.denied_permissions(doc) == []
+    finally:
+        doc.close()
+
+
+def test_unlock_removes_owner_restrictions(tmp_path):
+    import pymupdf
+
+    src = _make_owner_restricted_pdf(tmp_path / "owner.pdf", pages=3)
+    doc = pymupdf.open(str(src))          # opens freely (owner restriction only)
+    out = tmp_path / "unlocked.pdf"
+    try:
+        written = app.unlock_pdf_doc(doc, out)
+    finally:
+        doc.close()
+
+    assert written == 3
+    check = pymupdf.open(str(out))
+    try:
+        assert check.page_count == 3
+        assert app.denied_permissions(check) == []   # all restrictions lifted
+    finally:
+        check.close()
+
+
+def test_unlock_removes_open_password(tmp_path):
+    import pymupdf
+
+    base = make_pdf(tmp_path / "base.pdf", 2)
+    doc = pymupdf.open(str(base))
+    src = tmp_path / "locked.pdf"
+    doc.save(str(src), encryption=pymupdf.PDF_ENCRYPT_AES_256,
+             user_pw="openme", owner_pw="owner")
+    doc.close()
+
+    # Must authenticate before unlocking.
+    doc = pymupdf.open(str(src))
+    assert doc.needs_pass
+    doc.authenticate("openme")
+    out = tmp_path / "unlocked.pdf"
+    try:
+        app.unlock_pdf_doc(doc, out)
+    finally:
+        doc.close()
+
+    check = pymupdf.open(str(out))
+    try:
+        assert check.needs_pass == 0     # no password needed anymore
+        assert check.page_count == 2
+    finally:
+        check.close()
+
+
 def test_compress_temp_cleanup_on_failure(tmp_path, monkeypatch):
     src = make_pdf(tmp_path / "doc.pdf", 3)
     out = tmp_path / "fail.pdf"
