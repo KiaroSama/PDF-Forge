@@ -33,10 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a scanned/image-only PDF to PNG or image-only PDF above its own scan DPI
   warns that no detail can be gained (the conversion warning is single-file
   only; batch conversion skips the per-file analysis).
-- **`Install-pdf-forgeCommand.ps1`**: adds the project's `bin` folder (with
-  the `pdf-forge` command shim) to the user PATH, so `pdf-forge` typed in any
-  new terminal launches the app. User-level, idempotent, reversible; re-run
-  after moving the project folder.
+- **`Install-pdf-forgeCommand.ps1`**: registers a `pdf-forge` function in the
+  user's PowerShell profile(s), so `pdf-forge` typed in any new PowerShell
+  window launches the app. No `.cmd` shim and nothing added to PATH.
+  User-level, idempotent, reversible; re-run after moving the project folder.
 
 ### Changed
 - **Single PDF engine: PyMuPDF (MuPDF).** Every operation - page tools
@@ -44,12 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compression, and watermark removal - now runs on PyMuPDF (previously
   pypdf + pypdfium2). Faster on large documents, with the same safety pattern
   (temp file -> validate -> atomic rename) and identical menu behavior.
-- **Watermark removal reimplemented on PyMuPDF.** Repeated images are still
-  grouped by a content signature (so the same watermark stored as a different
-  object on each page is caught), and removal now redacts only each image's
-  bounding box with image-removal enabled while text and vector graphics are
-  explicitly preserved - so a watermark stamped over text disappears without
-  harming the text underneath.
+- **Watermark removal reimplemented on PyMuPDF.** Repeated images are grouped
+  by a content signature (so the same watermark stored as a different object on
+  each page is caught). Removal deletes only the chosen image's paint call
+  (`/Name Do`) from each page's content stream and then sanitizes the page so
+  the now-unused image object is dropped and garbage-collected - it targets
+  *only* that image, leaving text, vector graphics, and any other image
+  (even one the watermark is stamped on top of) untouched, and the output no
+  longer re-detects the removed watermark. Verified on a real 196-page book:
+  watermark gone from every page, 12 full-page illustrations kept, file
+  slightly smaller.
 - Every output PDF is now saved with lossless stream compression and object
   deduplication, so extract/split/merge outputs are often slightly smaller.
 - Image-only PDFs keep each page's original physical size explicitly (the

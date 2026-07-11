@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Optional, Tuple
 
 from .constants import *  # noqa: F401,F403

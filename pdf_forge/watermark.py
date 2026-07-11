@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple
 
@@ -106,15 +107,14 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
                             progress=None) -> int:
     """Remove the chosen repeated images from every page and save a new PDF.
 
-    On each page, images whose signature matches are removed by redacting only
-    their bounding boxes with image removal enabled while text and vector
-    graphics are explicitly preserved - so a watermark stamped over text
-    disappears without touching the text underneath. The result is written
-    safely (temporary file -> validate -> atomic rename). Returns the number of
-    pages modified.
+    On each page, the paint call (``/Name Do``) that draws a matching image is
+    deleted from the page's content stream, then the page's resources are
+    sanitized so the now-unused image object is dropped (and garbage-collected
+    on save). This targets *only* the chosen image: any other image on the page
+    - even one the watermark is stamped on top of - and all text and vector
+    graphics are left untouched. The result is written safely (temporary file
+    -> validate -> atomic rename). Returns the number of pages modified.
     """
-    pymupdf = _import_pymupdf()
-
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -125,19 +125,35 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
 
     for page_index in range(total):
         page = doc[page_index]
-        added = False
-        for entry in page.get_images(full=True):
-            if _image_signature(doc, entry) in targets:
-                for rect in page.get_image_rects(entry[0]):
-                    page.add_redact_annot(rect)
-                    added = True
-        if added:
-            # Remove only images; keep text and line art untouched.
-            page.apply_redactions(
-                images=pymupdf.PDF_REDACT_IMAGE_REMOVE,
-                text=pymupdf.PDF_REDACT_TEXT_NONE,
-                graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
-            )
+        names = [
+            entry[7] for entry in page.get_images(full=True)
+            if _image_signature(doc, entry) in targets
+        ]
+        if not names:
+            if progress is not None:
+                progress(page_index + 1, total)
+            continue
+
+        changed = False
+        for content_xref in page.get_contents():
+            data = doc.xref_stream(content_xref)
+            if data is None:
+                continue
+            new_data = data
+            for name in names:
+                # Drop only the "/Name Do" paint call; the surrounding q/cm/Q
+                # remain and are harmless (they draw nothing on their own).
+                new_data = re.sub(
+                    rb"/" + re.escape(name.encode()) + rb"\s+Do\b", b"", new_data
+                )
+            if new_data != data:
+                doc.update_stream(content_xref, new_data)
+                changed = True
+
+        if changed:
+            # Prune the now-unreferenced image from the page resources so it is
+            # garbage-collected on save and never re-detected as a watermark.
+            page.clean_contents(sanitize=True)
             modified += 1
         if progress is not None:
             progress(page_index + 1, total)
@@ -149,9 +165,9 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
     tmp_path = Path(tmp_name)
     logger.debug("Temporary watermark-removal file: '%s'", tmp_path)
     try:
-        # garbage=4 drops the now-unreferenced watermark image objects; deflate
-        # keeps the file compact without re-encoding retained image pixels.
-        doc.save(str(tmp_path), garbage=4, deflate=True)
+        # garbage=4 drops the now-unreferenced watermark object; use_objstms
+        # keeps the output as compact as the original.
+        doc.save(str(tmp_path), garbage=4, deflate=True, use_objstms=1)
         _validate_written_pdf(tmp_path, expected_pages=total)
         os.replace(tmp_path, out_path)
     except Exception:

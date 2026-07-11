@@ -782,6 +782,46 @@ def test_remove_watermark_keeps_text(tmp_path):
         check.close()
 
 
+def test_remove_watermark_keeps_other_overlapping_image(tmp_path):
+    # A watermark stamped ON TOP of a full-page illustration must be removed
+    # without taking the illustration with it (regression: redaction removed
+    # any image touching the watermark's box).
+    import pymupdf
+    from PIL import Image
+
+    wm = tmp_path / "wm.png"        # small repeated watermark
+    Image.new("RGB", (120, 80), (0, 90, 200)).save(wm)
+    illo = tmp_path / "illo.png"    # unique full-page illustration
+    Image.new("RGB", (600, 800), (30, 160, 60)).save(illo)
+
+    src = tmp_path / "book.pdf"
+    doc = pymupdf.open()
+    for _ in range(3):
+        page = doc.new_page(width=300, height=400)
+        page.insert_image(page.rect, filename=str(illo))            # full page
+        page.insert_image(pymupdf.Rect(90, 150, 210, 230), filename=str(wm))  # on top
+    doc.save(str(src))
+    doc.close()
+
+    doc = app.open_source_pdf(src)
+    out = tmp_path / "clean.pdf"
+    try:
+        candidates, _ = app.scan_watermark_candidates(doc)
+        # The watermark repeats on all 3 pages; the illustration is unique.
+        wm_sig = next(c.signature for c in candidates if c.width == 120)
+        app.remove_watermark_images(doc, [wm_sig], out)
+    finally:
+        doc.close()
+
+    check = pymupdf.open(str(out))
+    try:
+        # Exactly one image (the illustration) survives on each page.
+        sizes = sorted((im[2], im[3]) for im in check[0].get_images(full=True))
+        assert sizes == [(600, 800)]
+    finally:
+        check.close()
+
+
 # --------------------------------------------------------------------------- #
 # Compress PDF: presets, lossy shrink, lossless mode, source integrity
 # --------------------------------------------------------------------------- #

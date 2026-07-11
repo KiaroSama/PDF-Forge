@@ -78,16 +78,18 @@ You can also run the application directly once the environment exists:
 ### Install the `pdf-forge` command (optional)
 
 Run `Install-pdf-forgeCommand.ps1` (right-click → **Run with PowerShell**) to
-add the project's `bin` folder to your **user** PATH. After that, typing
-`pdf-forge` in any new terminal — PowerShell or cmd — launches the app from
-anywhere:
+register a `pdf-forge` function in your PowerShell profile. After that, typing
+`pdf-forge` in any new PowerShell window launches the app from anywhere:
 
-```
-> pdf-forge
+```powershell
+pdf-forge
 ```
 
-- User-level only (no administrator rights), idempotent (safe to re-run), and
-  reversible (remove the single PATH entry it prints).
+- User-level only (no administrator rights), no `.cmd` shim and nothing added
+  to PATH — just a function in your profile.
+- Idempotent (re-running updates it in place) and reversible (delete the block
+  between the `# BEGIN pdf-forge command` / `# END pdf-forge command` markers in
+  your profile).
 - If you move the project folder, run the installer again from the new
   location.
 
@@ -603,8 +605,7 @@ captures `DEBUG` and above while the console stays quiet.
 
 ```
 Run.ps1               PowerShell launcher (the only launcher)
-Install-pdf-forgeCommand.ps1   Adds the pdf-forge command to the user PATH
-bin/pdf-forge.cmd     Command shim used by the PATH installer
+Install-pdf-forgeCommand.ps1   Registers the pdf-forge command (PowerShell profile)
 pdf_forge/            Main application package (run with: python -m pdf_forge)
   __main__.py         Entry point
   app.py              main()
