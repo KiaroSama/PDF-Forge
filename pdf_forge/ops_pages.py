@@ -45,7 +45,7 @@ def operation_extract_pages() -> None:
         logger.error("Failed to open source PDF '%s': %s", source, exc)
         return
 
-    total_pages = len(reader.pages)
+    total_pages = reader.page_count
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
     logger.info("Extract: source='%s' pages=%d", source, total_pages)
 
@@ -212,7 +212,7 @@ def operation_split_chunks() -> None:
         logger.error("Failed to open source PDF '%s': %s", source, exc)
         return
 
-    total_pages = len(reader.pages)
+    total_pages = reader.page_count
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
     logger.info("Split: source='%s' pages=%d", source, total_pages)
 
@@ -416,7 +416,7 @@ def operation_delete_pages_single() -> None:
         logger.error("Failed to open '%s': %s", source, exc)
         return
 
-    total_pages = len(reader.pages)
+    total_pages = reader.page_count
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
 
     # Ask for the pages, rejecting any that do not exist in this document.
@@ -534,7 +534,7 @@ def operation_delete_pages_batch() -> None:
                 failed += 1
                 continue
 
-            total = len(reader.pages)
+            total = reader.page_count
             present, missing, kept = compute_deletion(total, requested)
 
             if not present:

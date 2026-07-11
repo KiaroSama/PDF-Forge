@@ -518,11 +518,14 @@ def test_merge_unicode_persian_paths(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_image_dpi_for_quality():
+    assert app.image_dpi_for_quality("very low") == 72
     assert app.image_dpi_for_quality("low") == 96
     assert app.image_dpi_for_quality("MEDIUM") == 150
     assert app.image_dpi_for_quality("High") == 300
+    assert app.image_dpi_for_quality("very high") == 450
+    assert app.image_dpi_for_quality("ultra") == 600
     with pytest.raises(ValueError):
-        app.image_dpi_for_quality("ultra")
+        app.image_dpi_for_quality("bogus")
 
 
 def test_build_page_image_name():
@@ -541,7 +544,7 @@ def test_render_all_pages_to_pngs(tmp_path):
     from PIL import Image
 
     src = make_pdf(tmp_path / "doc.pdf", 3)
-    pdf, n = app.open_pdfium_document(src)
+    pdf, n = app.open_render_document(src)
     try:
         assert n == 3
         created = app.render_pages_to_pngs(pdf, list(range(n)), tmp_path / "imgs", dpi=96)
@@ -556,7 +559,7 @@ def test_render_all_pages_to_pngs(tmp_path):
 
 def test_render_selected_pages_named_by_page_number(tmp_path):
     src = make_pdf(tmp_path / "doc.pdf", 12)
-    pdf, n = app.open_pdfium_document(src)
+    pdf, n = app.open_render_document(src)
     try:
         # Pages 2 and 10 (0-based indices 1 and 9).
         created = app.render_pages_to_pngs(pdf, [1, 9], tmp_path / "imgs", dpi=96)
@@ -569,7 +572,7 @@ def test_render_selected_pages_named_by_page_number(tmp_path):
 def test_render_pdf_to_image_pdf(tmp_path):
     src = make_pdf(tmp_path / "doc.pdf", 4)
     original_hash = file_hash(src)
-    pdf, n = app.open_pdfium_document(src)
+    pdf, n = app.open_render_document(src)
     out = tmp_path / "image_only.pdf"
     try:
         written = app.render_pdf_to_image_pdf(pdf, n, out, dpi=96)
@@ -588,7 +591,7 @@ def test_render_pdf_to_image_pdf(tmp_path):
 
 def test_png_temp_cleanup_on_failure(tmp_path, monkeypatch):
     src = make_pdf(tmp_path / "doc.pdf", 2)
-    pdf, _n = app.open_pdfium_document(src)
+    pdf, _n = app.open_render_document(src)
     out_dir = tmp_path / "imgs"
 
     def boom(*_args, **_kwargs):
@@ -610,7 +613,7 @@ def test_image_conversion_unicode_persian_paths(tmp_path):
     folder = tmp_path / "اسناد"  # "documents"
     folder.mkdir()
     src = make_pdf(folder / "گزارش.pdf", 2)  # "report"
-    pdf, n = app.open_pdfium_document(src)
+    pdf, n = app.open_render_document(src)
     try:
         created = app.render_pages_to_pngs(pdf, list(range(n)), folder / "تصاویر", dpi=96)
     finally:
@@ -730,3 +733,89 @@ def test_remove_watermark_preserves_other_pages(tmp_path):
     app.remove_watermark_images(reader, [candidates[0].signature], out)
     # Output still opens and keeps its page count (no pages dropped).
     assert len(PdfReader(str(out)).pages) == 3
+
+
+# --------------------------------------------------------------------------- #
+# Compress PDF: presets, lossy shrink, lossless mode, source integrity
+# --------------------------------------------------------------------------- #
+
+def make_photo_pdf(path: Path, pages: int = 2, size=(1600, 1200)) -> Path:
+    """Create an image-heavy PDF (a smooth gradient photo on every page)."""
+    from PIL import Image
+
+    images = []
+    for _ in range(pages):
+        img = Image.new("RGB", size)
+        px = img.load()
+        for x in range(0, size[0], 4):
+            for y in range(0, size[1], 4):
+                c = (x * 255 // size[0], y * 255 // size[1], 128)
+                for dx in range(4):
+                    for dy in range(4):
+                        px[x + dx, y + dy] = c
+        images.append(img)
+    # Pillow embeds RGB images losslessly by default via its PDF writer.
+    images[0].save(path, "PDF", save_all=True, append_images=images[1:],
+                   resolution=150.0)
+    return path
+
+
+def test_compression_presets_shape():
+    # Six named levels; ultra is the lossless-only sentinel.
+    assert set(app.COMPRESSION_PRESETS) == {
+        "very low", "low", "medium", "high", "very high", "ultra"
+    }
+    assert app.COMPRESSION_PRESETS["ultra"] is None
+    # Lossy presets are (jpeg_quality, dpi_target) with sane ordering.
+    q_low, dpi_low = app.COMPRESSION_PRESETS["very low"]
+    q_high, dpi_high = app.COMPRESSION_PRESETS["very high"]
+    assert q_low < q_high and dpi_low < dpi_high
+
+
+def test_format_size():
+    assert app._format_size(512) == "512 B"
+    assert app._format_size(2048) == "2.0 KB"
+    assert app._format_size(3 * 1024 * 1024) == "3.00 MB"
+
+
+def test_compress_pdf_lossy_shrinks_image_pdf(tmp_path):
+    src = make_photo_pdf(tmp_path / "photos.pdf")
+    original_hash = file_hash(src)
+    out = tmp_path / "photos_compressed.pdf"
+
+    quality, dpi = app.COMPRESSION_PRESETS["medium"]
+    stats = app.compress_pdf(src, out, quality, dpi)
+
+    assert out.exists()
+    assert stats["pages"] == 2
+    assert stats["new_size"] < stats["original_size"]
+    assert len(PdfReader(str(out)).pages) == 2
+    # Source must remain byte-for-byte unchanged.
+    assert file_hash(src) == original_hash
+
+
+def test_compress_pdf_ultra_lossless_valid_output(tmp_path):
+    src = make_pdf(tmp_path / "text.pdf", 5)
+    out = tmp_path / "text_compressed.pdf"
+
+    stats = app.compress_pdf(src, out, None, None)  # ultra: lossless only
+
+    assert out.exists()
+    assert stats["pages"] == 5
+    assert len(PdfReader(str(out)).pages) == 5
+
+
+def test_compress_temp_cleanup_on_failure(tmp_path, monkeypatch):
+    src = make_pdf(tmp_path / "doc.pdf", 3)
+    out = tmp_path / "fail.pdf"
+
+    def boom(*_args, **_kwargs):
+        raise app.PdfOpenError("simulated compression validation failure")
+
+    monkeypatch.setattr(app.compress, "_validate_written_pdf", boom)
+
+    with pytest.raises(app.PdfOpenError):
+        app.compress_pdf(src, out, None, None)
+
+    assert not out.exists()
+    assert list(tmp_path.glob(".pdfforge_*")) == []

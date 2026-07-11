@@ -5,6 +5,39 @@ All notable changes to PDF Forge are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-07-11
+
+### Added
+- **Compress PDF** main-menu tool (option 7): shrinks a PDF into a new file
+  while never modifying the original. Every run applies lossless optimization
+  (object deduplication/garbage collection, stream recompression, PDF object
+  streams, and font subsetting). All levels except Ultra additionally
+  downsample embedded images above a DPI cap and re-encode them as JPEG.
+  Bitonal (fax/scan black-and-white) images are never re-encoded. The result
+  line reports old size, new size, and the saving.
+- **Seven quality levels everywhere**: Very low, Low, Medium, High, Very high,
+  Ultra, and Custom. For the conversion tools (PDF to PNG, image-only PDF)
+  they map to render DPI (72/96/150/300/450/600, Custom 30-1200; Enter still
+  selects Medium 150). For compression they map to JPEG quality + image DPI
+  cap (Ultra = lossless only, zero quality change; Enter selects Very high;
+  Custom asks for quality 1-100 and DPI 50-600).
+
+### Changed
+- **New PDF engine: PyMuPDF (MuPDF).** Page operations (extract, split,
+  delete), merging, rendering to PNG, and image-only PDF now run on PyMuPDF
+  instead of pypdf + pypdfium2 - faster on large documents, with the same
+  safety pattern (temp file -> validate -> atomic rename) and identical menu
+  behavior. Watermark removal intentionally stays on pypdf's object model
+  (its content-stream surgery and the byte-identical-images guarantee are
+  tied to it); it will be migrated separately.
+- Every output PDF is now saved with lossless stream compression and object
+  deduplication, so extract/split/merge outputs are often slightly smaller.
+- Image-only PDFs keep each page's original physical size explicitly (the
+  rasterized image is placed on a page of the same dimensions).
+- Dependencies: added `pymupdf` (AGPL-licensed; noted in the README), removed
+  `pypdfium2`, kept `pypdf` (watermark surgery only) and `pillow` (image
+  validation and previews).
+
 ## [1.4.0] - 2026-07-11
 
 ### Added
@@ -173,6 +206,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   virtual environment, and installs dependencies on first run.
 - Automated test suite.
 
+[1.5.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.5.0
 [1.4.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.4.0
 [1.3.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.3.0
 [1.2.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.2.0

@@ -40,7 +40,7 @@ def operation_images_all_pages() -> None:
         return
 
     try:
-        pdf, total_pages = open_pdfium_document(source, password_prompt=prompt_password)
+        pdf, total_pages = open_render_document(source, password_prompt=prompt_password)
     except (PdfOpenError, RuntimeError) as exc:
         print_error(str(exc))
         logger.error("Failed to open '%s' for rendering: %s", source, exc)
@@ -67,7 +67,7 @@ def operation_images_all_pages() -> None:
 
         def _run():
             try:
-                rpdf, _count = open_pdfium_document(
+                rpdf, _count = open_render_document(
                     source, password_prompt=prompt_password
                 )
             except (PdfOpenError, RuntimeError) as exc:
@@ -106,7 +106,7 @@ def operation_images_selected_pages() -> None:
         return
 
     try:
-        pdf, total_pages = open_pdfium_document(source, password_prompt=prompt_password)
+        pdf, total_pages = open_render_document(source, password_prompt=prompt_password)
     except (PdfOpenError, RuntimeError) as exc:
         print_error(str(exc))
         logger.error("Failed to open '%s' for rendering: %s", source, exc)
@@ -159,7 +159,7 @@ def operation_images_selected_pages() -> None:
 
         def _run():
             try:
-                rpdf, _count = open_pdfium_document(
+                rpdf, _count = open_render_document(
                     source, password_prompt=prompt_password
                 )
             except (PdfOpenError, RuntimeError) as exc:
@@ -244,7 +244,7 @@ def operation_images_batch_folder() -> None:
         for index, src in enumerate(pdfs, start=1):
             print_info(f"[{index}/{len(pdfs)}] {src.name}")
             try:
-                pdf, page_count = open_pdfium_document(
+                pdf, page_count = open_render_document(
                     src, password_prompt=prompt_password
                 )
             except (PdfOpenError, RuntimeError) as exc:
@@ -300,7 +300,7 @@ def operation_pdf_to_image_pdf() -> None:
         return
 
     try:
-        pdf, total_pages = open_pdfium_document(source, password_prompt=prompt_password)
+        pdf, total_pages = open_render_document(source, password_prompt=prompt_password)
     except (PdfOpenError, RuntimeError) as exc:
         print_error(str(exc))
         logger.error("Failed to open '%s' for rendering: %s", source, exc)
@@ -328,7 +328,7 @@ def operation_pdf_to_image_pdf() -> None:
         )
         def _run():
             try:
-                rpdf, count = open_pdfium_document(
+                rpdf, count = open_render_document(
                     source, password_prompt=prompt_password
                 )
             except (PdfOpenError, RuntimeError) as exc:
@@ -408,7 +408,7 @@ def operation_image_pdf_batch_folder() -> None:
         for index, src in enumerate(pdfs, start=1):
             print_info(f"[{index}/{len(pdfs)}] {src.name}")
             try:
-                pdf, page_count = open_pdfium_document(
+                pdf, page_count = open_render_document(
                     src, password_prompt=prompt_password
                 )
             except (PdfOpenError, RuntimeError) as exc:

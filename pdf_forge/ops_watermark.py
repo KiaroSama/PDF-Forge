@@ -67,7 +67,7 @@ def operation_remove_watermark() -> None:
         return
 
     try:
-        reader = open_source_pdf(source, password_prompt=prompt_password)
+        reader = open_pypdf_document(source, password_prompt=prompt_password)
     except (PdfOpenError, RuntimeError) as exc:
         print_error(str(exc))
         logger.error("Failed to open '%s': %s", source, exc)

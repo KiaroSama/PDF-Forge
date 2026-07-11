@@ -16,7 +16,78 @@ from .constants import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
-__all__ = ['WatermarkCandidate', '_iter_page_image_xobjects', '_stream_raw_length', '_image_signature', 'scan_watermark_candidates', 'export_watermark_preview', 'remove_watermark_images']
+__all__ = ['open_pypdf_document', 'WatermarkCandidate', '_iter_page_image_xobjects', '_stream_raw_length', '_image_signature', 'scan_watermark_candidates', 'export_watermark_preview', 'remove_watermark_images']
+
+
+def open_pypdf_document(path: Path, password_prompt=None):
+    """Open and validate a source PDF with pypdf, handling encryption.
+
+    The watermark-removal surgery operates on pypdf's object model (content
+    streams, XObjects), so this tool keeps its own pypdf-based opener while the
+    rest of the application uses the PyMuPDF-based ``open_source_pdf``.
+
+    Returns:
+        A ``PdfReader`` ready for reading.
+
+    Raises:
+        PdfOpenError: with a clear message on any failure.
+    """
+    PdfReader, _PdfWriter, PdfReadError = _import_pypdf()
+
+    logger.debug("Opening source PDF (pypdf): '%s'", path)
+    try:
+        reader = PdfReader(str(path))
+    except PdfReadError as exc:
+        logger.error("PDF read error for '%s': %s", path, exc)
+        raise PdfOpenError(f"The PDF appears to be corrupted or unreadable: {exc}") from exc
+    except OSError as exc:
+        logger.error("OS error opening '%s': %s", path, exc)
+        raise PdfOpenError(f"Could not open the file: {exc}") from exc
+    except Exception as exc:  # pypdf can raise various low-level errors
+        logger.error("Failed to parse '%s': %s", path, exc)
+        raise PdfOpenError(f"The PDF could not be parsed: {exc}") from exc
+
+    if getattr(reader, "is_encrypted", False):
+        logger.info("Source PDF is encrypted; attempting empty password.")
+        decrypted = False
+        try:
+            # pypdf returns 0 on failure, 1/2 on success.
+            if reader.decrypt("") != 0:
+                decrypted = True
+        except Exception:  # noqa: BLE001 - treat any decrypt error as failure
+            decrypted = False
+
+        if not decrypted and password_prompt is not None:
+            password = password_prompt()
+            if password is not None:
+                try:
+                    if reader.decrypt(password) != 0:
+                        decrypted = True
+                except Exception:  # noqa: BLE001
+                    decrypted = False
+            # Drop the local reference; the password is never logged or stored.
+            del password
+
+        if not decrypted:
+            raise PdfOpenError(
+                "The PDF is encrypted and could not be decrypted with the "
+                "provided password."
+            )
+        logger.info("Source PDF decrypted successfully.")
+
+    try:
+        page_count = len(reader.pages)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Could not determine page count for '%s': %s", path, exc)
+        raise PdfOpenError(f"The PDF page count could not be determined: {exc}") from exc
+
+    if page_count < 1:
+        logger.error("Source PDF '%s' contains no pages.", path)
+        raise PdfOpenError("The PDF contains no pages.")
+
+    logger.info("Opened source PDF '%s' (%d page(s)).", path, page_count)
+    return reader
+
 
 @dataclass
 class WatermarkCandidate:

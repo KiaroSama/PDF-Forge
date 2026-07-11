@@ -25,8 +25,13 @@ images. The original PDFs are never modified, overwritten, or deleted.
   text and all other content intact.
 - **Delete pages** — remove one or more pages (single values or combined ranges)
   from a single PDF or, in batch, from every PDF in a folder.
-- Three image-quality levels (Low 96 DPI, Medium 150 DPI, High 300 DPI) for both
-  conversion tools.
+- **Compress PDF** — reduce the file size into a new file. Ultra mode is fully
+  lossless (structure optimization and font subsetting only, zero quality
+  change); the other levels also downsample and re-encode embedded images.
+- Seven quality levels everywhere a quality choice appears (Very low, Low,
+  Medium, High, Very high, Ultra, Custom) — for the conversion tools they map
+  to render DPI (72/96/150/300/450/600/custom), for compression to
+  image-recompression strength.
 - Preserves the original page content for extract/split/merge (no rasterizing or
   re-encoding).
 - Writes output safely using temporary files and atomic renames, and never
@@ -38,10 +43,12 @@ images. The original PDFs are never modified, overwritten, or deleted.
 - Python 3.10 or newer (`py` or `python` on the `PATH`).
 - The launcher creates a local virtual environment and installs the
   dependencies automatically on first run:
-  [`pypdf`](https://pypi.org/project/pypdf/) (page tools and merge),
-  [`pypdfium2`](https://pypi.org/project/pypdfium2/) (page rendering), and
-  [`Pillow`](https://pypi.org/project/pillow/) (image encoding). All three ship
-  as prebuilt wheels, so no external tools are required.
+  [`PyMuPDF`](https://pypi.org/project/PyMuPDF/) (the primary PDF engine: page
+  operations, merging, rendering, and compression; AGPL-licensed),
+  [`pypdf`](https://pypi.org/project/pypdf/) (used only by the
+  watermark-removal surgery), and
+  [`Pillow`](https://pypi.org/project/pillow/) (image validation and previews).
+  All three ship as prebuilt wheels, so no external tools are required.
 
 ## How to run it
 
@@ -79,6 +86,7 @@ PDF Forge Main menu:
   4. PDF to image-only PDF
   5. Remove image watermark
   6. Delete pages
+  7. Compress PDF (reduce file size)
   0. Exit
 ```
 
@@ -228,11 +236,13 @@ PDF Forge PDF to images:
 **Sub-option 1 — All pages to PNG**
 
 1. Enter the source PDF path.
-2. Choose the output image quality (`1` Low / `2` Medium / `3` High; Enter =
-   Medium).
+2. Choose the output image quality — seven levels: `1` Very low (72 DPI),
+   `2` Low (96), `3` Medium (150), `4` High (300), `5` Very high (450),
+   `6` Ultra (600), `7` Custom (any DPI from 30 to 1200). Enter = Medium.
 3. Review the summary (source, total pages, quality, output folder) and pick the
    output folder (Enter accepts the default beside the source).
-4. Confirm. Every page is rendered to its own PNG.
+4. The task is added to the queue; every page is rendered to its own PNG when
+   the queue runs.
 
 **Sub-option 2 — Selected pages to PNG**
 
@@ -397,6 +407,56 @@ Main menu -> 6 (Delete pages) -> 2 (Batch), delete 4-6, on a/b/c.pdf:
 Deletion is lossless: the kept pages are copied as-is (no re-encoding), so image
 and text quality is preserved.
 
+### Compress PDF (reduce file size)
+
+Selecting `7` in the main menu compresses a PDF into a smaller new file. The
+original is never modified.
+
+What each level does:
+
+- **Always applied (lossless, zero quality change):** duplicate/unused objects
+  are removed, streams are recompressed, PDF object streams are generated, and
+  embedded fonts are subset to only the glyphs the document actually uses.
+- **Ultra** stops there — the pages are pixel-for-pixel identical.
+- **Very high → Very low** additionally downsample embedded images above a DPI
+  cap and re-encode them as JPEG:
+
+  | Level     | JPEG quality | Image DPI cap | Typical use                     |
+  |-----------|--------------|---------------|---------------------------------|
+  | Ultra     | untouched    | untouched     | zero quality change             |
+  | Very high | 90           | 250           | near-invisible change (default) |
+  | High      | 85           | 200           | prints and reports              |
+  | Medium    | 75           | 150           | screen reading                  |
+  | Low       | 60           | 120           | email attachments               |
+  | Very low  | 40           | 96            | smallest possible file          |
+  | Custom    | 1-100        | 50-600        | your own trade-off              |
+
+- Black-and-white (fax/scan bitonal) images are never re-encoded — recompressing
+  them usually makes quality worse for no gain.
+
+**If the PDF is a scanned/image-only document**, the entire page content *is*
+an image: Ultra saves little, while the lossy levels act on the whole page —
+savings are large but quality loss is visible at the lower levels.
+
+Flow:
+
+1. Enter the source PDF path (size and page count are shown).
+2. Pick the compression level (`Enter` = Very high; `7` = Custom asks for a
+   JPEG quality and a target image DPI).
+3. Review the summary and pick the output path (Enter accepts
+   `<source>_compressed.pdf` beside the source); the task is added to the queue.
+4. When the queue runs, the result line shows the old size, the new size, and
+   the saving (e.g. `126.5 KB -> 39.0 KB (saved 87.4 KB, 69.1%)`).
+
+```
+Main menu -> 7 (Compress PDF)
+  Source PDF path: C:\docs\report.pdf
+  Loaded 'report.pdf' - 48 page(s), 12.40 MB.
+  Compression level [5]: <Enter>
+  Output Path [report_compressed.pdf beside source]: <Enter>
+  Added to queue (#1): Compress report.pdf (very high) -> report_compressed.pdf
+```
+
 ## Page-selection examples
 
 | Input              | Result                                             |
@@ -502,10 +562,11 @@ pdf_forge/            Main application package (run with: python -m pdf_forge)
   app.py              main()
   menus.py            Menu rendering and the main loop
   taskqueue.py        Batch task queue (queue, summary, run)
-  ops_*.py            Operations: pages, merge, convert, watermark
+  ops_*.py            Operations: pages, merge, convert, watermark, compress
   prompts.py          Interactive prompts and output-path pickers
   core.py             Pure logic: page parsing, chunking, filename rules
-  pdf_io.py render.py watermark.py   I/O adapters (pypdf, pdfium, watermark)
+  pdf_io.py render.py compress.py   I/O adapters (PyMuPDF engine)
+  watermark.py        Watermark-removal surgery (pypdf object model)
   ui.py logsetup.py constants.py     Terminal UI, logging, constants
 requirements.txt      Python runtime dependencies
 requirements-dev.txt  Development dependencies (pytest)

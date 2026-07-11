@@ -267,7 +267,7 @@ def _run_merge_with_sources(mode: str, sources: List[Path]) -> None:
         for current in sources:
             reader = open_source_pdf(current, password_prompt=prompt_password)
             readers.append(reader)
-            total_pages += len(reader.pages)
+            total_pages += reader.page_count
     except (PdfOpenError, RuntimeError) as exc:
         print_error(f"Cannot merge: failed to open '{current.name}': {exc}")
         logger.error("Merge aborted; failed to open '%s': %s", current, exc)

@@ -17,7 +17,7 @@ from .ui import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
-__all__ = ['_input', 'ask_yes_no', 'prompt_password', 'prompt_source_pdf', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', 'prompt_source_folder_pdfs']
+__all__ = ['_input', 'ask_yes_no', 'prompt_password', 'prompt_source_pdf', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
 
 def _input(prompt: str) -> str:
     """Read a line of input, treating EOF as a request to exit."""
@@ -204,23 +204,31 @@ def _print_merge_order(sources: Sequence[Path], limit: int = 20) -> None:
 def prompt_image_quality() -> Optional[int]:
     """Ask for the output image quality; return the render DPI or None (Back).
 
+    Seven levels: six named DPI presets plus Custom (a free DPI value).
     Presented as an inline numbered question (same style as other operation
     prompts). Medium is the default: pressing Enter selects it.
     """
     prompt = question_prompt(
         "Output image quality",
         details=(
-            f"1=Low ({IMAGE_QUALITY_DPI['low']} DPI), "
-            f"2=Medium ({IMAGE_QUALITY_DPI['medium']} DPI), "
-            f"3=High ({IMAGE_QUALITY_DPI['high']} DPI)"
+            f"1=Very low ({IMAGE_QUALITY_DPI['very low']}), "
+            f"2=Low ({IMAGE_QUALITY_DPI['low']}), "
+            f"3=Medium ({IMAGE_QUALITY_DPI['medium']}), "
+            f"4=High ({IMAGE_QUALITY_DPI['high']}), "
+            f"5=Very high ({IMAGE_QUALITY_DPI['very high']}), "
+            f"6=Ultra ({IMAGE_QUALITY_DPI['ultra']} DPI), "
+            "7=Custom"
         ),
-        default="2",
+        default="3",
     )
-    choices = {"1": "low", "2": "medium", "3": "high"}
+    choices = {
+        "1": "very low", "2": "low", "3": "medium",
+        "4": "high", "5": "very high", "6": "ultra",
+    }
     while True:
         raw = _input(prompt).strip().lower()
         if raw == "":
-            raw = "2"  # Enter selects Medium.
+            raw = "3"  # Enter selects Medium.
         if raw == "0":
             return None
         if raw in ("exit", "quit"):
@@ -230,7 +238,39 @@ def prompt_image_quality() -> Optional[int]:
             dpi = IMAGE_QUALITY_DPI[quality]
             logger.info("Image quality selected: %s (%d DPI).", quality, dpi)
             return dpi
-        print_error("Invalid quality. Please choose 1, 2, or 3.")
+        if raw in ("7", "custom"):
+            dpi = _prompt_custom_dpi()
+            if dpi is None:
+                continue  # 0 = back to the quality selection.
+            logger.info("Image quality selected: custom (%d DPI).", dpi)
+            return dpi
+        print_error("Invalid quality. Please choose 1-7.")
+
+
+def _prompt_custom_dpi() -> Optional[int]:
+    """Ask for a custom render DPI (30-1200). Returns None to go back."""
+    prompt = question_prompt("Custom DPI", details="30-1200", default="150")
+    while True:
+        raw = _input(prompt).strip().lower()
+        if raw == "":
+            raw = "150"
+        if raw == "0":
+            return None
+        if raw in ("exit", "quit"):
+            raise _ExitRequested()
+        try:
+            dpi = int(raw)
+        except ValueError:
+            print_error("Please enter a whole number between 30 and 1200.")
+            continue
+        if not 30 <= dpi <= 1200:
+            print_error("DPI must be between 30 and 1200.")
+            continue
+        if dpi > 600:
+            print_warning(
+                "DPI above 600 produces very large images and can be slow."
+            )
+        return dpi
 
 
 def prompt_source_folder_pdfs() -> Optional[List[Path]]:
