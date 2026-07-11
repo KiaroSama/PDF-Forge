@@ -85,7 +85,31 @@ PDF Forge Main menu:
 - Option `1` is the default; pressing **Enter** opens **Page tools**.
 - Type `exit` or `quit` at any prompt to close the app immediately.
 - In the main menu, `0` exits. In submenus, `0` means **Back**.
-- After each operation you return to the menu you came from.
+
+### Batch queue (run several tasks together)
+
+PDF Forge collects tasks and runs them **together at the end** rather than one at
+a time. Each operation asks all its questions up front, shows a short summary,
+and **adds itself to a queue** instead of writing files immediately. So a single
+session can, for example, delete some pages *and* remove a watermark in one go.
+
+The flow is:
+
+1. Pick an operation from the menu and configure it to the end. Its summary is
+   shown and it is added to the queue (`Added to queue (#1): ...`).
+2. You are asked **`Do you want to queue another task? [y/N]`** — the default is
+   **No** (pressing **Enter** means No).
+   - **`y`** returns you to the main menu to configure the next task.
+   - **`n`** / **Enter** finishes queueing.
+3. When you finish, a **complete summary** of every queued task is shown, then
+   **`Start now? [Y/n]`** (default **Yes**):
+   - **`y`** / **Enter** runs the whole queue in order; each task prints its own
+     result, and a task that fails is reported without stopping the rest.
+   - **`n`** cancels and discards the queued tasks.
+
+Choosing `Exit` (or typing `exit`) with tasks still queued also shows the
+complete summary and the `Start now?` prompt before the app closes. Cancelling or
+backing out of an operation adds nothing to the queue.
 
 Page tools submenu:
 
@@ -101,7 +125,7 @@ PDF Forge Page tools:
 1. Enter the full path to the source PDF (quotes are accepted and stripped).
 2. The total page count is shown.
 3. Enter a page-selection expression.
-4. Review the summary and confirm. Pressing Enter confirms (default Yes).
+4. Review the summary; the task is added to the queue (see **Batch queue**).
 
 Use a comma `,` to combine pages into one file, and a vertical bar `|` to
 produce several separate files in a single run:
@@ -117,10 +141,10 @@ produce several separate files in a single run:
 2. Enter a positive whole number of pages per file.
 3. Optionally set a **start page** and **end page** (asked separately). Press
    Enter to keep the document's natural boundaries (start `1`, end last page).
-4. Review the preview of output ranges and confirm.
+4. Review the preview of output ranges; the task is added to the queue.
 
 If the chunk size is greater than or equal to the selected span, you are warned
-that only one output file will be created and asked to confirm.
+that only one output file will be created and asked to confirm before continuing.
 
 ### Merge multiple PDFs
 
@@ -156,9 +180,9 @@ PDF Forge Merge:
 **Merge summary and confirmation (both modes)**
 
 After the sources are chosen and you pick the output path, PDF Forge opens every
-source (failing before any write if one cannot be opened), then shows a **merge
-summary** and asks `Create merged PDF? [Y/n]` (Enter confirms). The summary
-includes:
+source (failing before it is queued if one cannot be opened), then shows a
+**merge summary** and adds the merge to the queue (see **Batch queue**). The
+summary includes:
 
 - total PDF count,
 - total page count,
@@ -224,7 +248,7 @@ PDF Forge PDF to images:
 1. Enter a folder path. Every `*.pdf` directly inside it (non-recursive, natural
    order) is processed.
 2. Choose the output image quality (applied to all files).
-3. Review the summary (folder, file count, quality) and confirm.
+3. Review the summary (folder, file count, quality); the task is queued.
 4. Every page of every PDF is rendered. Each PDF gets its own
    `<name>_images` folder beside it. A file that cannot be opened is reported
    and skipped; the batch continues, and totals are shown at the end.
@@ -268,7 +292,7 @@ PDF Forge PDF to image-only PDF:
 1. Enter a folder path. Every `*.pdf` directly inside it (non-recursive, natural
    order) is processed.
 2. Choose the output image quality (applied to all files).
-3. Review the summary and confirm.
+3. Review the summary; the task is added to the queue.
 4. Each PDF is rasterized into its own `<name>_image.pdf` beside it. A file that
    cannot be opened is reported and skipped; the batch continues, and totals are
    shown at the end.
@@ -298,9 +322,9 @@ How it works:
    the operation finishes, and cleared at startup if anything was left behind.
 4. Choose the candidate(s) to remove (e.g. `1`, or `1,3` for several).
 5. Review the summary and pick the output path (Enter accepts
-   `<source>_nowatermark.pdf` beside the source).
-6. Confirm. The watermark's paint calls are removed from every page, the
-   now-unused watermark image is physically dropped, duplicate objects are
+   `<source>_nowatermark.pdf` beside the source); the task is added to the queue.
+6. When the queue runs, the watermark's paint calls are removed from every page,
+   the now-unused watermark image is physically dropped, duplicate objects are
    merged, and a new file is written. The original is never modified.
 
 Removal is **visually lossless**: the page images and text are preserved exactly
@@ -351,7 +375,7 @@ combined ranges, e.g. `5`, `10-20`, or `10-20,25,30-50`.
 
 1. Enter a folder path (every `*.pdf` directly inside it is processed).
 2. Enter the pages to delete.
-3. Review the summary and confirm.
+3. Review the summary; the task is added to the queue.
 4. Each PDF is handled **per file**: only the requested pages that actually
    exist in that file are deleted, and each file becomes its own
    `<name>_deleted_....pdf`. When some requested pages are beyond a file's

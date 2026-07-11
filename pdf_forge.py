@@ -28,7 +28,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -36,7 +36,7 @@ from typing import List, Optional, Sequence, Tuple
 
 APP_NAME = "PDF Forge"            # User-facing application name (never change spelling).
 LOG_PREFIX = "PDF Forge"          # Log filename prefix.
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 # Image-conversion quality presets mapped to a render resolution in DPI.
 # Rendering scale is DPI / 72 (PDF user-space is 72 units per inch).
@@ -93,7 +93,6 @@ class Color:
     CORAL = "\033[38;5;209m"          # coral
     GOLD = "\033[38;5;220m"           # gold
     SKY = "\033[38;5;75m"             # sky blue
-    DEFAULT_NOTE = "\033[38;5;180m"   # muted tan for (Enter=...) notes
     HINT_YELLOW = "\033[38;5;221m"    # yellow used for (y/n) hints
 
 
@@ -155,10 +154,6 @@ def print_heading(message: str) -> None:
     print(colorize(message, Color.BOLD + Color.LIGHT_BLUE))
 
 
-def print_prompt_line(message: str) -> None:
-    print(colorize(message, Color.CYAN))
-
-
 def print_info(message: str) -> None:
     print(colorize(message, Color.BLUE))
 
@@ -166,10 +161,6 @@ def print_info(message: str) -> None:
 def print_note(message: str) -> None:
     """Informational note printed in note-yellow."""
     print(colorize(message, Color.NOTE_YELLOW))
-
-
-def print_accent(message: str) -> None:
-    print(colorize(message, Color.MAGENTA))
 
 
 def print_kv(label: str, value: str, value_color: str = None) -> None:
@@ -1630,6 +1621,41 @@ class _ExitRequested(Exception):
     """Internal signal that the user asked to exit the whole application."""
 
 
+class _TaskQueued(Exception):
+    """Signal that an operation has been fully configured and queued.
+
+    Raised after a task is added to the batch queue so any nested submenu
+    unwinds back to the main menu, where the user is asked whether to queue
+    another task or start the batch.
+    """
+
+
+@dataclass
+class _QueuedTask:
+    """A configured-but-not-yet-run operation: a label plus a zero-arg runner."""
+    summary: str
+    run: Callable[[], None]
+
+
+# Operations configured this session, awaiting a single "Start" confirmation.
+# Each operation collects all its inputs up front, then appends a runner here
+# instead of writing immediately; the whole queue runs together at the end.
+_task_queue: List[_QueuedTask] = []
+
+
+def queue_task(summary: str, run: Callable[[], None]) -> None:
+    """Add a configured operation to the batch queue, then unwind to the main menu.
+
+    Prints a short per-task line, appends the runner, and raises ``_TaskQueued``
+    so nested submenus fall back to the main menu for the next choice. Output
+    paths are resolved now, at queue time.
+    """
+    _task_queue.append(_QueuedTask(summary, run))
+    print_success(f"\nAdded to queue (#{len(_task_queue)}): {summary}")
+    logger.info("Task queued (#%d): %s", len(_task_queue), summary)
+    raise _TaskQueued()
+
+
 def _print_progress(prefix: str, current: int, total: int) -> None:
     """Print a single-line progress indicator without flooding the console."""
     if total <= 0:
@@ -1736,25 +1762,27 @@ def _extract_single_file(reader, source: Path, total_pages: int, group: "PageGro
         print_warning("Returning to menu.")
         return
 
-    if not ask_yes_no("Create this PDF now?", default_yes=True):
-        print_warning("Cancelled. Returning to menu.")
-        return
-
     pages_zero_based = [p - 1 for p in group.pages]
-    try:
-        written = write_pages_to_pdf(
-            reader,
-            pages_zero_based,
-            out_path,
-            progress=lambda c, t: _print_progress("Extracting", c, t),
-        )
-    except Exception as exc:  # noqa: BLE001 - present a clean message, log details
-        print_error(f"Failed to create the output PDF: {exc}")
-        logger.exception("Extraction failed for output '%s'", out_path)
-        return
 
-    print_success(f"Done. Wrote {written} page(s) to:\n  {out_path}")
-    logger.info("Extract complete: output='%s' pages=%d", out_path, written)
+    def _run():
+        try:
+            written = write_pages_to_pdf(
+                reader,
+                pages_zero_based,
+                out_path,
+                progress=lambda c, t: _print_progress("Extracting", c, t),
+            )
+        except Exception as exc:  # noqa: BLE001 - present a clean message, log details
+            print_error(f"Failed to create the output PDF: {exc}")
+            logger.exception("Extraction failed for output '%s'", out_path)
+            return
+        print_success(f"Done. Wrote {written} page(s) to:\n  {out_path}")
+        logger.info("Extract complete: output='%s' pages=%d", out_path, written)
+
+    queue_task(
+        f"Extract pages {group.text} from {source.name} -> {out_path.name}",
+        _run,
+    )
 
 
 def _extract_multiple_files(reader, source: Path, total_pages: int,
@@ -1780,48 +1808,50 @@ def _extract_multiple_files(reader, source: Path, total_pages: int,
         print_warning("Returning to menu.")
         return
 
-    if not ask_yes_no(f"Create {len(groups)} file(s) now?", default_yes=True):
-        print_warning("Cancelled. Returning to menu.")
-        return
-
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        print_error(f"Could not create output directory: {exc}")
-        logger.error("Failed to create output dir '%s': %s", out_dir, exc)
-        return
-
-    created_files: List[Path] = []
-    total_written = 0
-    for index, group in enumerate(groups, start=1):
-        name = build_extract_output_name(source.stem, group.text, len(group.pages))
-        out_path = unique_file_path(out_dir / name)
-        # Never let an output collide with the source PDF.
-        if resolves_to_same_file(out_path, source):
-            out_path = unique_file_path(out_dir / f"{source.stem}_extract_{index}.pdf")
-        pages_zero_based = [p - 1 for p in group.pages]
-        _print_progress("Writing files", index, len(groups))
+    def _run():
         try:
-            written = write_pages_to_pdf(reader, pages_zero_based, out_path)
-        except Exception as exc:  # noqa: BLE001
-            sys.stdout.write("\n")
-            print_error(f"Failed while writing '{out_path.name}': {exc}")
-            logger.exception("Extract (multi) write failed: '%s'", out_path)
-            print_warning(
-                f"{len(created_files)} file(s) were completed before the failure."
-            )
-            _report_created(created_files, total_written, out_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print_error(f"Could not create output directory: {exc}")
+            logger.error("Failed to create output dir '%s': %s", out_dir, exc)
             return
-        created_files.append(out_path)
-        total_written += written
 
-    print_success(
-        f"Done. Created {len(created_files)} file(s), {total_written} page(s) total."
-    )
-    print_success(f"Output directory:\n  {out_dir}")
-    logger.info(
-        "Extract (multi) complete: files=%d pages=%d dir='%s'",
-        len(created_files), total_written, out_dir,
+        created_files: List[Path] = []
+        total_written = 0
+        for index, group in enumerate(groups, start=1):
+            name = build_extract_output_name(source.stem, group.text, len(group.pages))
+            out_path = unique_file_path(out_dir / name)
+            # Never let an output collide with the source PDF.
+            if resolves_to_same_file(out_path, source):
+                out_path = unique_file_path(out_dir / f"{source.stem}_extract_{index}.pdf")
+            pages_zero_based = [p - 1 for p in group.pages]
+            _print_progress("Writing files", index, len(groups))
+            try:
+                written = write_pages_to_pdf(reader, pages_zero_based, out_path)
+            except Exception as exc:  # noqa: BLE001
+                sys.stdout.write("\n")
+                print_error(f"Failed while writing '{out_path.name}': {exc}")
+                logger.exception("Extract (multi) write failed: '%s'", out_path)
+                print_warning(
+                    f"{len(created_files)} file(s) were completed before the failure."
+                )
+                _report_created(created_files, total_written, out_dir)
+                return
+            created_files.append(out_path)
+            total_written += written
+
+        print_success(
+            f"Done. Created {len(created_files)} file(s), {total_written} page(s) total."
+        )
+        print_success(f"Output directory:\n  {out_dir}")
+        logger.info(
+            "Extract (multi) complete: files=%d pages=%d dir='%s'",
+            len(created_files), total_written, out_dir,
+        )
+
+    queue_task(
+        f"Extract {len(groups)} file(s) from {source.name} -> {out_dir.name}",
+        _run,
     )
 
 
@@ -1838,14 +1868,6 @@ def _choose_output_dir_for_files(default_dir: Path) -> Optional[Path]:
         if cleaned.lower() in ("exit", "quit"):
             raise _ExitRequested()
         return Path(cleaned)
-
-
-def _format_pages(pages: Sequence[int], limit: int = 30) -> str:
-    """Render a page list compactly for display."""
-    if len(pages) <= limit:
-        return ", ".join(str(p) for p in pages)
-    head = ", ".join(str(p) for p in pages[:limit])
-    return f"{head}, ... (+{len(pages) - limit} more)"
 
 
 def summarize_ranges(pages: Sequence[int]) -> str:
@@ -2050,47 +2072,50 @@ def operation_split_chunks() -> None:
         print_warning("Returning to menu.")
         return
 
-    if not ask_yes_no("Create these files now?", default_yes=True):
-        print_warning("Cancelled. Returning to menu.")
-        return
-
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        print_error(f"Could not create output directory: {exc}")
-        logger.error("Failed to create output dir '%s': %s", out_dir, exc)
-        return
-
-    created_files: List[Path] = []
-    total_written = 0
-    for index, (start, end) in enumerate(chunks, start=1):
-        name = build_chunk_output_name(source.stem, start, end, pad)
-        # Guarantee uniqueness even if a stray file exists in a reused folder.
-        out_path = unique_file_path(out_dir / name)
-        pages_zero_based = list(range(start - 1, end))
-        _print_progress("Writing chunks", index, len(chunks))
+    def _run():
         try:
-            written = write_pages_to_pdf(reader, pages_zero_based, out_path)
-        except Exception as exc:  # noqa: BLE001
-            sys.stdout.write("\n")
-            print_error(f"Failed while writing '{out_path.name}': {exc}")
-            logger.exception("Chunk write failed: '%s'", out_path)
-            # Partial failure: keep already completed valid files, stop here.
-            print_warning(
-                f"{len(created_files)} file(s) were completed before the failure."
-            )
-            _report_created(created_files, total_written, out_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print_error(f"Could not create output directory: {exc}")
+            logger.error("Failed to create output dir '%s': %s", out_dir, exc)
             return
-        created_files.append(out_path)
-        total_written += written
 
-    print_success(
-        f"Done. Created {len(created_files)} file(s), {total_written} page(s) total."
-    )
-    print_success(f"Output directory:\n  {out_dir}")
-    logger.info(
-        "Split complete: files=%d pages=%d dir='%s'",
-        len(created_files), total_written, out_dir,
+        created_files: List[Path] = []
+        total_written = 0
+        for index, (start, end) in enumerate(chunks, start=1):
+            name = build_chunk_output_name(source.stem, start, end, pad)
+            # Guarantee uniqueness even if a stray file exists in a reused folder.
+            out_path = unique_file_path(out_dir / name)
+            pages_zero_based = list(range(start - 1, end))
+            _print_progress("Writing chunks", index, len(chunks))
+            try:
+                written = write_pages_to_pdf(reader, pages_zero_based, out_path)
+            except Exception as exc:  # noqa: BLE001
+                sys.stdout.write("\n")
+                print_error(f"Failed while writing '{out_path.name}': {exc}")
+                logger.exception("Chunk write failed: '%s'", out_path)
+                # Partial failure: keep already completed valid files, stop here.
+                print_warning(
+                    f"{len(created_files)} file(s) were completed before the failure."
+                )
+                _report_created(created_files, total_written, out_dir)
+                return
+            created_files.append(out_path)
+            total_written += written
+
+        print_success(
+            f"Done. Created {len(created_files)} file(s), {total_written} page(s) total."
+        )
+        print_success(f"Output directory:\n  {out_dir}")
+        logger.info(
+            "Split complete: files=%d pages=%d dir='%s'",
+            len(created_files), total_written, out_dir,
+        )
+
+    queue_task(
+        f"Split {source.name} into {len(chunks)} file(s) of {chunk_size} "
+        f"-> {out_dir.name}",
+        _run,
     )
 
 
@@ -2426,27 +2451,27 @@ def _run_merge_with_sources(mode: str, sources: List[Path]) -> None:
         len(sources), total_pages, mode, out_path,
     )
 
-    if not ask_yes_no("Create merged PDF?", default_yes=True):
-        print_warning("Cancelled. Returning to the merge menu.")
-        logger.info("Merge cancelled at confirmation by user.")
-        return
-
-    logger.info("Merge start: sources=%d output='%s'", len(sources), out_path)
-    try:
-        written = write_merged_pdfs_to_pdf(
-            readers,
-            out_path,
-            progress=lambda c, t: _print_progress("Merging pages", c, t),
+    def _run():
+        logger.info("Merge start: sources=%d output='%s'", len(sources), out_path)
+        try:
+            written = write_merged_pdfs_to_pdf(
+                readers,
+                out_path,
+                progress=lambda c, t: _print_progress("Merging pages", c, t),
+            )
+        except Exception as exc:  # noqa: BLE001 - present a clean message, log details
+            print_error(f"Failed to create the merged PDF: {exc}")
+            logger.exception("Merge failed for output '%s'", out_path)
+            return
+        print_success(
+            f"Done. Merged {len(sources)} file(s), {written} page(s) into:\n  {out_path}"
         )
-    except Exception as exc:  # noqa: BLE001 - present a clean message, log details
-        print_error(f"Failed to create the merged PDF: {exc}")
-        logger.exception("Merge failed for output '%s'", out_path)
-        return
+        logger.info("Merge complete: output='%s' pages=%d", out_path, written)
 
-    print_success(
-        f"Done. Merged {len(sources)} file(s), {written} page(s) into:\n  {out_path}"
+    queue_task(
+        f"Merge {len(sources)} PDF(s) -> {out_path.name}",
+        _run,
     )
-    logger.info("Merge complete: output='%s' pages=%d", out_path, written)
 
 
 # --------------------------------------------------------------------------- #
@@ -2559,13 +2584,27 @@ def operation_images_all_pages() -> None:
             print_warning("Returning to menu.")
             return
 
-        if not ask_yes_no("Create these images now?", default_yes=True):
-            print_warning("Cancelled. Returning to menu.")
-            logger.info("PDF-to-images (all) cancelled at confirmation.")
-            return
-
         pages_zero_based = list(range(total_pages))
-        _render_pngs_and_report(pdf, pages_zero_based, out_dir, dpi)
+
+        def _run():
+            try:
+                rpdf, _count = open_pdfium_document(
+                    source, password_prompt=prompt_password
+                )
+            except (PdfOpenError, RuntimeError) as exc:
+                print_error(str(exc))
+                logger.error("Failed to reopen '%s' for rendering: %s", source, exc)
+                return
+            try:
+                _render_pngs_and_report(rpdf, pages_zero_based, out_dir, dpi)
+            finally:
+                rpdf.close()
+
+        queue_task(
+            f"PDF to PNG (all {total_pages} page(s)) of {source.name} "
+            f"-> {out_dir.name}",
+            _run,
+        )
     finally:
         pdf.close()
 
@@ -2636,13 +2675,27 @@ def operation_images_selected_pages() -> None:
             print_warning("Returning to menu.")
             return
 
-        if not ask_yes_no("Create these images now?", default_yes=True):
-            print_warning("Cancelled. Returning to menu.")
-            logger.info("PDF-to-images (selected) cancelled at confirmation.")
-            return
-
         pages_zero_based = [p - 1 for p in result.pages]
-        _render_pngs_and_report(pdf, pages_zero_based, out_dir, dpi)
+        selection_label = summarize_ranges(result.pages)
+
+        def _run():
+            try:
+                rpdf, _count = open_pdfium_document(
+                    source, password_prompt=prompt_password
+                )
+            except (PdfOpenError, RuntimeError) as exc:
+                print_error(str(exc))
+                logger.error("Failed to reopen '%s' for rendering: %s", source, exc)
+                return
+            try:
+                _render_pngs_and_report(rpdf, pages_zero_based, out_dir, dpi)
+            finally:
+                rpdf.close()
+
+        queue_task(
+            f"PDF to PNG ({selection_label}) of {source.name} -> {out_dir.name}",
+            _run,
+        )
     finally:
         pdf.close()
 
@@ -2704,43 +2757,49 @@ def operation_images_batch_folder() -> None:
     print(colorize("\n  Files:", Color.GRAY))
     _print_merge_order(pdfs)
 
-    if not ask_yes_no("Convert all these PDFs to images?", default_yes=True):
-        print_warning("Cancelled. Returning to menu.")
-        logger.info("Batch image conversion cancelled at confirmation.")
-        return
+    def _run():
+        logger.info(
+            "Batch image start: folder='%s' files=%d dpi=%d", folder, len(pdfs), dpi
+        )
+        ok = failed = total_images = 0
+        for index, src in enumerate(pdfs, start=1):
+            print_info(f"[{index}/{len(pdfs)}] {src.name}")
+            try:
+                pdf, page_count = open_pdfium_document(
+                    src, password_prompt=prompt_password
+                )
+            except (PdfOpenError, RuntimeError) as exc:
+                print_error(f"  Skipped (could not open): {exc}")
+                logger.error("Batch image: failed to open '%s': %s", src, exc)
+                failed += 1
+                continue
+            try:
+                out_dir = unique_dir_path(default_images_output_dir(src))
+                created = render_pages_to_pngs(
+                    pdf, list(range(page_count)), out_dir, dpi,
+                    progress=lambda c, t: _print_progress("  Rendering", c, t),
+                )
+                total_images += len(created)
+                ok += 1
+                print_success(f"  -> {len(created)} image(s) in {out_dir.name}")
+            except Exception as exc:  # noqa: BLE001 - keep the batch going
+                print_error(f"  Failed: {exc}")
+                logger.exception("Batch image render failed for '%s'", src)
+                failed += 1
+            finally:
+                pdf.close()
 
-    logger.info("Batch image start: folder='%s' files=%d dpi=%d", folder, len(pdfs), dpi)
-    ok = failed = total_images = 0
-    for index, src in enumerate(pdfs, start=1):
-        print_info(f"[{index}/{len(pdfs)}] {src.name}")
-        try:
-            pdf, page_count = open_pdfium_document(src, password_prompt=prompt_password)
-        except (PdfOpenError, RuntimeError) as exc:
-            print_error(f"  Skipped (could not open): {exc}")
-            logger.error("Batch image: failed to open '%s': %s", src, exc)
-            failed += 1
-            continue
-        try:
-            out_dir = unique_dir_path(default_images_output_dir(src))
-            created = render_pages_to_pngs(
-                pdf, list(range(page_count)), out_dir, dpi,
-                progress=lambda c, t: _print_progress("  Rendering", c, t),
-            )
-            total_images += len(created)
-            ok += 1
-            print_success(f"  -> {len(created)} image(s) in {out_dir.name}")
-        except Exception as exc:  # noqa: BLE001 - keep the batch going
-            print_error(f"  Failed: {exc}")
-            logger.exception("Batch image render failed for '%s'", src)
-            failed += 1
-        finally:
-            pdf.close()
+        print_success(
+            f"Done. Converted {ok} file(s), {failed} failed, "
+            f"{total_images} image(s) total."
+        )
+        logger.info(
+            "Batch image complete: ok=%d failed=%d images=%d", ok, failed, total_images
+        )
 
-    print_success(
-        f"Done. Converted {ok} file(s), {failed} failed, {total_images} image(s) total."
-    )
-    logger.info(
-        "Batch image complete: ok=%d failed=%d images=%d", ok, failed, total_images
+    queue_task(
+        f"PDF to PNG (batch: {len(pdfs)} file(s) in {folder.name})",
+        _run,
     )
 
 
@@ -2836,32 +2895,43 @@ def operation_pdf_to_image_pdf() -> None:
             "The output will be rasterized: text becomes images and is no longer "
             "selectable or editable. This usually increases the file size."
         )
-        if not ask_yes_no("Create image-only PDF?", default_yes=True):
-            print_warning("Cancelled. Returning to menu.")
-            logger.info("PDF-to-image-PDF cancelled at confirmation.")
-            return
-
-        logger.info(
-            "Image-only PDF start: pages=%d dpi=%d output='%s'",
-            total_pages, dpi, out_path,
-        )
-        try:
-            written = render_pdf_to_image_pdf(
-                pdf,
-                total_pages,
-                out_path,
-                dpi,
-                progress=lambda c, t: _print_progress("Rasterizing pages", c, t),
+        def _run():
+            try:
+                rpdf, count = open_pdfium_document(
+                    source, password_prompt=prompt_password
+                )
+            except (PdfOpenError, RuntimeError) as exc:
+                print_error(str(exc))
+                logger.error("Failed to reopen '%s' for rendering: %s", source, exc)
+                return
+            logger.info(
+                "Image-only PDF start: pages=%d dpi=%d output='%s'",
+                count, dpi, out_path,
             )
-        except Exception as exc:  # noqa: BLE001 - clean message, log details
-            print_error(f"Failed to create the image-only PDF: {exc}")
-            logger.exception("Image-only PDF failed for output '%s'", out_path)
-            return
+            try:
+                written = render_pdf_to_image_pdf(
+                    rpdf,
+                    count,
+                    out_path,
+                    dpi,
+                    progress=lambda c, t: _print_progress("Rasterizing pages", c, t),
+                )
+                print_success(
+                    f"Done. Wrote {written} rasterized page(s) to:\n  {out_path}"
+                )
+                logger.info(
+                    "Image-only PDF complete: output='%s' pages=%d", out_path, written
+                )
+            except Exception as exc:  # noqa: BLE001 - clean message, log details
+                print_error(f"Failed to create the image-only PDF: {exc}")
+                logger.exception("Image-only PDF failed for output '%s'", out_path)
+            finally:
+                rpdf.close()
 
-        print_success(
-            f"Done. Wrote {written} rasterized page(s) to:\n  {out_path}"
+        queue_task(
+            f"Image-only PDF of {source.name} -> {out_path.name}",
+            _run,
         )
-        logger.info("Image-only PDF complete: output='%s' pages=%d", out_path, written)
     finally:
         pdf.close()
 
@@ -2898,45 +2968,51 @@ def operation_image_pdf_batch_folder() -> None:
         "Each output will be rasterized: text becomes images and is no longer "
         "selectable or editable. This usually increases the file size."
     )
-    if not ask_yes_no("Convert all these PDFs to image-only PDFs?", default_yes=True):
-        print_warning("Cancelled. Returning to menu.")
-        logger.info("Batch image-only PDF cancelled at confirmation.")
-        return
+    def _run():
+        logger.info(
+            "Batch image-only PDF start: folder='%s' files=%d dpi=%d",
+            folder, len(pdfs), dpi,
+        )
+        ok = failed = total_pages = 0
+        for index, src in enumerate(pdfs, start=1):
+            print_info(f"[{index}/{len(pdfs)}] {src.name}")
+            try:
+                pdf, page_count = open_pdfium_document(
+                    src, password_prompt=prompt_password
+                )
+            except (PdfOpenError, RuntimeError) as exc:
+                print_error(f"  Skipped (could not open): {exc}")
+                logger.error("Batch image-only PDF: failed to open '%s': %s", src, exc)
+                failed += 1
+                continue
+            try:
+                out_path = unique_file_path(default_image_pdf_output(src))
+                written = render_pdf_to_image_pdf(
+                    pdf, page_count, out_path, dpi,
+                    progress=lambda c, t: _print_progress("  Rasterizing", c, t),
+                )
+                total_pages += written
+                ok += 1
+                print_success(f"  -> {out_path.name} ({written} page(s))")
+            except Exception as exc:  # noqa: BLE001 - keep the batch going
+                print_error(f"  Failed: {exc}")
+                logger.exception("Batch image-only PDF failed for '%s'", src)
+                failed += 1
+            finally:
+                pdf.close()
 
-    logger.info(
-        "Batch image-only PDF start: folder='%s' files=%d dpi=%d", folder, len(pdfs), dpi
-    )
-    ok = failed = total_pages = 0
-    for index, src in enumerate(pdfs, start=1):
-        print_info(f"[{index}/{len(pdfs)}] {src.name}")
-        try:
-            pdf, page_count = open_pdfium_document(src, password_prompt=prompt_password)
-        except (PdfOpenError, RuntimeError) as exc:
-            print_error(f"  Skipped (could not open): {exc}")
-            logger.error("Batch image-only PDF: failed to open '%s': %s", src, exc)
-            failed += 1
-            continue
-        try:
-            out_path = unique_file_path(default_image_pdf_output(src))
-            written = render_pdf_to_image_pdf(
-                pdf, page_count, out_path, dpi,
-                progress=lambda c, t: _print_progress("  Rasterizing", c, t),
-            )
-            total_pages += written
-            ok += 1
-            print_success(f"  -> {out_path.name} ({written} page(s))")
-        except Exception as exc:  # noqa: BLE001 - keep the batch going
-            print_error(f"  Failed: {exc}")
-            logger.exception("Batch image-only PDF failed for '%s'", src)
-            failed += 1
-        finally:
-            pdf.close()
+        print_success(
+            f"Done. Converted {ok} file(s), {failed} failed, "
+            f"{total_pages} page(s) total."
+        )
+        logger.info(
+            "Batch image-only PDF complete: ok=%d failed=%d pages=%d",
+            ok, failed, total_pages,
+        )
 
-    print_success(
-        f"Done. Converted {ok} file(s), {failed} failed, {total_pages} page(s) total."
-    )
-    logger.info(
-        "Batch image-only PDF complete: ok=%d failed=%d pages=%d", ok, failed, total_pages
+    queue_task(
+        f"Image-only PDF (batch: {len(pdfs)} file(s) in {folder.name})",
+        _run,
     )
 
 
@@ -3127,28 +3203,29 @@ def operation_remove_watermark() -> None:
             indices, len(affected_pages), out_path,
         )
 
-        if not ask_yes_no("Remove the selected watermark(s)?", default_yes=True):
-            print_warning("Cancelled. Returning to menu.")
-            logger.info("Watermark removal cancelled at confirmation.")
-            return
-
-        try:
-            modified = remove_watermark_images(
-                reader,
-                chosen_sigs,
-                out_path,
-                progress=lambda c, t: _print_progress("Cleaning pages", c, t),
+        def _run():
+            try:
+                modified = remove_watermark_images(
+                    reader,
+                    chosen_sigs,
+                    out_path,
+                    progress=lambda c, t: _print_progress("Cleaning pages", c, t),
+                )
+            except Exception as exc:  # noqa: BLE001 - clean message, log details
+                print_error(f"Failed to remove the watermark: {exc}")
+                logger.exception("Watermark removal failed for output '%s'", out_path)
+                return
+            print_success(
+                f"Done. Removed watermark from {modified} page(s):\n  {out_path}"
             )
-        except Exception as exc:  # noqa: BLE001 - clean message, log details
-            print_error(f"Failed to remove the watermark: {exc}")
-            logger.exception("Watermark removal failed for output '%s'", out_path)
-            return
+            logger.info(
+                "Watermark removal complete: pages=%d output='%s'", modified, out_path
+            )
 
-        print_success(
-            f"Done. Removed watermark from {modified} page(s):\n  {out_path}"
-        )
-        logger.info(
-            "Watermark removal complete: pages=%d output='%s'", modified, out_path
+        queue_task(
+            f"Remove {len(chosen)} watermark(s) from {source.name} "
+            f"-> {out_path.name}",
+            _run,
         )
     finally:
         # Remove the preview folder now that the operation is done, and drop the
@@ -3245,29 +3322,29 @@ def operation_delete_pages_single() -> None:
         print_warning("Returning to menu.")
         return
 
-    if not ask_yes_no("Create the new PDF without those pages?", default_yes=True):
-        print_warning("Cancelled. Returning to menu.")
-        logger.info("Delete-pages (single) cancelled at confirmation.")
-        return
-
-    logger.info(
-        "Delete-pages start: source='%s' delete=%s keep=%d output='%s'",
-        source, selection_text, len(kept), out_path,
-    )
-    try:
-        written = write_pages_to_pdf(
-            reader, kept, out_path,
-            progress=lambda c, t: _print_progress("Writing pages", c, t),
+    def _run():
+        logger.info(
+            "Delete-pages start: source='%s' delete=%s keep=%d output='%s'",
+            source, selection_text, len(kept), out_path,
         )
-    except Exception as exc:  # noqa: BLE001 - clean message, log details
-        print_error(f"Failed to create the output PDF: {exc}")
-        logger.exception("Delete-pages failed for output '%s'", out_path)
-        return
+        try:
+            written = write_pages_to_pdf(
+                reader, kept, out_path,
+                progress=lambda c, t: _print_progress("Writing pages", c, t),
+            )
+        except Exception as exc:  # noqa: BLE001 - clean message, log details
+            print_error(f"Failed to create the output PDF: {exc}")
+            logger.exception("Delete-pages failed for output '%s'", out_path)
+            return
+        print_success(
+            f"Done. Deleted {len(present)} page(s); kept {written}:\n  {out_path}"
+        )
+        logger.info("Delete-pages complete: output='%s' kept=%d", out_path, written)
 
-    print_success(
-        f"Done. Deleted {len(present)} page(s); kept {written}:\n  {out_path}"
+    queue_task(
+        f"Delete pages {selection_text} from {source.name} -> {out_path.name}",
+        _run,
     )
-    logger.info("Delete-pages complete: output='%s' kept=%d", out_path, written)
 
 
 def operation_delete_pages_batch() -> None:
@@ -3305,78 +3382,81 @@ def operation_delete_pages_batch() -> None:
     print(colorize("\n  Files:", Color.GRAY))
     _print_merge_order(pdfs)
 
-    if not ask_yes_no("Delete these pages from all matching PDFs?", default_yes=True):
-        print_warning("Cancelled. Returning to menu.")
-        logger.info("Delete-pages (batch) cancelled at confirmation.")
-        return
-
-    logger.info(
-        "Delete-pages batch start: folder='%s' files=%d delete=%s",
-        folder, len(pdfs), selection_text,
-    )
-    print()
-    processed = skipped = failed = total_deleted = 0
-    for index, src in enumerate(pdfs, start=1):
-        print_info(f"[{index}/{len(pdfs)}] {src.name}")
-        try:
-            reader = open_source_pdf(src, password_prompt=prompt_password)
-        except (PdfOpenError, RuntimeError) as exc:
-            print_error(f"  Skipped (could not open): {exc}")
-            logger.error("Delete-pages batch: failed to open '%s': %s", src, exc)
-            failed += 1
-            continue
-
-        total = len(reader.pages)
-        present, missing, kept = compute_deletion(total, requested)
-
-        if not present:
-            print_note(
-                f"  Note: none of the requested pages exist here "
-                f"(has {total} page(s)); skipped."
-            )
-            logger.info("Delete-pages batch: '%s' has no requested pages; skipped.", src)
-            skipped += 1
-            continue
-        if not kept:
-            print_note(
-                f"  Note: the request covers all {total} page(s); skipped to keep "
-                "a valid PDF."
-            )
-            logger.info("Delete-pages batch: '%s' would be emptied; skipped.", src)
-            skipped += 1
-            continue
-
-        out_name = build_delete_output_name(src.stem, summarize_ranges(present))
-        out_path = unique_file_path(src.parent / out_name)
-        if resolves_to_same_file(out_path, src):
-            out_path = unique_file_path(src.parent / f"{src.stem}_pages_deleted.pdf")
-        try:
-            written = write_pages_to_pdf(reader, kept, out_path)
-        except Exception as exc:  # noqa: BLE001 - keep the batch going
-            print_error(f"  Failed: {exc}")
-            logger.exception("Delete-pages batch write failed for '%s'", src)
-            failed += 1
-            continue
-
-        total_deleted += len(present)
-        processed += 1
-        print_success(
-            f"  -> deleted {len(present)} page(s) [{summarize_ranges(present)}]; "
-            f"kept {written} -> {out_path.name}"
+    def _run():
+        logger.info(
+            "Delete-pages batch start: folder='%s' files=%d delete=%s",
+            folder, len(pdfs), selection_text,
         )
-        if missing:
-            print_note(
-                f"  Note: pages not in this file were skipped: "
-                f"{summarize_ranges(missing)} (has {total} page(s))."
-            )
+        print()
+        processed = skipped = failed = total_deleted = 0
+        for index, src in enumerate(pdfs, start=1):
+            print_info(f"[{index}/{len(pdfs)}] {src.name}")
+            try:
+                reader = open_source_pdf(src, password_prompt=prompt_password)
+            except (PdfOpenError, RuntimeError) as exc:
+                print_error(f"  Skipped (could not open): {exc}")
+                logger.error("Delete-pages batch: failed to open '%s': %s", src, exc)
+                failed += 1
+                continue
 
-    print_success(
-        f"Done. Processed {processed} file(s), skipped {skipped}, failed {failed}; "
-        f"{total_deleted} page(s) deleted in total."
-    )
-    logger.info(
-        "Delete-pages batch complete: processed=%d skipped=%d failed=%d deleted=%d",
-        processed, skipped, failed, total_deleted,
+            total = len(reader.pages)
+            present, missing, kept = compute_deletion(total, requested)
+
+            if not present:
+                print_note(
+                    f"  Note: none of the requested pages exist here "
+                    f"(has {total} page(s)); skipped."
+                )
+                logger.info(
+                    "Delete-pages batch: '%s' has no requested pages; skipped.", src
+                )
+                skipped += 1
+                continue
+            if not kept:
+                print_note(
+                    f"  Note: the request covers all {total} page(s); skipped to keep "
+                    "a valid PDF."
+                )
+                logger.info("Delete-pages batch: '%s' would be emptied; skipped.", src)
+                skipped += 1
+                continue
+
+            out_name = build_delete_output_name(src.stem, summarize_ranges(present))
+            out_path = unique_file_path(src.parent / out_name)
+            if resolves_to_same_file(out_path, src):
+                out_path = unique_file_path(src.parent / f"{src.stem}_pages_deleted.pdf")
+            try:
+                written = write_pages_to_pdf(reader, kept, out_path)
+            except Exception as exc:  # noqa: BLE001 - keep the batch going
+                print_error(f"  Failed: {exc}")
+                logger.exception("Delete-pages batch write failed for '%s'", src)
+                failed += 1
+                continue
+
+            total_deleted += len(present)
+            processed += 1
+            print_success(
+                f"  -> deleted {len(present)} page(s) [{summarize_ranges(present)}]; "
+                f"kept {written} -> {out_path.name}"
+            )
+            if missing:
+                print_note(
+                    f"  Note: pages not in this file were skipped: "
+                    f"{summarize_ranges(missing)} (has {total} page(s))."
+                )
+
+        print_success(
+            f"Done. Processed {processed} file(s), skipped {skipped}, failed {failed}; "
+            f"{total_deleted} page(s) deleted in total."
+        )
+        logger.info(
+            "Delete-pages batch complete: processed=%d skipped=%d failed=%d deleted=%d",
+            processed, skipped, failed, total_deleted,
+        )
+
+    queue_task(
+        f"Delete pages {selection_text} in {len(pdfs)} file(s) of {folder.name}",
+        _run,
     )
 
 
@@ -3494,8 +3574,57 @@ def page_tools_menu() -> None:
         # After completing an operation, loop back to the submenu.
 
 
+def _run_task_queue() -> None:
+    """Execute every queued task in order, isolating per-task failures."""
+    count = len(_task_queue)
+    print_heading(f"\nRunning {count} queued task(s)...")
+    logger.info("Running task queue: %d task(s).", count)
+    for index, task in enumerate(_task_queue, start=1):
+        print(colorize(
+            f"\n=== Task {index}/{count}: {task.summary} ===",
+            Color.BOLD + Color.LIGHT_BLUE,
+        ))
+        try:
+            task.run()
+        except KeyboardInterrupt:
+            print_warning("\nTask interrupted; continuing with the next one.")
+            logger.warning("Queued task %d interrupted.", index)
+        except Exception as exc:  # noqa: BLE001 - one task must not sink the batch
+            print_error(f"Task {index} failed: {exc}")
+            logger.exception("Queued task %d failed.", index)
+    print_success(f"\nAll {count} queued task(s) processed.")
+    logger.info("Task queue finished: %d task(s).", count)
+
+
+def finalize_queue() -> None:
+    """Show the full queue, confirm once, then run it (or discard on 'no').
+
+    Clears the queue afterwards either way. Does nothing when the queue is empty.
+    """
+    if not _task_queue:
+        return
+    print_heading(f"\nComplete summary - {len(_task_queue)} task(s) queued")
+    for index, task in enumerate(_task_queue, start=1):
+        print_kv(f"Task {index}", task.summary, Color.AQUA)
+
+    if ask_yes_no("\nStart now?", default_yes=True):
+        _run_task_queue()
+    else:
+        print_warning("Cancelled. Discarded the queued task(s).")
+        logger.info(
+            "Queue discarded at start confirmation (%d task(s)).", len(_task_queue)
+        )
+    _task_queue.clear()
+
+
 def main_menu() -> int:
-    """Run the interactive main menu loop. Returns a process exit code."""
+    """Run the interactive main menu loop. Returns a process exit code.
+
+    Operations do not run immediately: each configured operation is added to a
+    batch queue. After a task is queued the user is asked whether to queue
+    another (default no); answering no shows the full summary and a single
+    "Start now?" confirmation before the whole queue runs together.
+    """
     while True:
         show_menu()
         choice = _input(
@@ -3510,6 +3639,8 @@ def main_menu() -> int:
             choice = "1"  # Enter opens Page tools.
 
         if choice in ("0", "exit", "quit"):
+            # Finish any pending queue before leaving.
+            finalize_queue()
             print_success("Goodbye.")
             logger.info("Application exit requested by user.")
             return 0
@@ -3532,9 +3663,27 @@ def main_menu() -> int:
                 print_error("Invalid option. Please choose 1-6 or 0.")
                 continue
         except _ExitRequested:
+            finalize_queue()
             print_success("Goodbye.")
             logger.info("Application exit requested during operation.")
             return 0
+        except _TaskQueued:
+            # A task was configured and added to the queue. Ask whether to add
+            # another (default no = Enter), then finalize when the user is done.
+            try:
+                add_more = ask_yes_no(
+                    "\nDo you want to queue another task?", default_yes=False
+                )
+            except _ExitRequested:
+                finalize_queue()
+                print_success("Goodbye.")
+                logger.info("Application exit requested while queuing tasks.")
+                return 0
+            if not add_more:
+                finalize_queue()
+            # Either way, loop back to a fresh main menu (the queue is now empty
+            # unless the user chose to keep adding tasks).
+            continue
         except KeyboardInterrupt:
             print_warning("\nOperation interrupted. Returning to menu.")
             logger.warning("Operation interrupted by user (KeyboardInterrupt).")

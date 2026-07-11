@@ -5,6 +5,32 @@ All notable changes to PDF Forge are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-07-11
+
+### Added
+- **Batch task queue.** Operations no longer run one at a time. Each tool now
+  collects all of its inputs, shows its summary, and adds the task to a queue
+  instead of writing immediately. After a task is queued you are asked
+  `Do you want to queue another task? [y/N]` (default **No**, Enter = No);
+  answering `y` returns to the main menu to configure the next task. When you
+  finish, a **complete summary** of every queued task is shown followed by a
+  single `Start now? [Y/n]` (default **Yes**) that runs the whole queue in order.
+  Answering `n` discards the queue. This lets one session, for example, delete
+  pages *and* remove a watermark together. Choosing Exit with tasks still queued
+  also shows the summary and the start prompt before closing.
+
+### Changed
+- The per-operation confirmation prompts (`Create this PDF now?`,
+  `Create merged PDF?`, `Convert all these PDFs?`, etc.) were replaced by the
+  single `Start now?` confirmation shown once for the whole queue.
+- A task that fails while the queue runs is reported and skipped without stopping
+  the remaining tasks; each task prints its own result as it completes.
+- Output paths are resolved when a task is queued.
+
+### Removed
+- Unused internal helpers with no call sites (`_format_pages`, `print_prompt_line`,
+  `print_accent`) and one unreferenced color constant.
+
 ## [1.3.0] - 2026-07-03
 
 ### Added
@@ -142,6 +168,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   virtual environment, and installs dependencies on first run.
 - Automated test suite.
 
+[1.4.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.4.0
 [1.3.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.3.0
 [1.2.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.2.0
 [1.1.0]: https://github.com/KiaroSama/PDF-Forge/releases/tag/v1.1.0
