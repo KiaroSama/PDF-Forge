@@ -58,6 +58,7 @@ def unlock_pdf_doc(doc, out_path: Path) -> int:
             encryption=pymupdf.PDF_ENCRYPT_NONE,
             garbage=3,
             deflate=True,
+            use_objstms=1,
         )
         _validate_written_pdf(tmp_path, expected_pages=total)
         os.replace(tmp_path, out_path)

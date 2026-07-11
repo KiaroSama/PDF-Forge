@@ -10,6 +10,7 @@ from .render import *  # noqa: F401,F403
 from .watermark import *  # noqa: F401,F403
 from .compress import *  # noqa: F401,F403
 from .unlock import *  # noqa: F401,F403
+from .encrypt import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
 from .ops_pages import *  # noqa: F401,F403
@@ -18,8 +19,10 @@ from .ops_convert import *  # noqa: F401,F403
 from .ops_watermark import *  # noqa: F401,F403
 from .ops_compress import *  # noqa: F401,F403
 from .ops_unlock import *  # noqa: F401,F403
+from .ops_encrypt import *  # noqa: F401,F403
 from .menus import *  # noqa: F401,F403
 from .app import *  # noqa: F401,F403
 
 # Submodules referenced directly (e.g. tests monkeypatch pdf_forge.pdf_io.*).
-from . import compress, core, menus, ops_compress, pdf_io, render, unlock, watermark  # noqa: F401
+from . import (compress, core, encrypt, menus, ops_compress, pdf_io, render,  # noqa: F401
+               unlock, watermark)

@@ -8,7 +8,7 @@ from .ui import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
-__all__ = ['_input', 'ask_yes_no', 'prompt_password', 'prompt_source_pdf', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
+__all__ = ['_input', 'ask_yes_no', 'prompt_password', 'prompt_new_password', 'prompt_source_pdf', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
 
 def _input(prompt: str) -> str:
     """Read a line of input, treating EOF as a request to exit."""
@@ -50,6 +50,39 @@ def prompt_password() -> Optional[str]:
         return getpass.getpass(colorize("Enter PDF password (input hidden): ", Color.CYAN))
     except (EOFError, KeyboardInterrupt):
         return None
+
+
+def prompt_new_password(purpose: str) -> Optional[str]:
+    """Ask for a new password (hidden), entered twice to confirm.
+
+    ``purpose`` is shown in the prompt (e.g. "to open the file"). Returns the
+    password, or ``None`` if the user cancels with an empty entry. Raises
+    ``_ExitRequested`` on 'exit'/'quit'.
+    """
+    import getpass
+
+    print_note(f"Set a password {purpose}. Leave empty to cancel.")
+    while True:
+        try:
+            first = getpass.getpass(
+                colorize("  Enter password (hidden): ", Color.CYAN)
+            )
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if first == "":
+            return None
+        if first.lower() in ("exit", "quit"):
+            raise _ExitRequested()
+        try:
+            second = getpass.getpass(
+                colorize("  Confirm password (hidden): ", Color.CYAN)
+            )
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if first != second:
+            print_error("The passwords do not match. Please try again.")
+            continue
+        return first
 
 
 def prompt_source_pdf() -> Optional[Path]:

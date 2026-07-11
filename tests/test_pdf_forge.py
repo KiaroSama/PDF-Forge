@@ -1100,6 +1100,62 @@ def test_extract_images_none_in_text_pdf(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Protect / encrypt PDF
+# --------------------------------------------------------------------------- #
+
+def test_protect_open_password(tmp_path):
+    import pymupdf
+
+    src = make_pdf(tmp_path / "doc.pdf", 3)
+    out = tmp_path / "protected.pdf"
+    doc = app.open_source_pdf(src)
+    try:
+        written = app.save_encrypted_pdf(
+            doc, out, user_pw="openme", owner_pw="openme",
+            permissions=app.all_permissions(),
+        )
+    finally:
+        doc.close()
+
+    assert written == 3
+    # The output needs the password to open.
+    locked = pymupdf.open(str(out))
+    assert locked.needs_pass
+    assert locked.authenticate("openme") != 0
+    assert locked.page_count == 3
+    locked.close()
+    # Source is untouched (still opens freely).
+    assert pymupdf.open(str(src)).needs_pass == 0
+
+
+def test_protect_restrict_permissions(tmp_path):
+    import pymupdf
+
+    src = make_pdf(tmp_path / "doc.pdf", 2)
+    # Block only editing + copying.
+    actions = dict(app.restrictable_actions())
+    blocked = actions["editing content"] | actions["copying text/images"]
+    allowed = app.all_permissions() & ~blocked
+
+    out = tmp_path / "restricted.pdf"
+    doc = app.open_source_pdf(src)
+    try:
+        app.save_encrypted_pdf(doc, out, owner_pw="owner", permissions=allowed)
+    finally:
+        doc.close()
+
+    check = pymupdf.open(str(out))
+    try:
+        assert check.needs_pass == 0            # opens freely (no user password)
+        denied = app.denied_permissions(check)
+        assert "editing content" in denied
+        assert "copying text/images" in denied
+        assert "printing" not in denied         # printing was left allowed
+    finally:
+        check.close()
+
+
+# --------------------------------------------------------------------------- #
 # Unlock PDF (remove password & restrictions)
 # --------------------------------------------------------------------------- #
 

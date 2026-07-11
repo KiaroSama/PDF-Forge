@@ -105,7 +105,8 @@ PDF Forge Main menu:
   6. Delete pages
   7. Compress PDF (reduce file size)
   8. Extract images from PDF
-  9. Unlock PDF (remove password & restrictions)
+  9. Protect PDF (set password / restrictions)
+  10. Unlock PDF (remove password & restrictions)
   0. Exit
 ```
 
@@ -528,9 +529,35 @@ PDF into a folder. The original PDF is never modified.
 A text/vector PDF with no embedded raster images reports that there is
 nothing to extract.
 
+### Protect PDF (set password / restrictions)
+
+Selecting `9` in the main menu encrypts a PDF (AES-256) into a new protected
+copy. The original is never modified. It opens a submenu:
+
+```
+PDF Forge Protect PDF:
+  1. Password to open (view) [1]
+  2. Restrict editing (owner password + permissions)
+  0. Back
+```
+
+**1 — Password to open (view).** Enter a password (typed twice to confirm,
+hidden). The protected copy cannot be opened without it. Once opened with the
+password, everything is allowed. Output: `<source>_protected.pdf`.
+
+**2 — Restrict editing (owner password + permissions).** The copy opens freely
+(no open password), but the actions you choose are blocked. You pick which of
+these to block — printing, copying text/images, editing content, annotating,
+filling form fields, assembling pages (Enter blocks editing + copying by
+default; `all` blocks everything). Then you set an **owner password** that is
+required to change or remove those restrictions. Screen-reader accessibility is
+always left allowed. Output: `<source>_restricted.pdf`.
+
+> Keep your password safe — an open password cannot be recovered if lost.
+
 ### Unlock PDF (remove password & restrictions)
 
-Selecting `9` in the main menu removes a PDF's password and permission
+Selecting `10` in the main menu removes a PDF's password and permission
 restrictions, producing a fully unlocked copy. The original is never modified.
 This needs legitimate access — it is not password cracking:
 

@@ -11,8 +11,9 @@ from .ops_convert import *  # noqa: F401,F403
 from .ops_watermark import *  # noqa: F401,F403
 from .ops_compress import *  # noqa: F401,F403
 from .ops_unlock import *  # noqa: F401,F403
+from .ops_encrypt import *  # noqa: F401,F403
 
-__all__ = ['_show_pdf_to_images_menu', 'pdf_to_images_menu', '_show_image_pdf_menu', 'pdf_to_image_pdf_menu', '_show_delete_pages_menu', 'delete_pages_menu', '_show_compress_menu', 'compress_menu', 'show_menu', 'show_page_tools_menu', 'page_tools_menu', 'main_menu']
+__all__ = ['_show_pdf_to_images_menu', 'pdf_to_images_menu', '_show_image_pdf_menu', 'pdf_to_image_pdf_menu', '_show_delete_pages_menu', 'delete_pages_menu', '_show_compress_menu', 'compress_menu', '_show_protect_menu', 'protect_menu', 'show_menu', 'show_page_tools_menu', 'page_tools_menu', 'main_menu']
 
 def _show_pdf_to_images_menu() -> None:
     """Render the PDF-to-images submenu in the Page tools submenu style."""
@@ -197,6 +198,51 @@ def compress_menu() -> None:
             logger.warning("Operation interrupted by user (KeyboardInterrupt).")
 
 
+def _show_protect_menu() -> None:
+    """Render the protect submenu in the Page tools submenu style."""
+    print()
+    print(colorize(f"{APP_NAME} Protect PDF:", Color.BOLD + Color.LIGHT_BLUE))
+    print(f"  {colorize('1.', Color.LIGHT_BLUE)} Password to open (view) "
+          f"{colorize('[1]', Color.GREEN)}")
+    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Restrict editing (owner password + permissions)")
+    print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
+    print()
+
+
+def protect_menu() -> None:
+    """Run the protect submenu loop (mirrors the Page tools submenu)."""
+    while True:
+        _show_protect_menu()
+        choice = _input(
+            colorize("Select an option ", Color.BOLD)
+            + colorize("[1]", Color.GREEN)
+            + " "
+            + back_text("back=0, quit=exit")
+            + colorize(": ", Color.WHITE)
+        ).strip().lower()
+
+        if choice == "":
+            choice = "1"  # Enter selects option 1.
+
+        if choice == "0":
+            return
+        if choice in ("exit", "quit"):
+            raise _ExitRequested()
+
+        logger.debug("Protect menu selection: '%s'", choice)
+        try:
+            if choice == "1":
+                operation_protect_open_password()
+            elif choice == "2":
+                operation_protect_restrict()
+            else:
+                print_error("Invalid option. Please choose 1, 2, or 0.")
+                continue
+        except KeyboardInterrupt:
+            print_warning("\nOperation interrupted. Returning to menu.")
+            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
+
+
 def show_menu() -> None:
     """Render the main menu: light-blue header and numbered options."""
     print()
@@ -210,7 +256,8 @@ def show_menu() -> None:
     print(f"  {colorize('6.', Color.LIGHT_BLUE)} Delete pages")
     print(f"  {colorize('7.', Color.LIGHT_BLUE)} Compress PDF (reduce file size)")
     print(f"  {colorize('8.', Color.LIGHT_BLUE)} Extract images from PDF")
-    print(f"  {colorize('9.', Color.LIGHT_BLUE)} Unlock PDF (remove password & restrictions)")
+    print(f"  {colorize('9.', Color.LIGHT_BLUE)} Protect PDF (set password / restrictions)")
+    print(f"  {colorize('10.', Color.LIGHT_BLUE)} Unlock PDF (remove password & restrictions)")
     print(f"  {colorize('0.', Color.LIGHT_BLUE)} Exit")
     print()
 
@@ -311,9 +358,11 @@ def main_menu() -> int:
             elif choice == "8":
                 operation_extract_images()
             elif choice == "9":
+                protect_menu()
+            elif choice == "10":
                 operation_unlock_pdf()
             else:
-                print_error("Invalid option. Please choose 1-9 or 0.")
+                print_error("Invalid option. Please choose 1-10 or 0.")
                 continue
         except _ExitRequested:
             finalize_queue()

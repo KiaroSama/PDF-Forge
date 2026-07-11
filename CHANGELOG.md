@@ -45,7 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their native format (zero loss); the seven JPEG levels (Very low 40 ..
   Ultra 95, plus Custom 1-100) re-encode instead, with alpha/CMYK images
   converted safely.
-- **Unlock PDF** main-menu tool (option 9): removes a PDF's open password and
+- **Protect PDF** main-menu tool (option 9) with a submenu (AES-256, output is
+  a new copy, original never modified):
+  - *Password to open (view)* — encrypts so the file needs a password just to
+    open; the password is entered twice to confirm.
+  - *Restrict editing (owner password + permissions)* — the file opens freely
+    but blocks the actions you choose (printing, copying, editing, annotating,
+    form filling, page assembly; Enter blocks editing + copying), behind an
+    owner password required to change them. Accessibility is always allowed.
+- **Unlock PDF** main-menu tool (option 10): removes a PDF's open password and
   permission restrictions into a new copy (the original is never modified).
   An open password must be entered by the user (this is not password
   cracking); owner-only restrictions - forbidding printing, copying, editing,
