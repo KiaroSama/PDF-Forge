@@ -14,9 +14,21 @@ explain-AI.md
 .claude/
 .kiro/
 .codex/
+.cursor/
+.cline/
+.agents/
 **/.claude/
 **/.kiro/
 **/.codex/
+
+# Portable AI working memory and local-only instruction/reference files.
+/.ai/
+/reference.md
+/CLAUDE.md
+/AGENTS.md
+
+# Generated knowledge-graph output.
+/graphify-out/
 
 # Python caches and build artifacts.
 __pycache__/
