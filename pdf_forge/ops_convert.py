@@ -11,7 +11,7 @@ from .render import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
 
-__all__ = ['operation_images_all_pages', 'operation_images_selected_pages', '_render_pngs_and_report', 'operation_images_batch_folder', 'operation_pdf_to_image_pdf', 'operation_image_pdf_batch_folder', '_warn_if_dpi_exceeds_source']
+__all__ = ['operation_images_all_pages', 'operation_images_selected_pages', '_render_pngs_and_report', 'operation_images_batch_folder', 'operation_pdf_to_image_pdf', 'operation_image_pdf_batch_folder', '_warn_if_dpi_exceeds_source', '_prompt_extract_quality', 'operation_extract_images']
 
 
 def _warn_if_dpi_exceeds_source(doc, dpi: int) -> None:
@@ -461,3 +461,154 @@ def operation_image_pdf_batch_folder() -> None:
         f"Image-only PDF (batch: {len(pdfs)} file(s) in {folder.name})",
         _run,
     )
+
+
+def _prompt_extract_quality():
+    """Ask how to save extracted images.
+
+    Returns ``("original", None)`` for a lossless raw-bytes copy, ``(label,
+    jpeg_quality)`` for a JPEG re-encode, or ``None`` to go back. Enter selects
+    Original (no quality loss).
+    """
+    prompt = question_prompt(
+        "Output quality",
+        details=(
+            "1=Original (no re-encode, lossless), 2=Very low (JPEG 40), "
+            "3=Low (60), 4=Medium (75), 5=High (85), 6=Very high (90), "
+            "7=Ultra (95), 8=Custom"
+        ),
+        default="1",
+    )
+    choices = {
+        "2": ("very low", 40), "3": ("low", 60), "4": ("medium", 75),
+        "5": ("high", 85), "6": ("very high", 90), "7": ("ultra", 95),
+    }
+    while True:
+        raw = _input(prompt).strip().lower()
+        if raw == "":
+            raw = "1"  # Enter keeps the original quality (lossless copy).
+        if raw == "0":
+            return None
+        if raw in ("exit", "quit"):
+            raise _ExitRequested()
+        if raw in ("1", "original"):
+            return "original", None
+        if raw in choices:
+            return choices[raw]
+        if raw in ("8", "custom"):
+            q_prompt = question_prompt("JPEG quality", details="1-100", default="80")
+            while True:
+                q_raw = _input(q_prompt).strip().lower()
+                if q_raw == "":
+                    q_raw = "80"
+                if q_raw == "0":
+                    break  # back to the quality selection
+                if q_raw in ("exit", "quit"):
+                    raise _ExitRequested()
+                try:
+                    quality = int(q_raw)
+                except ValueError:
+                    print_error("Please enter a whole number between 1 and 100.")
+                    continue
+                if not 1 <= quality <= 100:
+                    print_error("Quality must be between 1 and 100.")
+                    continue
+                return "custom", quality
+            continue
+        print_error("Invalid quality. Please choose 1-8.")
+
+
+def operation_extract_images() -> None:
+    """Extract the distinct embedded images of a PDF into a folder."""
+    reset_questions()
+    print_heading("\nExtract images from PDF")
+    logger.info("Operation started: Extract images from PDF.")
+
+    try:
+        source = prompt_source_pdf()
+    except _ExitRequested:
+        raise
+
+    if source is None:
+        return
+
+    try:
+        pdf, total_pages = open_render_document(source, password_prompt=prompt_password)
+    except (PdfOpenError, RuntimeError) as exc:
+        print_error(str(exc))
+        logger.error("Failed to open '%s' for image extraction: %s", source, exc)
+        return
+
+    try:
+        image_count = count_embedded_images(pdf)
+        print_success(
+            f"Loaded '{source.name}' - {total_pages} page(s), "
+            f"{image_count} distinct image(s)."
+        )
+        if image_count == 0:
+            print_warning(
+                "No embedded images were found. This tool extracts raster "
+                "images stored inside the PDF; text/vector content has none."
+            )
+            return
+        print_note(
+            "The same image reused on many pages (e.g. a watermark) is "
+            "extracted once, named after the first page it appears on."
+        )
+
+        quality = _prompt_extract_quality()
+        if quality is None:
+            return
+        label, jpeg_quality = quality
+
+        default_folder = unique_dir_path(
+            source.parent / f"{source.stem}_extracted_images"
+        )
+
+        print_heading("\nSummary")
+        print_kv("Source file", source.name, Color.CYAN)
+        print_kv("Total source pages", total_pages, Color.GOLD)
+        print_kv("Images to extract", image_count, Color.MAGENTA)
+        if jpeg_quality is None:
+            print_kv("Quality", "original (raw bytes, no quality loss)", Color.LIME)
+        else:
+            print_kv("Quality", f"{label} (JPEG quality {jpeg_quality})", Color.LIME)
+        print_kv("Output directory", default_folder, Color.AQUA)
+
+        out_dir = _choose_output_dir(default_folder)
+        if out_dir is None:
+            print_warning("Returning to menu.")
+            return
+
+        def _run():
+            try:
+                rpdf, _count = open_render_document(
+                    source, password_prompt=prompt_password
+                )
+            except (PdfOpenError, RuntimeError) as exc:
+                print_error(str(exc))
+                logger.error("Failed to reopen '%s' for extraction: %s", source, exc)
+                return
+            try:
+                created = extract_embedded_images(
+                    rpdf, out_dir, jpeg_quality,
+                    progress=lambda c, t: _print_progress("Extracting images", c, t),
+                )
+            except Exception as exc:  # noqa: BLE001 - clean message, log details
+                print_error(f"Failed to extract images: {exc}")
+                logger.exception("Image extraction failed for '%s'", source)
+                return
+            finally:
+                rpdf.close()
+            print_success(f"Done. Extracted {len(created)} image(s) in:\n  {out_dir}")
+            logger.info(
+                "Image extraction complete: images=%d dir='%s'", len(created), out_dir
+            )
+
+        queue_task(
+            f"Extract {image_count} image(s) ({label}) from {source.name} "
+            f"-> {out_dir.name}",
+            _run,
+        )
+    finally:
+        pdf.close()

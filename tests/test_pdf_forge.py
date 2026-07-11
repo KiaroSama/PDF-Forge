@@ -1005,6 +1005,100 @@ def test_folder_dpi_stats(tmp_path):
     assert app._folder_dpi_stats([tmp_path / "b.pdf", tmp_path / "c.pdf"]) is None
 
 
+# --------------------------------------------------------------------------- #
+# Extract embedded images
+# --------------------------------------------------------------------------- #
+
+def _make_two_image_pdf(tmp_path):
+    """Two pages: a unique photo on page 1, a repeated logo on both pages."""
+    import pymupdf
+    from PIL import Image
+
+    photo = tmp_path / "photo.png"
+    Image.new("RGB", (400, 300), (180, 40, 40)).save(photo)
+    logo = tmp_path / "logo.png"
+    Image.new("RGB", (100, 50), (40, 40, 180)).save(logo)
+
+    src = tmp_path / "twoimg.pdf"
+    doc = pymupdf.open()
+    for page_no in range(2):
+        page = doc.new_page(width=500, height=400)
+        if page_no == 0:
+            page.insert_image(pymupdf.Rect(50, 50, 450, 350), filename=str(photo))
+        page.insert_image(pymupdf.Rect(10, 10, 110, 60), filename=str(logo))
+    doc.save(str(src))
+    doc.close()
+    return src
+
+
+def test_extract_images_original_dedupes(tmp_path):
+    src = _make_two_image_pdf(tmp_path)
+    doc = app.open_source_pdf(src)
+    out_dir = tmp_path / "out"
+    try:
+        assert app.count_embedded_images(doc) == 2  # logo deduped across pages
+        created = app.extract_embedded_images(doc, out_dir, jpeg_quality=None)
+    finally:
+        doc.close()
+
+    assert len(created) == 2
+    for path in created:
+        assert path.stat().st_size > 0
+    # Named after the first page each image appears on.
+    assert all(p.name.startswith("p1_") for p in created)
+
+
+def test_extract_images_jpeg_reencode(tmp_path):
+    from PIL import Image
+
+    src = _make_two_image_pdf(tmp_path)
+    doc = app.open_source_pdf(src)
+    out_dir = tmp_path / "out"
+    try:
+        created = app.extract_embedded_images(doc, out_dir, jpeg_quality=75)
+    finally:
+        doc.close()
+
+    assert len(created) == 2
+    for path in created:
+        assert path.suffix == ".jpg"
+        with Image.open(path) as im:
+            im.verify()
+
+
+def test_extract_images_jpeg_handles_alpha(tmp_path):
+    # An embedded RGBA image (alpha) must re-encode to JPEG without errors
+    # (regression: 'jpg' cannot have alpha).
+    import pymupdf
+    from PIL import Image
+
+    rgba = tmp_path / "rgba.png"
+    Image.new("RGBA", (200, 100), (255, 0, 0, 128)).save(rgba)
+    src = tmp_path / "alpha.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    page.insert_image(pymupdf.Rect(20, 20, 220, 120), filename=str(rgba))
+    doc.save(str(src))
+    doc.close()
+
+    doc = app.open_source_pdf(src)
+    try:
+        created = app.extract_embedded_images(doc, tmp_path / "out", jpeg_quality=80)
+    finally:
+        doc.close()
+    assert len(created) == 1
+    assert created[0].suffix == ".jpg"
+
+
+def test_extract_images_none_in_text_pdf(tmp_path):
+    src = make_pdf(tmp_path / "text.pdf", 3)
+    doc = app.open_source_pdf(src)
+    try:
+        assert app.count_embedded_images(doc) == 0
+    finally:
+        doc.close()
+
+
 def test_compress_temp_cleanup_on_failure(tmp_path, monkeypatch):
     src = make_pdf(tmp_path / "doc.pdf", 3)
     out = tmp_path / "fail.pdf"

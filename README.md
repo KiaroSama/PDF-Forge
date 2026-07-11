@@ -104,6 +104,7 @@ PDF Forge Main menu:
   5. Remove image watermark
   6. Delete pages
   7. Compress PDF (reduce file size)
+  8. Extract images from PDF
   0. Exit
 ```
 
@@ -504,6 +505,27 @@ Main menu -> 7 (Compress PDF) -> 1 (Single PDF)
   Output Path [report_compressed.pdf beside source]: <Enter>
   Added to queue (#1): Compress report.pdf (very high) -> report_compressed.pdf
 ```
+
+### Extract images from PDF
+
+Selecting `8` in the main menu extracts the raster images embedded inside a
+PDF into a folder. The original PDF is never modified.
+
+1. Enter the source PDF path. The number of **distinct** images is shown —
+   an image reused on many pages (e.g. a watermark) is extracted once, named
+   after the first page it appears on (`p<page>_<n>.<ext>`). Tiny placeholder
+   images are skipped.
+2. Choose the output quality — `1` **Original** (default: the raw embedded
+   bytes are copied untouched in their native format, JPEG stays JPEG, PNG
+   stays PNG — zero quality loss), or re-encode as JPEG: `2` Very low (40),
+   `3` Low (60), `4` Medium (75), `5` High (85), `6` Very high (90),
+   `7` Ultra (95), `8` Custom (1-100).
+3. Review the summary and pick the output folder (Enter accepts
+   `<source>_extracted_images` beside the source); the task is added to the
+   queue.
+
+A text/vector PDF with no embedded raster images reports that there is
+nothing to extract.
 
 ## Page-selection examples
 

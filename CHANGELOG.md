@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user's PowerShell profile(s), so `pdf-forge` typed in any new PowerShell
   window launches the app. No `.cmd` shim and nothing added to PATH.
   User-level, idempotent, reversible; re-run after moving the project folder.
+- **Extract images from PDF** main-menu tool (option 8): saves the distinct
+  raster images embedded in a PDF into a folder. Repeated placements (e.g. a
+  watermark on every page) are extracted once, named `p<page>_<n>.<ext>` after
+  the first page they appear on; tiny placeholders are skipped. Default
+  quality is **Original** - the raw embedded bytes are copied untouched in
+  their native format (zero loss); the seven JPEG levels (Very low 40 ..
+  Ultra 95, plus Custom 1-100) re-encode instead, with alpha/CMYK images
+  converted safely.
 
 ### Changed
 - **Single PDF engine: PyMuPDF (MuPDF).** Every operation - page tools

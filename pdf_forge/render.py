@@ -11,7 +11,12 @@ from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
 __all__ = ['_import_pillow', 'open_render_document', '_validate_image_file',
-           'render_pages_to_pngs', 'render_pdf_to_image_pdf']
+           'render_pages_to_pngs', 'render_pdf_to_image_pdf',
+           'count_embedded_images', 'extract_embedded_images']
+
+# Embedded images smaller than this (either side, in pixels) are treated as
+# placeholders/artifacts and skipped by the extraction tool.
+_MIN_EXTRACT_SIDE = 16
 
 
 def _import_pillow():
@@ -159,3 +164,123 @@ def render_pdf_to_image_pdf(doc, page_count: int, out_path: Path, dpi: int,
         out_path, page_count, dpi, elapsed,
     )
     return page_count
+
+
+def _iter_unique_images(doc):
+    """Yield ``(xref, first_page_number, per_page_index)`` for each distinct
+    embedded image, in first-appearance order.
+
+    The same image referenced from many pages (e.g. a watermark) is yielded
+    once, for the first page it appears on. Tiny placeholder images are
+    skipped.
+    """
+    seen = set()
+    for page_index in range(doc.page_count):
+        counter = 0
+        for entry in doc[page_index].get_images(full=True):
+            xref, width, height = entry[0], entry[2], entry[3]
+            if width < _MIN_EXTRACT_SIDE or height < _MIN_EXTRACT_SIDE:
+                continue
+            counter += 1
+            if xref in seen:
+                continue
+            seen.add(xref)
+            yield xref, page_index + 1, counter
+
+
+def count_embedded_images(doc) -> int:
+    """Number of distinct extractable images in the document."""
+    return sum(1 for _ in _iter_unique_images(doc))
+
+
+def extract_embedded_images(doc, out_dir: Path, jpeg_quality=None,
+                            progress=None) -> List[Path]:
+    """Extract every distinct embedded image into ``out_dir``.
+
+    With ``jpeg_quality=None`` (Original mode) the raw embedded bytes are
+    written untouched in their native format (JPEG stays JPEG, etc.) - zero
+    quality loss. Otherwise each image is decoded and re-encoded as JPEG at
+    the given quality. Files are named ``p<page>_<n>.<ext>`` after the first
+    page the image appears on. Never overwrites existing files. Returns the
+    list of created paths.
+    """
+    pymupdf = _import_pymupdf()
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    started = time.perf_counter()
+    items = list(_iter_unique_images(doc))
+    total = len(items)
+    created: List[Path] = []
+    logger.debug(
+        "Extracting %d distinct image(s) to '%s' (quality=%s).",
+        total, out_dir, jpeg_quality if jpeg_quality is not None else "original",
+    )
+
+    for index, (xref, page_number, per_page) in enumerate(items, start=1):
+        if jpeg_quality is None:
+            info = doc.extract_image(xref)
+            data, ext = info.get("image"), info.get("ext", "png")
+            if not data:
+                logger.warning("Image xref %d yielded no data; skipped.", xref)
+                continue
+            final_path = unique_file_path(
+                out_dir / f"p{page_number}_{per_page}.{ext}"
+            )
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                suffix=".tmp", prefix=".pdfforge_", dir=str(out_dir)
+            )
+            tmp_path = Path(tmp_name)
+            try:
+                with os.fdopen(tmp_fd, "wb") as handle:
+                    handle.write(data)
+                if tmp_path.stat().st_size <= 0:
+                    raise PdfOpenError("Extracted image is empty.")
+                os.replace(tmp_path, final_path)
+            except Exception:
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    logger.warning("Failed to remove temporary file: %s", tmp_path)
+                raise
+        else:
+            pixmap = pymupdf.Pixmap(doc, xref)
+            # JPEG needs plain RGB or grayscale without alpha. Converting the
+            # colorspace keeps an alpha channel, so drop alpha separately.
+            if pixmap.colorspace and pixmap.colorspace.n > 3:
+                pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)
+            if pixmap.alpha:
+                pixmap = pymupdf.Pixmap(pixmap, 0)  # remove the alpha channel
+            final_path = unique_file_path(
+                out_dir / f"p{page_number}_{per_page}.jpg"
+            )
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                suffix=".tmp", prefix=".pdfforge_", dir=str(out_dir)
+            )
+            os.close(tmp_fd)
+            tmp_path = Path(tmp_name)
+            try:
+                pixmap.save(str(tmp_path), output="jpg", jpg_quality=jpeg_quality)
+                _validate_image_file(tmp_path)
+                os.replace(tmp_path, final_path)
+            except Exception:
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    logger.warning("Failed to remove temporary file: %s", tmp_path)
+                raise
+            finally:
+                del pixmap
+
+        created.append(final_path)
+        if progress is not None:
+            progress(index, total)
+
+    elapsed = time.perf_counter() - started
+    logger.info(
+        "Extracted %d image(s) into '%s' in %.2fs.", len(created), out_dir, elapsed
+    )
+    return created

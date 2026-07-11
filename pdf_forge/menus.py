@@ -208,6 +208,7 @@ def show_menu() -> None:
     print(f"  {colorize('5.', Color.LIGHT_BLUE)} Remove image watermark")
     print(f"  {colorize('6.', Color.LIGHT_BLUE)} Delete pages")
     print(f"  {colorize('7.', Color.LIGHT_BLUE)} Compress PDF (reduce file size)")
+    print(f"  {colorize('8.', Color.LIGHT_BLUE)} Extract images from PDF")
     print(f"  {colorize('0.', Color.LIGHT_BLUE)} Exit")
     print()
 
@@ -305,8 +306,10 @@ def main_menu() -> int:
                 delete_pages_menu()
             elif choice == "7":
                 compress_menu()
+            elif choice == "8":
+                operation_extract_images()
             else:
-                print_error("Invalid option. Please choose 1-7 or 0.")
+                print_error("Invalid option. Please choose 1-8 or 0.")
                 continue
         except _ExitRequested:
             finalize_queue()
