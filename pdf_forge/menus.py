@@ -23,7 +23,7 @@ from .ops_convert import *  # noqa: F401,F403
 from .ops_watermark import *  # noqa: F401,F403
 from .ops_compress import *  # noqa: F401,F403
 
-__all__ = ['_show_pdf_to_images_menu', 'pdf_to_images_menu', '_show_image_pdf_menu', 'pdf_to_image_pdf_menu', '_show_delete_pages_menu', 'delete_pages_menu', 'show_menu', 'show_page_tools_menu', 'page_tools_menu', 'main_menu']
+__all__ = ['_show_pdf_to_images_menu', 'pdf_to_images_menu', '_show_image_pdf_menu', 'pdf_to_image_pdf_menu', '_show_delete_pages_menu', 'delete_pages_menu', '_show_compress_menu', 'compress_menu', 'show_menu', 'show_page_tools_menu', 'page_tools_menu', 'main_menu']
 
 def _show_pdf_to_images_menu() -> None:
     """Render the PDF-to-images submenu in the Page tools submenu style."""
@@ -163,6 +163,51 @@ def delete_pages_menu() -> None:
             logger.warning("Operation interrupted by user (KeyboardInterrupt).")
 
 
+def _show_compress_menu() -> None:
+    """Render the compress submenu in the Page tools submenu style."""
+    print()
+    print(colorize(f"{APP_NAME} Compress PDF:", Color.BOLD + Color.LIGHT_BLUE))
+    print(f"  {colorize('1.', Color.LIGHT_BLUE)} Single PDF "
+          f"{colorize('[1]', Color.GREEN)}")
+    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Batch: all PDFs in a folder")
+    print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
+    print()
+
+
+def compress_menu() -> None:
+    """Run the compress submenu loop (mirrors the Page tools submenu)."""
+    while True:
+        _show_compress_menu()
+        choice = _input(
+            colorize("Select an option ", Color.BOLD)
+            + colorize("[1]", Color.GREEN)
+            + " "
+            + back_text("back=0, quit=exit")
+            + colorize(": ", Color.WHITE)
+        ).strip().lower()
+
+        if choice == "":
+            choice = "1"  # Enter selects option 1.
+
+        if choice == "0":
+            return
+        if choice in ("exit", "quit"):
+            raise _ExitRequested()
+
+        logger.debug("Compress menu selection: '%s'", choice)
+        try:
+            if choice == "1":
+                operation_compress_pdf()
+            elif choice == "2":
+                operation_compress_pdf_batch()
+            else:
+                print_error("Invalid option. Please choose 1, 2, or 0.")
+                continue
+        except KeyboardInterrupt:
+            print_warning("\nOperation interrupted. Returning to menu.")
+            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
+
+
 def show_menu() -> None:
     """Render the main menu: light-blue header and numbered options."""
     print()
@@ -271,7 +316,7 @@ def main_menu() -> int:
             elif choice == "6":
                 delete_pages_menu()
             elif choice == "7":
-                operation_compress_pdf()
+                compress_menu()
             else:
                 print_error("Invalid option. Please choose 1-7 or 0.")
                 continue

@@ -2,3 +2,7 @@
 # Install with: .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 -r requirements.txt
 pytest
+
+# Test-only: an independent PDF reader used to cross-verify PyMuPDF output
+# (page counts, encryption, extracted text). Not a runtime dependency.
+pypdf==6.14.2

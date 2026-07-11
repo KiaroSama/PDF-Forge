@@ -67,16 +67,16 @@ def operation_remove_watermark() -> None:
         return
 
     try:
-        reader = open_pypdf_document(source, password_prompt=prompt_password)
+        doc = open_source_pdf(source, password_prompt=prompt_password)
     except (PdfOpenError, RuntimeError) as exc:
         print_error(str(exc))
         logger.error("Failed to open '%s': %s", source, exc)
         return
 
-    total_pages = len(reader.pages)
+    total_pages = doc.page_count
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
     print_info("Scanning for repeated images (watermark candidates)...")
-    candidates, total = scan_watermark_candidates(reader.pages)
+    candidates, total = scan_watermark_candidates(doc)
 
     if not candidates:
         print_warning(
@@ -84,6 +84,7 @@ def operation_remove_watermark() -> None:
             "watermarks that repeat across pages (not text or flattened scans)."
         )
         logger.info("Watermark scan found no repeated images in '%s'.", source)
+        doc.close()
         return
 
     # Export previews to the project-local temp folder (always in a known place).
@@ -99,7 +100,7 @@ def operation_remove_watermark() -> None:
         coverage = len(cand.pages)
         percent = int(coverage * 100 / total) if total else 0
         preview_path = preview_dir / f"candidate_{idx}.png"
-        ok = export_watermark_preview(reader.pages, cand, preview_path)
+        ok = export_watermark_preview(doc, cand, preview_path)
         detail = f"on {coverage}/{total} pages ({percent}%)"
         detail += f" - preview: {preview_path.name}" if ok else " - preview unavailable"
         print_kv(f"[{idx}] {cand.width}x{cand.height}px", detail, Color.LIME)
@@ -161,9 +162,17 @@ def operation_remove_watermark() -> None:
         )
 
         def _run():
+            # Reopen the source fresh: the configure-time doc is closed after
+            # previews, and apply_redactions mutates the document in place.
+            try:
+                rdoc = open_source_pdf(source, password_prompt=prompt_password)
+            except (PdfOpenError, RuntimeError) as exc:
+                print_error(str(exc))
+                logger.error("Failed to reopen '%s': %s", source, exc)
+                return
             try:
                 modified = remove_watermark_images(
-                    reader,
+                    rdoc,
                     chosen_sigs,
                     out_path,
                     progress=lambda c, t: _print_progress("Cleaning pages", c, t),
@@ -172,6 +181,8 @@ def operation_remove_watermark() -> None:
                 print_error(f"Failed to remove the watermark: {exc}")
                 logger.exception("Watermark removal failed for output '%s'", out_path)
                 return
+            finally:
+                rdoc.close()
             print_success(
                 f"Done. Removed watermark from {modified} page(s):\n  {out_path}"
             )
@@ -185,8 +196,9 @@ def operation_remove_watermark() -> None:
             _run,
         )
     finally:
-        # Remove the preview folder now that the operation is done, and drop the
+        # Close the configure-time doc, remove the preview folder, and drop the
         # temp parent too if it is now empty.
+        doc.close()
         shutil.rmtree(preview_dir, ignore_errors=True)
         try:
             temp = _temp_dir()

@@ -40,15 +40,18 @@ def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
         page_count = doc.page_count
 
         if jpeg_quality is not None:
-            # Only touch images meaningfully above the target resolution, so
-            # already-small images are never upscaled or pointlessly re-encoded.
-            threshold = max(dpi_target + 1, int(dpi_target * 4 / 3))
+            # Consider reducing any image above the target DPI, and never below
+            # it or above the original.
+            # ponytail: MuPDF subsamples in quality-preserving (roughly halving)
+            # steps, so the result lands at or above dpi_target - not always
+            # exactly on it. Good enough; exact per-image resampling would mean
+            # re-implementing colorspace/mask handling MuPDF already does.
             logger.info(
-                "Compress: rewriting images (quality=%d, dpi %d -> %d).",
-                jpeg_quality, threshold, dpi_target,
+                "Compress: rewriting images (quality=%d, target dpi %d).",
+                jpeg_quality, dpi_target,
             )
             doc.rewrite_images(
-                dpi_threshold=threshold,
+                dpi_threshold=dpi_target + 1,
                 dpi_target=dpi_target,
                 quality=jpeg_quality,
                 lossy=True,

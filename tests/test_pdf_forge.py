@@ -646,8 +646,11 @@ def test_parse_index_list():
 
 def test_scan_watermark_candidates(tmp_path):
     src = make_repeated_image_pdf(tmp_path / "wm.pdf", 3)
-    reader = PdfReader(str(src))
-    candidates, total = app.scan_watermark_candidates(reader.pages)
+    doc = app.open_source_pdf(src)
+    try:
+        candidates, total = app.scan_watermark_candidates(doc)
+    finally:
+        doc.close()
     assert total == 3
     assert len(candidates) >= 1
     top = candidates[0]
@@ -657,20 +660,26 @@ def test_scan_watermark_candidates(tmp_path):
 
 def test_remove_watermark_images(tmp_path):
     src = make_repeated_image_pdf(tmp_path / "wm.pdf", 3)
-    reader = PdfReader(str(src))
-    candidates, _ = app.scan_watermark_candidates(reader.pages)
-    target_sig = candidates[0].signature
-
-    out = tmp_path / "clean.pdf"
-    modified = app.remove_watermark_images(reader, [target_sig], out)
+    doc = app.open_source_pdf(src)
+    try:
+        candidates, _ = app.scan_watermark_candidates(doc)
+        target_sig = candidates[0].signature
+        out = tmp_path / "clean.pdf"
+        modified = app.remove_watermark_images(doc, [target_sig], out)
+    finally:
+        doc.close()
 
     assert modified == 3
     result = PdfReader(str(out))
     assert len(result.pages) == 3
     assert result.is_encrypted is False
-    # The repeated image is gone: no candidate with that signature remains.
-    candidates_after, _ = app.scan_watermark_candidates(result.pages, min_pages=2)
-    assert target_sig not in {c.signature for c in candidates_after}
+    # The repeated image is gone: rescanning finds no repeated image at all.
+    check = app.open_source_pdf(out)
+    try:
+        candidates_after, _ = app.scan_watermark_candidates(check, min_pages=2)
+    finally:
+        check.close()
+    assert candidates_after == []
 
 
 # --------------------------------------------------------------------------- #
@@ -727,12 +736,50 @@ def test_delete_pages_end_to_end(tmp_path):
 def test_remove_watermark_preserves_other_pages(tmp_path):
     # Two shared images: one on all 3 pages (watermark), one only on page 1.
     src = make_repeated_image_pdf(tmp_path / "wm.pdf", 3)
-    reader = PdfReader(str(src))
-    candidates, _ = app.scan_watermark_candidates(reader.pages)
+    doc = app.open_source_pdf(src)
     out = tmp_path / "clean.pdf"
-    app.remove_watermark_images(reader, [candidates[0].signature], out)
+    try:
+        candidates, _ = app.scan_watermark_candidates(doc)
+        app.remove_watermark_images(doc, [candidates[0].signature], out)
+    finally:
+        doc.close()
     # Output still opens and keeps its page count (no pages dropped).
     assert len(PdfReader(str(out)).pages) == 3
+
+
+def test_remove_watermark_keeps_text(tmp_path):
+    # A watermark image stamped over real text must vanish without harming text.
+    import pymupdf
+    from PIL import Image
+
+    stamp = tmp_path / "stamp.png"
+    Image.new("RGB", (200, 60), (0, 120, 255)).save(stamp)
+    src = tmp_path / "stamped.pdf"
+    doc = pymupdf.open()
+    for _ in range(3):
+        page = doc.new_page(width=400, height=300)
+        page.insert_text((50, 120), "Confidential report body text stays here.")
+        page.insert_image(pymupdf.Rect(40, 90, 340, 180), filename=str(stamp))
+    doc.save(str(src))
+    doc.close()
+
+    doc = app.open_source_pdf(src)
+    out = tmp_path / "unstamped.pdf"
+    try:
+        candidates, _ = app.scan_watermark_candidates(doc)
+        assert len(candidates) >= 1
+        app.remove_watermark_images(doc, [candidates[0].signature], out)
+    finally:
+        doc.close()
+
+    check = pymupdf.open(str(out))
+    try:
+        assert check.page_count == 3
+        # The watermark image is gone but the underlying text survives.
+        assert len(check[0].get_images(full=True)) == 0
+        assert "Confidential report body text" in check[0].get_text()
+    finally:
+        check.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -850,6 +897,72 @@ def test_has_meaningful_text(tmp_path):
         assert app.has_meaningful_text(doc) is False
     finally:
         doc.close()
+
+
+def _make_hires_image_pdf(path, pixels=900, box_pt=200):
+    """One page with a single high-resolution image (~324 DPI by default)."""
+    import pymupdf
+    from PIL import Image
+
+    stamp = path.with_suffix(".png")
+    Image.new("RGB", (pixels, pixels), (200, 50, 50)).save(stamp)
+    doc = pymupdf.open()
+    page = doc.new_page(width=box_pt + 40, height=box_pt + 40)
+    page.insert_image(pymupdf.Rect(20, 20, 20 + box_pt, 20 + box_pt),
+                      filename=str(stamp))
+    doc.save(str(path))
+    doc.close()
+    stamp.unlink()
+    return path
+
+
+def test_compress_never_upscales_and_caps_high_dpi(tmp_path):
+    import pymupdf
+
+    src = _make_hires_image_pdf(tmp_path / "hi.pdf")  # ~324 DPI
+    doc = pymupdf.open(str(src))
+    before_px = doc[0].get_images(full=True)[0][2]
+    doc.close()
+
+    # Cap well below the source: the image must shrink, never grow.
+    out = tmp_path / "hi_low.pdf"
+    app.compress_pdf(src, out, jpeg_quality=75, dpi_target=96)
+    doc = pymupdf.open(str(out))
+    after_px = doc[0].get_images(full=True)[0][2]
+    doc.close()
+    assert after_px < before_px      # downsampled
+    assert after_px <= before_px     # never upscaled (by definition here)
+
+
+def test_compress_leaves_low_dpi_image_alone(tmp_path):
+    import pymupdf
+
+    # A 150-DPI photo compressed with a 300 cap: resolution must not change.
+    src = make_photo_pdf(tmp_path / "photo.pdf")
+    doc = pymupdf.open(str(src))
+    before_px = sorted(im[2] for im in doc[0].get_images(full=True))
+    doc.close()
+
+    out = tmp_path / "photo_c.pdf"
+    app.compress_pdf(src, out, jpeg_quality=90, dpi_target=300)
+    doc = pymupdf.open(str(out))
+    after_px = sorted(im[2] for im in doc[0].get_images(full=True))
+    doc.close()
+    assert after_px == before_px     # cap above source DPI -> no resolution change
+
+
+def test_folder_dpi_stats(tmp_path):
+    make_photo_pdf(tmp_path / "a.pdf")           # 150-DPI images
+    make_pdf(tmp_path / "b.pdf", 2)              # text/vector, no images
+    stats = app._folder_dpi_stats([tmp_path / "a.pdf", tmp_path / "b.pdf"])
+    assert stats is not None
+    assert stats["files_with_images"] == 1
+    assert stats["files_text_only"] == 1
+    assert 140 <= stats["max"] <= 160
+
+    # A folder of only text PDFs yields no DPI stats.
+    make_pdf(tmp_path / "c.pdf", 1)
+    assert app._folder_dpi_stats([tmp_path / "b.pdf", tmp_path / "c.pdf"]) is None
 
 
 def test_compress_temp_cleanup_on_failure(tmp_path, monkeypatch):

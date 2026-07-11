@@ -8,13 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.5.0] - 2026-07-11
 
 ### Added
-- **Compress PDF** main-menu tool (option 7): shrinks a PDF into a new file
-  while never modifying the original. Every run applies lossless optimization
-  (object deduplication/garbage collection, stream recompression, PDF object
-  streams, and font subsetting). All levels except Ultra additionally
-  downsample embedded images above a DPI cap and re-encode them as JPEG.
-  Bitonal (fax/scan black-and-white) images are never re-encoded. The result
-  line reports old size, new size, and the saving.
+- **Compress PDF** main-menu tool (option 7) with a **single-file and a batch
+  folder** submenu: shrinks a PDF into a new file while never modifying the
+  original. Every run applies lossless optimization (object
+  deduplication/garbage collection, stream recompression, PDF object streams,
+  and font subsetting). All levels except Ultra additionally downsample
+  embedded images **above the chosen DPI cap** (never below it and never above
+  the original) and re-encode them as JPEG. Bitonal (fax/scan black-and-white)
+  images are never re-encoded. Single-file reports old/new size and the saving;
+  batch reports a per-file line plus a grand total.
 - **Seven quality levels everywhere**: Very low, Low, Medium, High, Very high,
   Ultra, and Custom. For the conversion tools (PDF to PNG, image-only PDF)
   they map to render DPI (72/96/150/300/450/600, Custom 30-1200; Enter still
@@ -22,33 +24,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cap (Ultra = lossless only, zero quality change; Enter selects Very high;
   Custom asks for quality 1-100 and DPI 50-600).
 - **Current image DPI detection.** The compress tool measures and shows the
-  effective resolution of the images as placed on the pages (median/min/max),
-  or notes that the document is text/vector (where compression is always
-  lossless for the text). Two smart warnings follow from it: compressing with
-  a DPI cap at or above the document's own maximum image resolution warns
-  that no downsampling will occur, and rendering a scanned/image-only PDF to
-  PNG or image-only PDF above its own scan DPI warns that no detail can be
-  gained (single-file tools; batch modes skip the per-file analysis).
+  effective resolution of the images as placed on the pages (median/min/max) -
+  in batch mode aggregated across the whole folder (min/median/max plus how
+  many files are image-based vs text/vector) - or notes that the document is
+  text/vector (where compression is always lossless for the text). Two smart
+  warnings follow from it: compressing with a DPI cap at or above the maximum
+  image resolution present warns that no downsampling will occur, and rendering
+  a scanned/image-only PDF to PNG or image-only PDF above its own scan DPI
+  warns that no detail can be gained (the conversion warning is single-file
+  only; batch conversion skips the per-file analysis).
 - **`Install-pdf-forgeCommand.ps1`**: adds the project's `bin` folder (with
   the `pdf-forge` command shim) to the user PATH, so `pdf-forge` typed in any
   new terminal launches the app. User-level, idempotent, reversible; re-run
   after moving the project folder.
 
 ### Changed
-- **New PDF engine: PyMuPDF (MuPDF).** Page operations (extract, split,
-  delete), merging, rendering to PNG, and image-only PDF now run on PyMuPDF
-  instead of pypdf + pypdfium2 - faster on large documents, with the same
-  safety pattern (temp file -> validate -> atomic rename) and identical menu
-  behavior. Watermark removal intentionally stays on pypdf's object model
-  (its content-stream surgery and the byte-identical-images guarantee are
-  tied to it); it will be migrated separately.
+- **Single PDF engine: PyMuPDF (MuPDF).** Every operation - page tools
+  (extract, split, delete), merging, PNG rendering, image-only PDF,
+  compression, and watermark removal - now runs on PyMuPDF (previously
+  pypdf + pypdfium2). Faster on large documents, with the same safety pattern
+  (temp file -> validate -> atomic rename) and identical menu behavior.
+- **Watermark removal reimplemented on PyMuPDF.** Repeated images are still
+  grouped by a content signature (so the same watermark stored as a different
+  object on each page is caught), and removal now redacts only each image's
+  bounding box with image-removal enabled while text and vector graphics are
+  explicitly preserved - so a watermark stamped over text disappears without
+  harming the text underneath.
 - Every output PDF is now saved with lossless stream compression and object
   deduplication, so extract/split/merge outputs are often slightly smaller.
 - Image-only PDFs keep each page's original physical size explicitly (the
   rasterized image is placed on a page of the same dimensions).
-- Dependencies: added `pymupdf` (AGPL-licensed; noted in the README), removed
-  `pypdfium2`, kept `pypdf` (watermark surgery only) and `pillow` (image
-  validation and previews).
+- Dependencies: `pymupdf` (AGPL-licensed; noted in the README) is now the only
+  runtime PDF library alongside `pillow`; `pypdf` and `pypdfium2` are removed
+  from the runtime (`pypdf` remains a test-only dependency for independent
+  output verification).
 
 ## [1.4.0] - 2026-07-11
 

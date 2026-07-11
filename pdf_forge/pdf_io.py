@@ -9,7 +9,7 @@ from typing import Sequence
 from .constants import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 
-__all__ = ['_import_pymupdf', '_import_pypdf', 'PdfOpenError', 'open_source_pdf',
+__all__ = ['_import_pymupdf', 'PdfOpenError', 'open_source_pdf',
            'write_pages_to_pdf', '_validate_written_pdf', '_validate_merged_pdf',
            'write_merged_pdfs_to_pdf', 'resolves_to_same_file',
            'scan_image_dpi_stats', 'has_meaningful_text']
@@ -23,19 +23,6 @@ def _import_pymupdf():
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise RuntimeError(
             "The 'pymupdf' library is required but not installed. "
-            "Run the application through Run.ps1 to install dependencies."
-        ) from exc
-
-
-def _import_pypdf():
-    """Import pypdf lazily (used only by the watermark-removal surgery)."""
-    try:
-        from pypdf import PdfReader, PdfWriter  # type: ignore
-        from pypdf.errors import PdfReadError  # type: ignore
-        return PdfReader, PdfWriter, PdfReadError
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError(
-            "The 'pypdf' library is required but not installed. "
             "Run the application through Run.ps1 to install dependencies."
         ) from exc
 

@@ -1,14 +1,10 @@
 # PDF Forge runtime dependencies.
 # Pinned to known-good versions for reproducible installs.
 
-# Primary PDF engine (MuPDF bindings): page operations, merging, rendering,
-# image-only PDFs, and compression (image rewriting, font subsetting,
-# garbage collection). Note: PyMuPDF is licensed under the AGPL.
+# The single PDF engine (MuPDF bindings): every operation - page tools,
+# merging, PNG rendering, image-only PDFs, compression, and watermark removal.
+# Note: PyMuPDF is licensed under the AGPL.
 pymupdf==1.28.0
 
-# PDF structure manipulation used only by the watermark-removal surgery
-# (content-stream editing on pypdf's object model).
-pypdf==6.14.2
-
-# Image validation and watermark preview export.
+# Image validation for rendered PNGs and watermark preview handling.
 pillow==12.3.0

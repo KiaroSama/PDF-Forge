@@ -48,11 +48,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if log_path is not None:
         print_note(f"Logging to: {log_path}")
 
-    # Verify the PDF backends early for a friendly message. PyMuPDF drives all
-    # operations; pypdf is still required by the watermark-removal surgery.
+    # Verify the PDF backend early for a friendly message. PyMuPDF drives every
+    # operation (page tools, merge, render, compress, watermark removal).
     try:
         _import_pymupdf()
-        _import_pypdf()
     except RuntimeError as exc:
         print_error(str(exc))
         logger.critical("PDF backend import failed: %s", exc)

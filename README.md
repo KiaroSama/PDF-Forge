@@ -43,12 +43,11 @@ images. The original PDFs are never modified, overwritten, or deleted.
 - Python 3.10 or newer (`py` or `python` on the `PATH`).
 - The launcher creates a local virtual environment and installs the
   dependencies automatically on first run:
-  [`PyMuPDF`](https://pypi.org/project/PyMuPDF/) (the primary PDF engine: page
-  operations, merging, rendering, and compression; AGPL-licensed),
-  [`pypdf`](https://pypi.org/project/pypdf/) (used only by the
-  watermark-removal surgery), and
+  [`PyMuPDF`](https://pypi.org/project/PyMuPDF/) (the single PDF engine for
+  every operation — page tools, merging, rendering, compression, and watermark
+  removal; AGPL-licensed) and
   [`Pillow`](https://pypi.org/project/pillow/) (image validation and previews).
-  All three ship as prebuilt wheels, so no external tools are required.
+  Both ship as prebuilt wheels, so no external tools are required.
 
 ## How to run it
 
@@ -458,25 +457,47 @@ What each level does:
 an image: Ultra saves little, while the lossy levels act on the whole page —
 savings are large but quality loss is visible at the lower levels.
 
-Flow:
+**The DPI value is the only criterion for images**, and no image is ever
+enlarged:
+
+- If your DPI cap is **higher than** the document's maximum image DPI → a
+  warning tells you nothing can be downsampled (only re-encoding applies).
+- If it **equals** the maximum → no image changes resolution.
+- If it is **lower** → each image above the cap comes down toward it (in
+  quality-preserving, roughly-halving steps, never below the cap), and images
+  already at or below the cap are left untouched.
+
+Selecting `7` opens a submenu — **single file** or **batch folder**:
+
+Single file:
 
 1. Enter the source PDF path (size and page count are shown), along with the
    document's **current image resolution** — the median/min/max effective DPI
    of the raster images as placed on the pages (a text/vector PDF shows a note
    instead: text is never degraded, all levels are effectively lossless there).
 2. Pick the compression level (`Enter` = Very high; `7` = Custom asks for a
-   JPEG quality and a target image DPI). If the chosen DPI cap is at or above
-   the document's own maximum image resolution, a warning explains that no
-   downsampling will occur (only re-encoding and the lossless work).
+   JPEG quality and a target image DPI).
 3. Review the summary and pick the output path (Enter accepts
    `<source>_compressed.pdf` beside the source); the task is added to the queue.
 4. When the queue runs, the result line shows the old size, the new size, and
    the saving (e.g. `126.5 KB -> 39.0 KB (saved 87.4 KB, 69.1%)`).
 
+Batch folder:
+
+1. Enter a folder path. PDF Forge scans every PDF and shows the **folder-wide
+   image DPI range** (min / median / max) plus how many files are image-based
+   vs text/vector.
+2. Pick one compression level applied to all files (the same DPI-cap warning
+   applies against the folder's maximum).
+3. Each PDF becomes `<name>_compressed.pdf` beside it; a per-file line and a
+   grand total (bytes saved) are shown. A file that fails is reported and
+   skipped without stopping the batch.
+
 ```
-Main menu -> 7 (Compress PDF)
+Main menu -> 7 (Compress PDF) -> 1 (Single PDF)
   Source PDF path: C:\docs\report.pdf
   Loaded 'report.pdf' - 48 page(s), 12.40 MB.
+  Current image DPI: ~300 median (min 300, max 300; 48 image(s) measured)
   Compression level [5]: <Enter>
   Output Path [report_compressed.pdf beside source]: <Enter>
   Added to queue (#1): Compress report.pdf (very high) -> report_compressed.pdf
@@ -592,8 +613,7 @@ pdf_forge/            Main application package (run with: python -m pdf_forge)
   ops_*.py            Operations: pages, merge, convert, watermark, compress
   prompts.py          Interactive prompts and output-path pickers
   core.py             Pure logic: page parsing, chunking, filename rules
-  pdf_io.py render.py compress.py   I/O adapters (PyMuPDF engine)
-  watermark.py        Watermark-removal surgery (pypdf object model)
+  pdf_io.py render.py compress.py watermark.py   I/O adapters (PyMuPDF engine)
   ui.py logsetup.py constants.py     Terminal UI, logging, constants
 requirements.txt      Python runtime dependencies
 requirements-dev.txt  Development dependencies (pytest)

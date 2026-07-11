@@ -11,7 +11,9 @@ from .compress import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
 
-__all__ = ['operation_compress_pdf', '_prompt_compression_level', '_format_size']
+__all__ = ['operation_compress_pdf', 'operation_compress_pdf_batch',
+           '_prompt_compression_level', '_format_size', '_warn_if_cap_above_max',
+           '_folder_dpi_stats']
 
 
 def _format_size(num_bytes: int) -> str:
@@ -162,14 +164,7 @@ def operation_compress_pdf() -> None:
         return
     label, jpeg_quality, dpi_target = level
 
-    if jpeg_quality is not None and dpi_stats is not None \
-            and dpi_target >= dpi_stats["max"]:
-        print_warning(
-            f"The {dpi_target} DPI cap is at or above the document's maximum "
-            f"image resolution (~{dpi_stats['max']} DPI): no image will be "
-            f"downsampled. Only JPEG re-encoding (quality {jpeg_quality}) and "
-            "the lossless optimizations will apply."
-        )
+    _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats)
 
     default_path = unique_file_path(source.parent / f"{source.stem}_compressed.pdf")
 
@@ -220,5 +215,164 @@ def operation_compress_pdf() -> None:
 
     queue_task(
         f"Compress {source.name} ({label}) -> {out_path.name}",
+        _run,
+    )
+
+
+def _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats) -> None:
+    """Warn when the chosen DPI cap can't downsample anything.
+
+    The DPI cap is the criterion: images above it come down (in
+    quality-preserving steps, never below the cap), images at or below it are
+    left as-is - so no image is ever enlarged. When the cap is at or above the
+    document's own maximum image DPI, nothing needs downsampling.
+    """
+    if jpeg_quality is None or dpi_stats is None:
+        return
+    if dpi_target >= dpi_stats["max"]:
+        print_warning(
+            f"Your {dpi_target} DPI cap is at or above the maximum image "
+            f"resolution present (~{dpi_stats['max']} DPI): no image will be "
+            "downsampled (none is above the cap). Only JPEG re-encoding "
+            f"(quality {jpeg_quality}) and the lossless optimizations apply."
+        )
+
+
+def _folder_dpi_stats(pdfs) -> Optional[dict]:
+    """Aggregate image-DPI stats across every PDF in a folder.
+
+    Opens each file once to measure its images, then combines them into a
+    folder-wide ``{min, max, median, count, files_with_images, files_text_only}``
+    (or ``None`` when the whole folder is text/vector).
+    """
+    all_dpis = []
+    files_with_images = 0
+    files_text_only = 0
+    for src in pdfs:
+        try:
+            doc = open_source_pdf(src)
+        except (PdfOpenError, RuntimeError) as exc:
+            logger.warning("DPI scan skipped for '%s': %s", src, exc)
+            continue
+        try:
+            stats = scan_image_dpi_stats(doc)
+        finally:
+            doc.close()
+        if stats is None:
+            files_text_only += 1
+        else:
+            files_with_images += 1
+            # Reconstruct representative points: min, median, max per file.
+            all_dpis += [stats["min"], stats["median"], stats["max"]]
+    if not all_dpis:
+        return None
+    all_dpis.sort()
+    return {
+        "min": all_dpis[0],
+        "max": all_dpis[-1],
+        "median": all_dpis[len(all_dpis) // 2],
+        "files_with_images": files_with_images,
+        "files_text_only": files_text_only,
+    }
+
+
+def operation_compress_pdf_batch() -> None:
+    """Compress every PDF in a folder into its own ``<name>_compressed.pdf``.
+
+    A failure on one file is reported and skipped without stopping the batch.
+    """
+    reset_questions()
+    print_heading("\nCompress PDF: batch folder")
+    logger.info("Operation started: Compress PDF (batch folder).")
+
+    pdfs = prompt_source_folder_pdfs()
+    if pdfs is None:
+        return
+
+    folder = pdfs[0].parent
+    print_info(f"Scanning image resolution across {len(pdfs)} file(s)...")
+    dpi_stats = _folder_dpi_stats(pdfs)
+
+    print_heading("\nSummary")
+    print_kv("Folder", folder, Color.CYAN)
+    print_kv("PDF files", len(pdfs), Color.MAGENTA)
+    if dpi_stats is not None:
+        print_kv(
+            "Image DPI across folder",
+            f"min {dpi_stats['min']}, median {dpi_stats['median']}, "
+            f"max {dpi_stats['max']}",
+            Color.GOLD,
+        )
+        if dpi_stats["files_text_only"]:
+            print_note(
+                f"{dpi_stats['files_with_images']} file(s) contain images; "
+                f"{dpi_stats['files_text_only']} are text/vector only."
+            )
+        logger.info("Folder DPI stats for '%s': %s", folder, dpi_stats)
+    else:
+        print_note(
+            "No raster images found in any file - these are text/vector PDFs. "
+            "Compression is lossless for text; every level behaves like Ultra."
+        )
+
+    level = _prompt_compression_level()
+    if level is None:
+        return
+    label, jpeg_quality, dpi_target = level
+
+    _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats)
+
+    print_kv("Level", label, Color.LIME)
+    print_kv("Per-file output", "<name>_compressed.pdf beside each PDF", Color.AQUA)
+    print(colorize("\n  Files:", Color.GRAY))
+    _print_merge_order(pdfs)
+
+    def _run():
+        logger.info(
+            "Batch compress start: folder='%s' files=%d level=%s",
+            folder, len(pdfs), label,
+        )
+        ok = failed = 0
+        total_old = total_new = 0
+        for index, src in enumerate(pdfs, start=1):
+            print_info(f"[{index}/{len(pdfs)}] {src.name}")
+            out_path = unique_file_path(src.parent / f"{src.stem}_compressed.pdf")
+            if resolves_to_same_file(out_path, src):
+                out_path = unique_file_path(src.parent / f"{src.stem}_smaller.pdf")
+            try:
+                stats = compress_pdf(
+                    src, out_path, jpeg_quality, dpi_target,
+                    password_prompt=prompt_password,
+                )
+            except Exception as exc:  # noqa: BLE001 - keep the batch going
+                print_error(f"  Failed: {exc}")
+                logger.exception("Batch compress failed for '%s'", src)
+                failed += 1
+                continue
+            old, new = stats["original_size"], stats["new_size"]
+            total_old += old
+            total_new += new
+            ok += 1
+            # Size change: negative means the file got smaller.
+            delta_pct = (100.0 * (new - old) / old) if old else 0.0
+            print_success(
+                f"  -> {_format_size(old)} -> {_format_size(new)} "
+                f"({delta_pct:+.1f}%) {out_path.name}"
+            )
+
+        saved_total = total_old - total_new
+        pct_total = (100.0 * saved_total / total_old) if total_old else 0.0
+        print_success(
+            f"Done. Compressed {ok} file(s), {failed} failed. "
+            f"Total {_format_size(total_old)} -> {_format_size(total_new)} "
+            f"(saved {_format_size(saved_total)}, {pct_total:.1f}%)."
+        )
+        logger.info(
+            "Batch compress complete: ok=%d failed=%d saved=%d bytes.",
+            ok, failed, saved_total,
+        )
+
+    queue_task(
+        f"Compress batch: {len(pdfs)} file(s) in {folder.name} ({label})",
         _run,
     )
