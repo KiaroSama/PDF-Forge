@@ -20,7 +20,29 @@ from .render import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
 
-__all__ = ['operation_images_all_pages', 'operation_images_selected_pages', '_render_pngs_and_report', 'operation_images_batch_folder', 'operation_pdf_to_image_pdf', 'operation_image_pdf_batch_folder']
+__all__ = ['operation_images_all_pages', 'operation_images_selected_pages', '_render_pngs_and_report', 'operation_images_batch_folder', 'operation_pdf_to_image_pdf', 'operation_image_pdf_batch_folder', '_warn_if_dpi_exceeds_source']
+
+
+def _warn_if_dpi_exceeds_source(doc, dpi: int) -> None:
+    """Warn when rendering a scanned PDF above its own image resolution.
+
+    Only fires for image-only documents: a text/vector PDF genuinely gains
+    sharpness from a higher render DPI, so no warning is shown there.
+    """
+    stats = scan_image_dpi_stats(doc)
+    if stats is None or has_meaningful_text(doc):
+        return
+    if dpi > stats["max"]:
+        print_warning(
+            f"This looks like a scanned/image-only PDF at ~{stats['max']} DPI. "
+            f"Rendering at {dpi} DPI cannot add detail beyond the source - it "
+            "only produces larger files."
+        )
+        logger.info(
+            "DPI warning: render dpi=%d exceeds source image max dpi=%d.",
+            dpi, stats["max"],
+        )
+
 
 def operation_images_all_pages() -> None:
     """Render every page of a PDF to a PNG named after its page number."""
@@ -48,6 +70,7 @@ def operation_images_all_pages() -> None:
 
     try:
         print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
+        _warn_if_dpi_exceeds_source(pdf, dpi)
         default_folder = unique_dir_path(default_images_output_dir(source))
 
         print_heading("\nSummary")
@@ -114,6 +137,7 @@ def operation_images_selected_pages() -> None:
 
     try:
         print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
+        _warn_if_dpi_exceeds_source(pdf, dpi)
 
         selection_prompt = question_prompt(
             "Pages to export as images",
@@ -308,6 +332,7 @@ def operation_pdf_to_image_pdf() -> None:
 
     try:
         print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
+        _warn_if_dpi_exceeds_source(pdf, dpi)
         default_path = unique_file_path(default_image_pdf_output(source))
 
         print_heading("\nSummary")

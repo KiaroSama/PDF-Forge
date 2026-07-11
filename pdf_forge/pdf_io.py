@@ -11,7 +11,8 @@ from .core import *  # noqa: F401,F403
 
 __all__ = ['_import_pymupdf', '_import_pypdf', 'PdfOpenError', 'open_source_pdf',
            'write_pages_to_pdf', '_validate_written_pdf', '_validate_merged_pdf',
-           'write_merged_pdfs_to_pdf', 'resolves_to_same_file']
+           'write_merged_pdfs_to_pdf', 'resolves_to_same_file',
+           'scan_image_dpi_stats', 'has_meaningful_text']
 
 
 def _import_pymupdf():
@@ -242,6 +243,63 @@ def write_merged_pdfs_to_pdf(docs, out_path: Path, progress=None) -> int:
         len(docs), out_path, total, elapsed,
     )
     return total
+
+
+def scan_image_dpi_stats(doc, max_pages: int = 40):
+    """Measure the effective DPI of raster images as placed on the pages.
+
+    A PDF has no single DPI; only placed raster images have one:
+    ``image_pixels / displayed_inches``. Pages are sampled evenly (up to
+    ``max_pages``) to stay fast on huge documents.
+
+    Returns a dict ``{min, max, median, count, pages_scanned}`` (DPI values
+    rounded to int), or ``None`` when no meaningful raster image is found
+    (i.e. a text/vector PDF).
+    """
+    dpis = []
+    page_count = doc.page_count
+    step = max(1, -(-page_count // max_pages))  # ceil division
+    pages_scanned = 0
+    for page_index in range(0, page_count, step):
+        pages_scanned += 1
+        try:
+            infos = doc[page_index].get_image_info()
+        except Exception:  # noqa: BLE001 - a broken page must not kill the scan
+            continue
+        for info in infos:
+            x0, y0, x1, y1 = info["bbox"]
+            width_in, height_in = (x1 - x0) / 72.0, (y1 - y0) / 72.0
+            # Ignore tiny placements (icons/artifacts) - not meaningful for DPI.
+            if width_in < 0.15 or height_in < 0.15:
+                continue
+            dpis.append(min(info["width"] / width_in, info["height"] / height_in))
+    if not dpis:
+        return None
+    dpis.sort()
+    return {
+        "min": round(dpis[0]),
+        "max": round(dpis[-1]),
+        "median": round(dpis[len(dpis) // 2]),
+        "count": len(dpis),
+        "pages_scanned": pages_scanned,
+    }
+
+
+def has_meaningful_text(doc, max_pages: int = 10, min_chars: int = 40) -> bool:
+    """Return True when sampled pages contain real extractable text.
+
+    Used to tell text/vector PDFs (rendering DPI adds sharpness) apart from
+    scanned/image-only PDFs (rendering above the scan DPI adds nothing).
+    """
+    page_count = doc.page_count
+    step = max(1, -(-page_count // max_pages))
+    for page_index in range(0, page_count, step):
+        try:
+            if len(doc[page_index].get_text().strip()) >= min_chars:
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
 
 
 def resolves_to_same_file(a: Path, b: Path) -> bool:

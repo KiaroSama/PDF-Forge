@@ -76,6 +76,22 @@ You can also run the application directly once the environment exists:
 .\.venv\Scripts\python.exe -m pdf_forge
 ```
 
+### Install the `pdf-forge` command (optional)
+
+Run `Install-pdf-forgeCommand.ps1` (right-click → **Run with PowerShell**) to
+add the project's `bin` folder to your **user** PATH. After that, typing
+`pdf-forge` in any new terminal — PowerShell or cmd — launches the app from
+anywhere:
+
+```
+> pdf-forge
+```
+
+- User-level only (no administrator rights), idempotent (safe to re-run), and
+  reversible (remove the single PATH entry it prints).
+- If you move the project folder, run the installer again from the new
+  location.
+
 ## Menus
 
 ```
@@ -239,6 +255,10 @@ PDF Forge PDF to images:
 2. Choose the output image quality — seven levels: `1` Very low (72 DPI),
    `2` Low (96), `3` Medium (150), `4` High (300), `5` Very high (450),
    `6` Ultra (600), `7` Custom (any DPI from 30 to 1200). Enter = Medium.
+   For scanned/image-only sources, choosing a DPI above the scan's own
+   resolution shows a warning — rendering higher cannot add detail, it only
+   produces larger files (text/vector PDFs do sharpen at higher DPI, so no
+   warning there).
 3. Review the summary (source, total pages, quality, output folder) and pick the
    output folder (Enter accepts the default beside the source).
 4. The task is added to the queue; every page is rendered to its own PNG when
@@ -440,9 +460,14 @@ savings are large but quality loss is visible at the lower levels.
 
 Flow:
 
-1. Enter the source PDF path (size and page count are shown).
+1. Enter the source PDF path (size and page count are shown), along with the
+   document's **current image resolution** — the median/min/max effective DPI
+   of the raster images as placed on the pages (a text/vector PDF shows a note
+   instead: text is never degraded, all levels are effectively lossless there).
 2. Pick the compression level (`Enter` = Very high; `7` = Custom asks for a
-   JPEG quality and a target image DPI).
+   JPEG quality and a target image DPI). If the chosen DPI cap is at or above
+   the document's own maximum image resolution, a warning explains that no
+   downsampling will occur (only re-encoding and the lossless work).
 3. Review the summary and pick the output path (Enter accepts
    `<source>_compressed.pdf` beside the source); the task is added to the queue.
 4. When the queue runs, the result line shows the old size, the new size, and
@@ -557,6 +582,8 @@ captures `DEBUG` and above while the console stays quiet.
 
 ```
 Run.ps1               PowerShell launcher (the only launcher)
+Install-pdf-forgeCommand.ps1   Adds the pdf-forge command to the user PATH
+bin/pdf-forge.cmd     Command shim used by the PATH installer
 pdf_forge/            Main application package (run with: python -m pdf_forge)
   __main__.py         Entry point
   app.py              main()

@@ -805,6 +805,53 @@ def test_compress_pdf_ultra_lossless_valid_output(tmp_path):
     assert len(PdfReader(str(out)).pages) == 5
 
 
+def test_scan_image_dpi_stats(tmp_path):
+    # Image-heavy PDF embedded at 150 DPI -> stats reflect that resolution.
+    src = make_photo_pdf(tmp_path / "photos.pdf")
+    doc = app.open_source_pdf(src)
+    try:
+        stats = app.scan_image_dpi_stats(doc)
+        assert stats is not None
+        assert stats["count"] == 2
+        assert 140 <= stats["median"] <= 160
+        assert 140 <= stats["max"] <= 160
+    finally:
+        doc.close()
+
+    # Blank text-free PDF has no raster images at all.
+    blank = make_pdf(tmp_path / "blank.pdf", 2)
+    doc = app.open_source_pdf(blank)
+    try:
+        assert app.scan_image_dpi_stats(doc) is None
+    finally:
+        doc.close()
+
+
+def test_has_meaningful_text(tmp_path):
+    import pymupdf
+
+    # A real text page is detected as text content.
+    text_pdf = tmp_path / "text.pdf"
+    new_doc = pymupdf.open()
+    page = new_doc.new_page()
+    page.insert_text((72, 100), "A real paragraph of extractable text for testing.")
+    new_doc.save(str(text_pdf))
+    new_doc.close()
+    doc = app.open_source_pdf(text_pdf)
+    try:
+        assert app.has_meaningful_text(doc) is True
+    finally:
+        doc.close()
+
+    # An image-only PDF has no extractable text.
+    photo = make_photo_pdf(tmp_path / "photos.pdf")
+    doc = app.open_source_pdf(photo)
+    try:
+        assert app.has_meaningful_text(doc) is False
+    finally:
+        doc.close()
+
+
 def test_compress_temp_cleanup_on_failure(tmp_path, monkeypatch):
     src = make_pdf(tmp_path / "doc.pdf", 3)
     out = tmp_path / "fail.pdf"

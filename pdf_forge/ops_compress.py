@@ -128,12 +128,28 @@ def operation_compress_pdf() -> None:
         logger.error("Failed to open '%s': %s", source, exc)
         return
     total_pages = doc.page_count
+    dpi_stats = scan_image_dpi_stats(doc)
     doc.close()
 
     original_size = source.stat().st_size
     print_success(
         f"Loaded '{source.name}' - {total_pages} page(s), {_format_size(original_size)}."
     )
+    if dpi_stats is not None:
+        print_kv(
+            "Current image DPI",
+            f"~{dpi_stats['median']} median (min {dpi_stats['min']}, "
+            f"max {dpi_stats['max']}; {dpi_stats['count']} image(s) measured)",
+            Color.GOLD,
+        )
+        logger.info("Image DPI stats for '%s': %s", source, dpi_stats)
+    else:
+        print_note(
+            "No raster images found - this is a text/vector PDF. Text is never "
+            "degraded by compression: every level applies the same lossless "
+            "work (font subsetting, deduplication, stream compression), so "
+            "Ultra is effectively equal to the lossy levels here."
+        )
     print_note(
         "Ultra only optimizes structure and fonts (zero quality change). The "
         "other levels also downsample and re-encode embedded images - on "
@@ -145,6 +161,15 @@ def operation_compress_pdf() -> None:
     if level is None:
         return
     label, jpeg_quality, dpi_target = level
+
+    if jpeg_quality is not None and dpi_stats is not None \
+            and dpi_target >= dpi_stats["max"]:
+        print_warning(
+            f"The {dpi_target} DPI cap is at or above the document's maximum "
+            f"image resolution (~{dpi_stats['max']} DPI): no image will be "
+            f"downsampled. Only JPEG re-encoding (quality {jpeg_quality}) and "
+            "the lossless optimizations will apply."
+        )
 
     default_path = unique_file_path(source.parent / f"{source.stem}_compressed.pdf")
 

@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selects Medium 150). For compression they map to JPEG quality + image DPI
   cap (Ultra = lossless only, zero quality change; Enter selects Very high;
   Custom asks for quality 1-100 and DPI 50-600).
+- **Current image DPI detection.** The compress tool measures and shows the
+  effective resolution of the images as placed on the pages (median/min/max),
+  or notes that the document is text/vector (where compression is always
+  lossless for the text). Two smart warnings follow from it: compressing with
+  a DPI cap at or above the document's own maximum image resolution warns
+  that no downsampling will occur, and rendering a scanned/image-only PDF to
+  PNG or image-only PDF above its own scan DPI warns that no detail can be
+  gained (single-file tools; batch modes skip the per-file analysis).
+- **`Install-pdf-forgeCommand.ps1`**: adds the project's `bin` folder (with
+  the `pdf-forge` command shim) to the user PATH, so `pdf-forge` typed in any
+  new terminal launches the app. User-level, idempotent, reversible; re-run
+  after moving the project folder.
 
 ### Changed
 - **New PDF engine: PyMuPDF (MuPDF).** Page operations (extract, split,
