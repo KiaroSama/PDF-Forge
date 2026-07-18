@@ -5,6 +5,124 @@ All notable changes to PDF Forge are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-07-18
+
+### Changed (breaking)
+- **Main menu reordered and renumbered.** The tools are now grouped as page/merge/
+  delete, then the image tools, then compress/protect/unlock, then convert:
+
+  `1` Page tools · `2` Merge · `3` Delete pages · `4` PDF to images (PNG) ·
+  `5` PDF to image-only PDF · `6` Remove image watermark · `7` Extract images ·
+  `8` Compress PDF · `9` Protect PDF · `10` Unlock PDF · `11` Convert to PDF ·
+  `0` Exit.
+
+  Old numbers now open different tools; invalid input reports `1-11 or 0`.
+  Pressing **Enter** at the main menu still opens Page tools.
+- **Hierarchical prompt numbering.** Prompts read `<operation>-<question>`
+  (`1-1`, `1-2`, `1-3`, …). The prefix is the menu item you chose and never
+  changes inside an operation; only the local counter advances, including on
+  validation retries. Previously a single global counter made a retry look like
+  a new question (`1.`, `2.`, `3.` for the same prompt).
+- **`_folder_dpi_stats()` now always returns a dict** (with `files_with_images`,
+  `files_text_only`, `files_not_scanned`) instead of `None` for an all-text
+  folder, so callers can tell "no images" apart from "not inspected".
+
+### Added
+- **Convert documents/spreadsheets/presentations to PDF** (main menu `11`) —
+  `.doc`, `.docx`, `.ppt`, `.pptx`, `.xls`, `.xlsx`, `.csv` in one menu with
+  automatic family detection. Add files one by one (`done` to finish, `b` to
+  re-enter the previous file) or take a whole folder (non-recursive, Office `~$` lock files skipped).
+  Conversion is local, offline, and command-line only: the `.venv`-installed
+  `unoserver` client drives a **project-local headless LibreOffice** under
+  `.tools/libreoffice/` (pinned version + SHA-256 in the tracked
+  `office_runtime_meta.json`). LibreOffice is never installed system-wide, no
+  PATH/registry/shortcut/service is touched, and no GUI appears. Each run owns
+  its `soffice` process on a random localhost port with an isolated temporary
+  profile and terminates only that process on every exit path.
+  Encrypted sources are handled through the **in-memory** UNO password API with
+  **unlimited** retries, and the produced PDF can stay unencrypted, reuse the
+  source password, or take a new one.
+- `--diagnose`, `--setup-office`, `--clean-office` command-line modes. The
+  diagnostic mode prints the resolved package files, repository root, commit,
+  interpreter, and runtime versions, so it is obvious which checkout a launcher
+  is really running.
+- **Drag-and-drop path guidance** on every file/folder prompt:
+  `(drag and drop a file here or paste a path)`. Prompts that collect several
+  files add `b=re-enter previous file; type done when finished`, with the
+  typeable keywords picked out in light blue inside the hint-coloured guidance
+  (the same split FFmWiz uses). Quoted paths keep working.
+- **`b` re-enters the previous file** in the merge and convert file lists:
+  it drops the file added last and asks for it again.
+- Documented **protection policy** for encrypted sources (see README).
+- The conversion runtime is **self-healing and self-diagnosing**: an encrypted
+  source is detected from its container *before* conversion (so the password is
+  requested up front rather than inferred from an opaque converter error), and
+  if LibreOffice dies mid-run the server is restarted with a **fresh** profile
+  and the file retried once. Provisioning caches the verified download under
+  `.tools/cache/`, so a retry or repair never re-downloads ~360 MB, and it
+  aborts with an actionable message instead of hanging when Windows Installer
+  cannot service the request.
+
+### Fixed
+- **Merge → "Add PDF files one by one" now finishes reliably.** `done` is
+  accepted (case-insensitively) alongside a blank Enter; before, the word was
+  treated as a file path and the prompt repeated forever. The `[finish]` default
+  marker is gone - the guidance itself now names the keyword.
+- **Queued tasks can no longer collide on an output path.** Output files and
+  directories are reserved at queue time (normalized, case-insensitively on
+  Windows, files and directories tracked separately), so two tasks configured
+  with the same default output get distinct names instead of one silently
+  overwriting the other. Reservations are released when the queue runs, is
+  discarded, or the app exits.
+- **Transformations no longer silently strip protection.** A source that needs
+  an open password produces an output re-encrypted with the same password and
+  permissions; an owner-restricted source (whose owner password cannot be
+  recovered) now warns and asks instead of quietly producing an unprotected
+  file; a merge never invents a policy.
+- **Watermark detection uses a real content identity.** Grouping is by MuPDF's
+  decoded-image digest plus pixel size instead of `(width, height, raw stream
+  length)`, which could merge two unrelated images and delete the wrong one.
+- **Watermarks painted through Form XObjects are found and removed.** Removal
+  now edits the form's content stream as well as the page's, so such a
+  watermark no longer reports a misleading "0 pages modified" success.
+- **Only painted images are reported.** Scanning uses actual painted
+  occurrences, so unused resource entries are no longer offered as watermark
+  candidates or extractable images.
+- **Extract images deduplicates by content**, so one picture stored under
+  several xrefs is extracted once, as "distinct images" promises.
+- **Transparency is preserved when extracting.** An image with a soft mask is
+  rebuilt as a PNG with its alpha channel; in JPEG mode it is composited over
+  white rather than silently losing the mask.
+- **Pathological page ranges are rejected instantly.** `1-999999999` no longer
+  tries to materialize a billion integers; ranges are validated against the
+  document length (or a sanity ceiling in batch mode) *before* expansion.
+- **Password prompts have no attempt limit anywhere.** A wrong password shows a
+  clear message and asks again indefinitely, until the password is accepted or
+  you type `0`/`back`/`skip` (or `exit`/`quit`). Blank input never counts
+  against anything, and failed passwords are never retained.
+- **Queued tasks no longer ask for a password while running.** Single-file
+  operations authenticate during configuration and reopen silently with the
+  captured password; batch operations, which can only discover an encrypted
+  file when they open it, now disclose that up front.
+- **No file handles survive the queue.** Operations carry immutable paths and
+  settings instead of open documents, so discarding a queue leaks nothing and a
+  source can be renamed or deleted right after an operation.
+- **`exit`/`quit` at `Start now?` is a clean exit** — the queue is discarded,
+  reservations released, and the app returns a normal exit code instead of
+  surfacing an unexpected top-level error.
+- **Encrypted files are no longer dropped from the batch compression preflight.**
+  They are counted as "not scanned", and an all-encrypted folder no longer
+  claims "no raster images in any file".
+- **Batch compression reports growth honestly.** When the outputs are larger in
+  total, it says "increased by" with a warning instead of feeding a negative
+  byte count to the size formatter and calling it "saved".
+- **Configuration no longer creates directories.** Output folders are created by
+  the task runner, so cancelling or discarding a queue leaves nothing behind.
+- **Folder tools never reprocess their own output.** Generated PDFs are recorded
+  by exact normalized path (with size/mtime), so a second run over the same
+  folder skips them — without the substring guesswork that would also hide a
+  user's own file named `..._compressed.pdf`.
+
 ## [1.5.0] - 2026-07-11
 
 ### Added

@@ -7,30 +7,10 @@ from pathlib import Path
 from typing import List
 
 from .constants import *  # noqa: F401,F403
+from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
-__all__ = ['permission_labels', 'denied_permissions', 'unlock_pdf_doc']
-
-
-def permission_labels() -> dict:
-    """Map a human-readable action name to its PDF permission bit."""
-    pymupdf = _import_pymupdf()
-    return {
-        "printing": pymupdf.PDF_PERM_PRINT,
-        "high-quality printing": pymupdf.PDF_PERM_PRINT_HQ,
-        "copying text/images": pymupdf.PDF_PERM_COPY,
-        "editing content": pymupdf.PDF_PERM_MODIFY,
-        "annotating / comments": pymupdf.PDF_PERM_ANNOTATE,
-        "filling form fields": pymupdf.PDF_PERM_FORM,
-        "assembling pages": pymupdf.PDF_PERM_ASSEMBLE,
-        "accessibility extraction": pymupdf.PDF_PERM_ACCESSIBILITY,
-    }
-
-
-def denied_permissions(doc) -> List[str]:
-    """Return the human-readable actions the (opened) document forbids."""
-    return [name for name, bit in permission_labels().items()
-            if not (doc.permissions & bit)]
+__all__ = ['unlock_pdf_doc']  # permission helpers live in pdf_io
 
 
 def unlock_pdf_doc(doc, out_path: Path) -> int:
@@ -62,6 +42,7 @@ def unlock_pdf_doc(doc, out_path: Path) -> int:
         )
         _validate_written_pdf(tmp_path, expected_pages=total)
         os.replace(tmp_path, out_path)
+        record_generated_output(out_path)
     except Exception:
         try:
             if tmp_path.exists():

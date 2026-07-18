@@ -4,8 +4,7 @@ import logging
 
 
 __all__ = ['APP_NAME', 'LOG_PREFIX', 'APP_VERSION', 'IMAGE_QUALITY_DPI',
-           'DEFAULT_IMAGE_QUALITY', 'COMPRESSION_PRESETS',
-           'DEFAULT_COMPRESSION_LEVEL', 'logger']
+           'COMPRESSION_PRESETS', 'logger']
 
 APP_NAME = "PDF Forge"            # User-facing application name (never change spelling).
 
@@ -13,7 +12,7 @@ APP_NAME = "PDF Forge"            # User-facing application name (never change s
 LOG_PREFIX = "PDF Forge"          # Log filename prefix.
 
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "2.0.0"
 
 
 # Rendering quality levels for image conversion, mapped to a resolution in DPI.
@@ -28,9 +27,6 @@ IMAGE_QUALITY_DPI = {
 }
 
 
-DEFAULT_IMAGE_QUALITY = "medium"
-
-
 # Compression levels for the "Compress PDF" tool, mapped to
 # (jpeg_quality, dpi_target) for embedded-image recompression/downsampling.
 # ``None`` = lossless-only: no image is touched (structure optimization,
@@ -43,9 +39,6 @@ COMPRESSION_PRESETS = {
     "very high": (90, 250),
     "ultra": None,
 }
-
-
-DEFAULT_COMPRESSION_LEVEL = "very high"
 
 
 logger = logging.getLogger("pdf_forge")

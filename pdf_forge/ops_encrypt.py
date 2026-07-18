@@ -43,22 +43,26 @@ def operation_protect_open_password() -> None:
     doc = _open_source_for_protect(source)
     if doc is None:
         return
+    # Keep only immutable state in the queue: the source path, its own password
+    # (for a silent reopen) and the page count. The handle is closed now, so a
+    # discarded task cannot leak it (A5).
+    source_pw = source_password(doc)
+    page_count = doc.page_count
+    close_doc(doc)
 
     try:
         password = prompt_new_password("to open the file")
     except _ExitRequested:
-        doc.close()
         raise
     if password is None:
         print_warning("Cancelled. Returning to menu.")
-        doc.close()
         return
 
     default_path = unique_file_path(source.parent / f"{source.stem}_protected.pdf")
 
     print_heading("\nSummary")
     print_kv("Source file", source.name, Color.CYAN)
-    print_kv("Total source pages", doc.page_count, Color.GOLD)
+    print_kv("Total source pages", page_count, Color.GOLD)
     print_kv("Protection", "AES-256; a password is required to open", Color.LIME)
     print_kv("Default Output Path", default_path, Color.AQUA)
     print_note("Keep the password safe - without it the file cannot be opened.")
@@ -66,14 +70,15 @@ def operation_protect_open_password() -> None:
     out_path = _choose_output_file(default_path, source)
     if out_path is None:
         print_warning("Returning to menu.")
-        doc.close()
         return
 
     def _run():
+        rdoc = None
         try:
+            rdoc = open_source_pdf(source, password=source_pw)
             # The same password opens the file and guards its permissions.
             written = save_encrypted_pdf(
-                doc, out_path, user_pw=password, owner_pw=password,
+                rdoc, out_path, user_pw=password, owner_pw=password,
                 permissions=all_permissions(),
             )
         except Exception as exc:  # noqa: BLE001 - clean message, log details
@@ -81,7 +86,7 @@ def operation_protect_open_password() -> None:
             logger.exception("Protect (open password) failed for '%s'", out_path)
             return
         finally:
-            doc.close()
+            close_doc(rdoc)
         print_success(
             f"Done. Protected {written} page(s) with an open password:\n  {out_path}"
         )
@@ -148,33 +153,34 @@ def operation_protect_restrict() -> None:
     doc = _open_source_for_protect(source)
     if doc is None:
         return
+    # Only immutable state crosses the queue boundary (A5); see the open-password
+    # operation above for the rationale.
+    source_pw = source_password(doc)
+    page_count = doc.page_count
+    close_doc(doc)
 
     try:
         result = _prompt_blocked_actions()
     except _ExitRequested:
-        doc.close()
         raise
     if result is None:
         print_warning("Returning to menu.")
-        doc.close()
         return
     permissions, blocked_labels = result
 
     try:
         owner_password = prompt_new_password("to change permissions (owner password)")
     except _ExitRequested:
-        doc.close()
         raise
     if owner_password is None:
         print_warning("Cancelled. Returning to menu.")
-        doc.close()
         return
 
     default_path = unique_file_path(source.parent / f"{source.stem}_restricted.pdf")
 
     print_heading("\nSummary")
     print_kv("Source file", source.name, Color.CYAN)
-    print_kv("Total source pages", doc.page_count, Color.GOLD)
+    print_kv("Total source pages", page_count, Color.GOLD)
     print_kv("Opens without a password", "yes", Color.LIME)
     print_kv("Blocked actions", ", ".join(blocked_labels) or "(none)", Color.RED)
     print_kv("Owner password", "required to change permissions", Color.MAGENTA)
@@ -183,13 +189,14 @@ def operation_protect_restrict() -> None:
     out_path = _choose_output_file(default_path, source)
     if out_path is None:
         print_warning("Returning to menu.")
-        doc.close()
         return
 
     def _run():
+        rdoc = None
         try:
+            rdoc = open_source_pdf(source, password=source_pw)
             written = save_encrypted_pdf(
-                doc, out_path, user_pw=None, owner_pw=owner_password,
+                rdoc, out_path, user_pw=None, owner_pw=owner_password,
                 permissions=permissions,
             )
         except Exception as exc:  # noqa: BLE001 - clean message, log details
@@ -197,7 +204,7 @@ def operation_protect_restrict() -> None:
             logger.exception("Protect (restrict) failed for '%s'", out_path)
             return
         finally:
-            doc.close()
+            close_doc(rdoc)
         print_success(
             f"Done. Restricted {written} page(s):\n  {out_path}"
         )

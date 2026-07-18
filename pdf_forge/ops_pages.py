@@ -38,6 +38,7 @@ def operation_extract_pages() -> None:
         return
 
     total_pages = reader.page_count
+    protection = detect_protection(reader)
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
     logger.info("Extract: source='%s' pages=%d", source, total_pages)
 
@@ -63,12 +64,13 @@ def operation_extract_pages() -> None:
     )
 
     if len(groups) == 1:
-        _extract_single_file(reader, source, total_pages, groups[0])
+        _extract_single_file(reader, source, total_pages, groups[0], protection)
     else:
-        _extract_multiple_files(reader, source, total_pages, groups)
+        _extract_multiple_files(reader, source, total_pages, groups, protection)
 
 
-def _extract_single_file(reader, source: Path, total_pages: int, group: "PageGroup") -> None:
+def _extract_single_file(reader, source: Path, total_pages: int, group: "PageGroup",
+                         protection=None) -> None:
     """Write one combined output PDF from a single page group."""
     if group.duplicates_removed:
         print_warning("Duplicate pages were removed; first occurrence kept.")
@@ -86,6 +88,11 @@ def _extract_single_file(reader, source: Path, total_pages: int, group: "PageGro
     print_kv("Pages to extract", len(group.pages), Color.ORANGE)
     print_kv("Default Output Path", default_path, Color.AQUA)
 
+    protection = resolve_protection(protection, context="extracted PDF")
+    if protection is None:
+        print_warning("Cancelled. Returning to menu.")
+        return
+
     out_path = _choose_output_file(default_path, source)
     if out_path is None:
         print_warning("Returning to menu.")
@@ -100,6 +107,7 @@ def _extract_single_file(reader, source: Path, total_pages: int, group: "PageGro
                 pages_zero_based,
                 out_path,
                 progress=lambda c, t: _print_progress("Extracting", c, t),
+                protection=protection,
             )
         except Exception as exc:  # noqa: BLE001 - present a clean message, log details
             print_error(f"Failed to create the output PDF: {exc}")
@@ -115,7 +123,7 @@ def _extract_single_file(reader, source: Path, total_pages: int, group: "PageGro
 
 
 def _extract_multiple_files(reader, source: Path, total_pages: int,
-                            groups: "List[PageGroup]") -> None:
+                            groups: "List[PageGroup]", protection=None) -> None:
     """Write one separate output PDF per page group (split by '|')."""
     if any(g.duplicates_removed for g in groups):
         print_warning("Duplicate pages were removed in one or more groups; order kept.")
@@ -131,6 +139,11 @@ def _extract_multiple_files(reader, source: Path, total_pages: int,
             + colorize(summarize_ranges(group.pages), file_colors[(index - 1) % len(file_colors)])
             + colorize(f"  ({len(group.pages)} page(s))", Color.GRAY)
         )
+
+    protection = resolve_protection(protection, context="extracted PDFs")
+    if protection is None:
+        print_warning("Cancelled. Returning to menu.")
+        return
 
     out_dir = _choose_output_dir_for_files(source.parent)
     if out_dir is None:
@@ -156,7 +169,8 @@ def _extract_multiple_files(reader, source: Path, total_pages: int,
             pages_zero_based = [p - 1 for p in group.pages]
             _print_progress("Writing files", index, len(groups))
             try:
-                written = write_pages_to_pdf(reader, pages_zero_based, out_path)
+                written = write_pages_to_pdf(reader, pages_zero_based, out_path,
+                                             protection=protection)
             except Exception as exc:  # noqa: BLE001
                 sys.stdout.write("\n")
                 print_error(f"Failed while writing '{out_path.name}': {exc}")
@@ -205,6 +219,7 @@ def operation_split_chunks() -> None:
         return
 
     total_pages = reader.page_count
+    protection = detect_protection(reader)
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
     logger.info("Split: source='%s' pages=%d", source, total_pages)
 
@@ -307,6 +322,11 @@ def operation_split_chunks() -> None:
         print(colorize(f"    ... (+{len(chunks) - preview_count} more)", Color.DIM))
     print_kv("Output directory", default_folder, Color.AQUA)
 
+    protection = resolve_protection(protection, context="split PDFs")
+    if protection is None:
+        print_warning("Cancelled. Returning to menu.")
+        return
+
     out_dir = _choose_output_dir(default_folder)
     if out_dir is None:
         print_warning("Returning to menu.")
@@ -329,7 +349,8 @@ def operation_split_chunks() -> None:
             pages_zero_based = list(range(start - 1, end))
             _print_progress("Writing chunks", index, len(chunks))
             try:
-                written = write_pages_to_pdf(reader, pages_zero_based, out_path)
+                written = write_pages_to_pdf(reader, pages_zero_based, out_path,
+                                             protection=protection)
             except Exception as exc:  # noqa: BLE001
                 sys.stdout.write("\n")
                 print_error(f"Failed while writing '{out_path.name}': {exc}")
@@ -370,8 +391,13 @@ def _report_created(files: Sequence[Path], pages: int, out_dir: Path) -> None:
         print_success(f"Output directory:\n  {out_dir}")
 
 
-def _prompt_delete_selection() -> Optional[List[int]]:
-    """Prompt for the pages to delete. Returns the parsed list or None (Back)."""
+def _prompt_delete_selection(max_page: Optional[int] = None) -> Optional[List[int]]:
+    """Prompt for the pages to delete. Returns the parsed list or None (Back).
+
+    ``max_page`` bounds accepted page numbers: the document length in single-file
+    mode, or ``None`` in batch mode (a hard sanity ceiling then applies so a
+    pathological range cannot exhaust memory).
+    """
     prompt = question_prompt(
         "Pages to delete",
         details="e.g. 5 or 10-20 or 10-20,25,30-50",
@@ -383,7 +409,7 @@ def _prompt_delete_selection() -> Optional[List[int]]:
         if raw.lower() in ("exit", "quit"):
             raise _ExitRequested()
         try:
-            return parse_delete_pages(raw)
+            return parse_delete_pages(raw, max_page=max_page)
         except PageSelectionError as exc:
             print_error(f"Invalid selection: {exc}")
 
@@ -409,11 +435,12 @@ def operation_delete_pages_single() -> None:
         return
 
     total_pages = reader.page_count
+    protection = detect_protection(reader)
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
 
     # Ask for the pages, rejecting any that do not exist in this document.
     while True:
-        requested = _prompt_delete_selection()
+        requested = _prompt_delete_selection(max_page=total_pages)
         if requested is None:
             return
         present, missing, kept = compute_deletion(total_pages, requested)
@@ -444,6 +471,11 @@ def operation_delete_pages_single() -> None:
     print_kv("Pages remaining", len(kept), Color.LIME)
     print_kv("Default Output Path", default_path, Color.AQUA)
 
+    protection = resolve_protection(protection, context="output PDF")
+    if protection is None:
+        print_warning("Cancelled. Returning to menu.")
+        return
+
     out_path = _choose_output_file(default_path, source)
     if out_path is None:
         print_warning("Returning to menu.")
@@ -458,6 +490,7 @@ def operation_delete_pages_single() -> None:
             written = write_pages_to_pdf(
                 reader, kept, out_path,
                 progress=lambda c, t: _print_progress("Writing pages", c, t),
+                protection=protection,
             )
         except Exception as exc:  # noqa: BLE001 - clean message, log details
             print_error(f"Failed to create the output PDF: {exc}")
@@ -506,6 +539,7 @@ def operation_delete_pages_batch() -> None:
         "beyond a file's length are skipped for that file (a note is shown)."
     )
     print_kv("Per-file output", "<name>_deleted_... .pdf beside each PDF", Color.AQUA)
+    print_note(BATCH_PASSWORD_NOTICE)
     print(colorize("\n  Files:", Color.GRAY))
     _print_merge_order(pdfs)
 
@@ -516,6 +550,7 @@ def operation_delete_pages_batch() -> None:
         )
         print()
         processed = skipped = failed = total_deleted = 0
+        unprotected_notes: List[str] = []
         for index, src in enumerate(pdfs, start=1):
             print_info(f"[{index}/{len(pdfs)}] {src.name}")
             try:
@@ -552,8 +587,17 @@ def operation_delete_pages_batch() -> None:
             out_path = unique_file_path(src.parent / out_name)
             if resolves_to_same_file(out_path, src):
                 out_path = unique_file_path(src.parent / f"{src.stem}_pages_deleted.pdf")
+            # Per-file policy, applied without prompting mid-batch: a
+            # password-protected source keeps its password; an owner-restricted
+            # one cannot be reproduced, so its output is written unprotected and
+            # the file is reported below.
+            file_policy = detect_protection(reader)
+            if file_policy.kind == "restricted":
+                file_policy = None
+                unprotected_notes.append(src.name)
             try:
-                written = write_pages_to_pdf(reader, kept, out_path)
+                written = write_pages_to_pdf(reader, kept, out_path,
+                                             protection=file_policy)
             except Exception as exc:  # noqa: BLE001 - keep the batch going
                 print_error(f"  Failed: {exc}")
                 logger.exception("Delete-pages batch write failed for '%s'", src)
@@ -576,6 +620,14 @@ def operation_delete_pages_batch() -> None:
             f"Done. Processed {processed} file(s), skipped {skipped}, failed {failed}; "
             f"{total_deleted} page(s) deleted in total."
         )
+        if unprotected_notes:
+            print_warning(
+                f"{len(unprotected_notes)} file(s) had owner restrictions that "
+                "cannot be reproduced (the owner password is not recoverable); "
+                "their outputs are unprotected: "
+                + ", ".join(unprotected_notes[:5])
+                + (" ..." if len(unprotected_notes) > 5 else "")
+            )
         logger.info(
             "Delete-pages batch complete: processed=%d skipped=%d failed=%d deleted=%d",
             processed, skipped, failed, total_deleted,

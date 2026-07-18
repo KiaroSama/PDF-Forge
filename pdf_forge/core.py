@@ -1,13 +1,51 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
 from .constants import *  # noqa: F401,F403
 
-__all__ = ['_sanitize_for_filename', 'PageSelectionError', 'ChunkSizeError', 'PageSelectionResult', 'parse_page_selection', 'PageGroup', 'parse_multi_file_selection', 'parse_delete_pages', 'compute_deletion', 'build_delete_output_name', 'compute_chunks', 'parse_page_number', 'parse_chunk_size', 'parse_index_list', 'sanitize_selection_text', 'build_extract_output_name', 'build_chunk_output_name', 'pad_width_for', 'image_dpi_for_quality', 'build_page_image_name', 'default_images_output_dir', 'default_image_pdf_output', 'unique_file_path', 'unique_dir_path', 'strip_surrounding_quotes', 'natural_sort_key', 'discover_pdfs_in_folder', 'summarize_ranges']
+__all__ = ['_sanitize_for_filename', 'PageSelectionError', 'ChunkSizeError', 'PageSelectionResult', 'parse_page_selection', 'PageGroup', 'parse_multi_file_selection', 'parse_delete_pages', 'compute_deletion', 'build_delete_output_name', 'compute_chunks', 'parse_page_number', 'parse_chunk_size', 'parse_index_list', 'sanitize_selection_text', 'build_extract_output_name', 'build_chunk_output_name', 'pad_width_for', 'build_page_image_name', 'default_images_output_dir', 'default_image_pdf_output', 'unique_file_path', 'unique_dir_path', 'strip_surrounding_quotes', 'natural_sort_key', 'discover_pdfs_in_folder', 'summarize_ranges', 'GUIDANCE_KEYWORDS', 'drag_drop_guidance', 'BATCH_PASSWORD_NOTICE', 'normalized_path_key', 'reserve_unique_file', 'reserve_unique_dir', 'release_reservations', 'clear_reservations',
+'load_generated_outputs', 'record_generated_output', 'forget_generated_outputs']
+
+# Command keywords picked out in the guidance (see ui.guidance_text): the
+# highlighted parts are the things you can actually type.
+GUIDANCE_KEYWORDS = ("b=", "done")
+
+
+# Shown before queueing any batch that opens its files at run time. Single-file
+# operations authenticate during configuration and never prompt mid-run; batch
+# operations cannot know which files are encrypted until they open them, so the
+# behaviour is disclosed up front instead (A13).
+BATCH_PASSWORD_NOTICE = (
+    "Encrypted files will ask for their password while the queue runs "
+    "(unlimited attempts; 0/back/skip skips just that file and the batch "
+    "continues)."
+)
+
+
+def drag_drop_guidance(kind: str = "file", repeated: bool = False) -> str:
+    """Return the constant drag-and-drop / paste-path guidance string.
+
+    ``kind`` is ``"file"`` or ``"folder"``. ``repeated=True`` is for prompts
+    that collect several files in a row, which additionally offer ``b`` (go
+    back and re-enter the previous file) and ``done`` (finish)::
+
+        drag and drop a file here or paste a path; b=re-enter previous file; type done when finished
+
+    A single-file or folder prompt gets the short form, because there is no
+    previous file to re-enter and nothing to finish::
+
+        drag and drop a folder here or paste a path
+    """
+    base = f"drag and drop a {kind} here or paste a path"
+    if not repeated:
+        return base
+    return f"{base}; b=re-enter previous file; type done when finished"
+
 
 def _sanitize_for_filename(name: str) -> str:
     """Remove characters that are unsafe in a filename."""
@@ -165,19 +203,46 @@ def parse_multi_file_selection(expression: str, total_pages: int) -> List[PageGr
     return groups
 
 
-def parse_delete_pages(expression: str) -> List[int]:
+# Absolute ceiling on any single page number / range end when the real
+# document length is not yet known (e.g. batch mode). No real PDF approaches
+# this; it exists only to stop a pathological range like "1-999999999" from
+# eagerly materializing billions of integers and exhausting memory.
+_MAX_DELETE_PAGE = 1_000_000
+
+
+def parse_delete_pages(expression: str, max_page: Optional[int] = None) -> List[int]:
     """Parse a page expression into a sorted, de-duplicated list of page numbers.
 
     Supports the same forms as extraction (``5``, ``1,2``, ``10-20``,
-    ``10-20,25,30-50``) but applies **no upper bound**: the document length is
-    checked later, per file, so a batch can target pages that exist in some
-    files and not others.
+    ``10-20,25,30-50``).
+
+    Bounds (both enforced *before* a range is expanded, so an unbounded range
+    can never materialize an oversized list):
+        * When ``max_page`` is given (the real document length, or a safe upper
+          bound derived from a folder), any page or range end above it is
+          rejected with a clear message.
+        * Otherwise a hard sanity ceiling (:data:`_MAX_DELETE_PAGE`) applies, so
+          ``"1-999999999"`` is rejected instead of exhausting memory.
 
     Raises:
         PageSelectionError: with a clear, user-facing message on any problem.
     """
     if expression is None or expression.strip() == "":
         raise PageSelectionError("The page selection is empty.")
+
+    ceiling = max_page if max_page is not None else _MAX_DELETE_PAGE
+
+    def _reject_too_large(value: int, element: str) -> None:
+        if value > ceiling:
+            if max_page is not None:
+                raise PageSelectionError(
+                    f"Page {value} in '{element}' exceeds the document length "
+                    f"({max_page} pages)."
+                )
+            raise PageSelectionError(
+                f"Page number {value} in '{element}' is unreasonably large "
+                f"(over {ceiling}). Enter a realistic page number."
+            )
 
     pages: set = set()
     for raw_element in expression.split(","):
@@ -206,6 +271,8 @@ def parse_delete_pages(expression: str) -> List[int]:
                 raise PageSelectionError(
                     f"Reversed range '{element}'. The start must not be greater than the end."
                 )
+            # Validate the bound BEFORE expanding, so a huge end never allocates.
+            _reject_too_large(end, element)
             pages.update(range(start, end + 1))
         else:
             if not element.isdigit():
@@ -217,6 +284,7 @@ def parse_delete_pages(expression: str) -> List[int]:
                 raise PageSelectionError(
                     f"Invalid page '{element}'. Page numbers start at 1."
                 )
+            _reject_too_large(page, element)
             pages.add(page)
     return sorted(pages)
 
@@ -401,18 +469,6 @@ def pad_width_for(total_pages: int) -> int:
     return max(3, len(str(total_pages)))
 
 
-def image_dpi_for_quality(quality: str) -> int:
-    """Return the render DPI for a quality name ('low' / 'medium' / 'high').
-
-    Raises:
-        ValueError: when the quality name is not recognized.
-    """
-    key = quality.strip().lower()
-    if key not in IMAGE_QUALITY_DPI:
-        raise ValueError(f"Unknown image quality: {quality!r}")
-    return IMAGE_QUALITY_DPI[key]
-
-
 def build_page_image_name(page_number: int) -> str:
     """Return the PNG filename for a 1-based page number (e.g. 2 -> ``2.png``).
 
@@ -458,6 +514,90 @@ def unique_dir_path(path: Path) -> Path:
         counter += 1
 
 
+# --------------------------------------------------------------------------- #
+# Queue-time output-path reservation
+#
+# Output paths are chosen while operations are *configured*, but written later
+# when the batch queue runs. Two operations configured with the same brand-new
+# default path would each pass the on-disk uniqueness check (neither exists yet)
+# and then collide at run time. The reservation registry closes that gap: a
+# chosen path is reserved immediately, so the next operation's uniqueness check
+# sees it and picks a different name. Files and directories are tracked
+# separately; keys are normalized (case-insensitive on Windows).
+# --------------------------------------------------------------------------- #
+
+_reserved_files: Set[str] = set()
+_reserved_dirs: Set[str] = set()
+
+
+def normalized_path_key(path) -> str:
+    """Absolute, case-folded-on-Windows key for reservation comparison.
+
+    Uses ``abspath`` (not ``realpath``) so a not-yet-created output path still
+    yields a stable key without touching the filesystem.
+    """
+    key = os.path.abspath(str(path))
+    return key.lower() if os.name == "nt" else key
+
+
+def _file_reserved_or_exists(path: Path) -> bool:
+    return path.exists() or normalized_path_key(path) in _reserved_files
+
+
+def _dir_reserved_or_exists(path: Path) -> bool:
+    return path.exists() or normalized_path_key(path) in _reserved_dirs
+
+
+def reserve_unique_file(path: Path) -> Path:
+    """Pick a file path free on disk **and** unreserved, then reserve it.
+
+    Adds ``_2``, ``_3`` suffixes as needed. Reserving and returning is a single
+    synchronous step (no yield in between), so two operations can never receive
+    the same path. Release with :func:`release_reservations` once the queue is
+    done or discarded.
+    """
+    path = Path(path)
+    candidate = path
+    if _file_reserved_or_exists(candidate):
+        stem, suffix, parent = path.stem, path.suffix, path.parent
+        counter = 2
+        candidate = parent / f"{stem}_{counter}{suffix}"
+        while _file_reserved_or_exists(candidate):
+            counter += 1
+            candidate = parent / f"{stem}_{counter}{suffix}"
+    _reserved_files.add(normalized_path_key(candidate))
+    return candidate
+
+
+def reserve_unique_dir(path: Path) -> Path:
+    """Pick a directory path free on disk **and** unreserved, then reserve it."""
+    path = Path(path)
+    candidate = path
+    if _dir_reserved_or_exists(candidate):
+        name, parent = path.name, path.parent
+        counter = 2
+        candidate = parent / f"{name}_{counter}"
+        while _dir_reserved_or_exists(candidate):
+            counter += 1
+            candidate = parent / f"{name}_{counter}"
+    _reserved_dirs.add(normalized_path_key(candidate))
+    return candidate
+
+
+def release_reservations(files: Iterable[Path] = (), dirs: Iterable[Path] = ()) -> None:
+    """Release specific file/directory reservations (safe if not reserved)."""
+    for f in files:
+        _reserved_files.discard(normalized_path_key(f))
+    for d in dirs:
+        _reserved_dirs.discard(normalized_path_key(d))
+
+
+def clear_reservations() -> None:
+    """Drop every reservation (called when the queue finishes or is discarded)."""
+    _reserved_files.clear()
+    _reserved_dirs.clear()
+
+
 def strip_surrounding_quotes(text: str) -> str:
     """Remove a single matching pair of surrounding single or double quotes."""
     value = text.strip()
@@ -491,25 +631,120 @@ def natural_sort_key(name: str) -> List[Tuple[int, int, str]]:
     return key
 
 
-def discover_pdfs_in_folder(folder: Path) -> List[Path]:
+# --------------------------------------------------------------------------- #
+# Generated-output manifest
+#
+# Folder/batch tools write their results *beside* the sources, so a second run
+# over the same folder would otherwise pick up the first run's outputs and
+# compress/rasterize/merge them again - growing pages or degrading quality on
+# every pass. Excluding names by substring ("_compressed") is unsafe: it would
+# also hide a user's own file that happens to be named that way. Instead every
+# output PDF this application writes is recorded by its exact normalized path,
+# and folder discovery skips exactly those paths - nothing else.
+# --------------------------------------------------------------------------- #
+
+_MANIFEST_LIMIT = 5000
+
+
+def _manifest_path() -> Path:
+    """Project-local, git-ignored record of PDFs this application generated."""
+    return Path(__file__).resolve().parent.parent / ".pdfforge_outputs.json"
+
+
+def _load_manifest_entries() -> List[dict]:
+    """Raw manifest entries, each ``{path, size, mtime}``."""
+    import json
+
+    try:
+        raw = json.loads(_manifest_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    entries = raw.get("outputs", []) if isinstance(raw, dict) else []
+    return [e for e in entries if isinstance(e, dict) and e.get("path")]
+
+
+def _still_ours(entry: dict) -> bool:
+    """True when the recorded file is still exactly the one we wrote.
+
+    Size and modification time are compared, not just the path: if the file was
+    deleted, replaced, or edited by the user, it is no longer our output and is
+    treated as an ordinary source again.
+
+    ponytail: mtime has 1-second granularity, so a replacement written in the
+    same second *and* with an identical byte count would still look like ours.
+    Storing a content hash would close that gap; not worth hashing every output
+    for a case this narrow.
+    """
+    try:
+        stat = os.stat(entry["path"])
+    except OSError:
+        return False
+    return (stat.st_size == entry.get("size")
+            and int(stat.st_mtime) == entry.get("mtime"))
+
+
+def load_generated_outputs() -> Set[str]:
+    """Normalized paths of outputs this application created and still owns."""
+    return {e["path"] for e in _load_manifest_entries() if _still_ours(e)}
+
+
+def record_generated_output(path: Path) -> None:
+    """Record ``path`` as an application-generated output (best effort)."""
+    import json
+
+    try:
+        key = normalized_path_key(path)
+        stat = os.stat(path)
+        entries = [e for e in _load_manifest_entries()
+                   if e["path"] != key and _still_ours(e)]
+        entries.append(
+            {"path": key, "size": stat.st_size, "mtime": int(stat.st_mtime)}
+        )
+        _manifest_path().write_text(
+            json.dumps({"outputs": entries[-_MANIFEST_LIMIT:]}, indent=1),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail a write over bookkeeping
+        logger.debug("Could not record generated output '%s': %s", path, exc)
+
+
+def forget_generated_outputs() -> None:
+    """Clear the manifest (used by tests and a clean/reset action)."""
+    try:
+        _manifest_path().unlink()
+    except OSError:
+        pass
+
+
+def discover_pdfs_in_folder(folder: Path, include_generated: bool = False) -> List[Path]:
     """Return the ``*.pdf`` files directly inside ``folder`` (non-recursive).
 
     The result is sorted by file name using a natural, case-insensitive, stable
     order (see :func:`natural_sort_key`) so files such as ``1.pdf``, ``2.pdf``,
     and ``10.pdf`` are ordered 1, 2, 10. Only regular files with a ``.pdf``
     suffix are returned; subdirectories are not traversed.
+
+    PDFs this application generated in an earlier run are skipped by exact path
+    (see the manifest above), so running a folder tool twice never reprocesses
+    its own output. Pass ``include_generated=True`` to bypass that.
     """
     folder = Path(folder)
-    pdfs = [
-        entry
-        for entry in folder.iterdir()
-        if entry.is_file() and entry.suffix.lower() == ".pdf"
-    ]
+    generated = set() if include_generated else load_generated_outputs()
+    pdfs = []
+    skipped = 0
+    for entry in folder.iterdir():
+        if not entry.is_file() or entry.suffix.lower() != ".pdf":
+            continue
+        if generated and normalized_path_key(entry) in generated:
+            skipped += 1
+            continue
+        pdfs.append(entry)
     # Natural, case-insensitive, stable ordering (1, 2, 10 -> not 1, 10, 2).
     pdfs.sort(key=lambda p: natural_sort_key(p.name))
     logger.debug(
-        "Discovered %d PDF(s) in folder '%s' (natural case-insensitive order).",
-        len(pdfs), folder,
+        "Discovered %d PDF(s) in folder '%s' (natural case-insensitive order); "
+        "skipped %d previously generated output(s).",
+        len(pdfs), folder, skipped,
     )
     return pdfs
 

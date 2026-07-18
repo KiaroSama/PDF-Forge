@@ -3,16 +3,21 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 from .constants import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 
-__all__ = ['_import_pymupdf', 'PdfOpenError', 'open_source_pdf',
+__all__ = ['_import_pymupdf', 'PdfOpenError', 'PdfPasswordCancelled',
+           'open_source_pdf', 'source_password',
+           'close_doc', '_authenticate_doc',
+           'ProtectionPolicy', 'detect_protection',
            'write_pages_to_pdf', '_validate_written_pdf', '_validate_merged_pdf',
            'write_merged_pdfs_to_pdf', 'resolves_to_same_file',
-           'scan_image_dpi_stats', 'has_meaningful_text']
+           'scan_image_dpi_stats', 'has_meaningful_text',
+           'permission_bits', 'all_permissions', 'denied_permissions']
 
 
 def _import_pymupdf():
@@ -31,20 +36,84 @@ class PdfOpenError(Exception):
     """Raised when a PDF cannot be opened or is unusable."""
 
 
-def open_source_pdf(path: Path, password_prompt=None):
+class PdfPasswordCancelled(PdfOpenError):
+    """Raised when the user navigates away (0/back/skip) from a password prompt.
+
+    A subclass of :class:`PdfOpenError` so existing ``except PdfOpenError``
+    handlers (single-file cancel, batch skip-and-continue) keep working.
+    """
+
+
+def close_doc(doc) -> None:
+    """Close a PyMuPDF document if it is still open (idempotent, never raises)."""
+    if doc is None:
+        return
+    try:
+        if not getattr(doc, "is_closed", False):
+            doc.close()
+    except Exception:  # noqa: BLE001 - closing must never raise
+        pass
+
+
+def source_password(doc) -> str:
+    """Return the working password captured when the document was opened.
+
+    Empty string when the source was not encrypted. Used to reopen the same
+    source silently (no prompt) inside a queued task runner. Never logged.
+    """
+    return getattr(doc, "_pdfforge_password", "") or ""
+
+
+def _authenticate_doc(doc, password_prompt, password):
+    """Authenticate an encrypted, already-opened document.
+
+    Tries ``password`` (or the empty password) once silently. If that fails and
+    ``password_prompt`` is provided, prompts **without any attempt limit**: it
+    keeps asking until a correct password is entered or the user navigates away
+    (the prompt returns ``None`` for 0/back/skip). ``exit``/``quit`` inside the
+    prompt raise their own signal, which propagates.
+
+    Returns the working password string on success, or ``None`` when the user
+    cancels. The password is only ever held locally here and by the caller for
+    a silent reopen; it is never logged.
+    """
+    if doc.authenticate(password or "") > 0:
+        return password or ""
+    if password_prompt is None:
+        return None
+    attempts = 0
+    while True:
+        entry = password_prompt(attempts > 0)  # True => a prior attempt failed
+        if entry is None:
+            return None  # user chose 0 / back / skip
+        attempts += 1
+        if doc.authenticate(entry) > 0:
+            working = entry
+            del entry
+            return working
+        del entry
+        # Loop again: no maximum attempt count, no lockout, no backoff.
+
+
+def open_source_pdf(path: Path, password_prompt=None, password=None):
     """Open and validate a source PDF with PyMuPDF, handling encryption.
 
     Args:
         path: Path to the source PDF.
-        password_prompt: Optional callable returning a password string when the
-            PDF is encrypted and the empty password fails.
+        password_prompt: Optional callable ``prompt(previous_failed: bool) ->
+            Optional[str]``. Called repeatedly, with no attempt limit, until it
+            returns a correct password or ``None`` (the user navigated away).
+        password: Optional known password tried silently first (used to reopen a
+            source inside a queued runner without prompting again).
 
     Returns:
-        A ``pymupdf.Document`` ready for reading. The caller may close it with
-        ``document.close()`` when done (module teardown also closes safely).
+        A ``pymupdf.Document`` ready for reading. The working password is stashed
+        on it (see :func:`source_password`) so it can be reopened silently. The
+        caller may close it with :func:`close_doc`.
 
     Raises:
-        PdfOpenError: with a clear message on any failure.
+        PdfOpenError: on any failure. :class:`PdfPasswordCancelled` specifically
+        when the user cancels the password prompt.
     """
     pymupdf = _import_pymupdf()
 
@@ -58,57 +127,179 @@ def open_source_pdf(path: Path, password_prompt=None):
         logger.error("OS error opening '%s': %s", path, exc)
         raise PdfOpenError(f"Could not open the file: {exc}") from exc
 
+    working_password = ""
+    needed_pass = bool(doc.needs_pass)
     if doc.needs_pass:
-        logger.info("Source PDF is encrypted; attempting empty password.")
-        # authenticate() returns 0 on failure, positive on success.
-        decrypted = doc.authenticate("") > 0
-        if not decrypted and password_prompt is not None:
-            password = password_prompt()
-            if password is not None:
-                decrypted = doc.authenticate(password) > 0
-            # Drop the local reference; the password is never logged or stored.
-            del password
-        if not decrypted:
-            doc.close()
-            raise PdfOpenError(
-                "The PDF is encrypted and could not be decrypted with the "
-                "provided password."
+        logger.info("Source PDF is encrypted; authenticating.")
+        try:
+            working_password = _authenticate_doc(doc, password_prompt, password)
+        except BaseException:
+            # Includes the exit/quit signal: close the handle, then re-raise.
+            close_doc(doc)
+            raise
+        if working_password is None:
+            close_doc(doc)
+            raise PdfPasswordCancelled(
+                "The PDF is encrypted and no valid password was provided."
             )
         logger.info("Source PDF decrypted successfully.")
 
     try:
         page_count = doc.page_count
     except Exception as exc:  # noqa: BLE001
-        doc.close()
+        close_doc(doc)
         logger.error("Could not determine page count for '%s': %s", path, exc)
         raise PdfOpenError(f"The PDF page count could not be determined: {exc}") from exc
 
     if page_count < 1:
-        doc.close()
+        close_doc(doc)
         logger.error("Source PDF '%s' contains no pages.", path)
         raise PdfOpenError("The PDF contains no pages.")
+
+    # Stash the working password so a queued runner can reopen silently. Never
+    # logged, never included in summaries or task reprs. ``needs_pass`` is also
+    # captured because PyMuPDF flips it to False once authenticated, so it is no
+    # longer a reliable "was this locked?" signal afterwards.
+    try:
+        doc._pdfforge_password = working_password
+        doc._pdfforge_needed_pass = bool(needed_pass)
+    except Exception:  # noqa: BLE001 - best effort; silent reopen just re-prompts
+        pass
 
     logger.info("Opened source PDF '%s' (%d page(s)).", path, page_count)
     return doc
 
 
+@dataclass
+class ProtectionPolicy:
+    """How a produced PDF should be protected (see README "Protection policy").
+
+    ``kind`` is one of:
+      * ``"none"``       - the source was unprotected; the output is unprotected.
+      * ``"password"``   - the source needed an open password, which the user
+        supplied, so the output is re-encrypted AES-256 with that same password
+        and the source's permission bits. This is the default for single-source
+        transformations: technically safe because the password is known.
+      * ``"restricted"`` - the source opens freely but carries owner
+        restrictions. The owner password is *not* recoverable, so the policy
+        cannot be reproduced faithfully; the caller must ask the user what to do
+        rather than silently dropping or inventing protection.
+    """
+
+    kind: str
+    password: str = ""
+    permissions: int = 0
+    denied: tuple = ()
+
+    @property
+    def can_preserve(self) -> bool:
+        """True when the output can faithfully reproduce the source policy."""
+        return self.kind == "password"
+
+    @property
+    def is_protected(self) -> bool:
+        return self.kind in ("password", "restricted")
+
+    def save_kwargs(self) -> dict:
+        """PyMuPDF ``save()`` kwargs that reproduce this policy (or ``{}``)."""
+        if self.kind != "password":
+            return {}
+        pymupdf = _import_pymupdf()
+        return {
+            "encryption": pymupdf.PDF_ENCRYPT_AES_256,
+            "user_pw": self.password,
+            "owner_pw": self.password,
+            "permissions": int(self.permissions),
+        }
+
+
+def permission_bits() -> dict:
+    """The single PDF permission table: human-readable action -> permission bit.
+
+    Every module that needs permission names or bits derives them from here, so
+    the eight ``PDF_PERM_*`` flags are listed exactly once.
+    """
+    pymupdf = _import_pymupdf()
+    return {
+        "printing": pymupdf.PDF_PERM_PRINT,
+        "high-quality printing": pymupdf.PDF_PERM_PRINT_HQ,
+        "copying text/images": pymupdf.PDF_PERM_COPY,
+        "editing content": pymupdf.PDF_PERM_MODIFY,
+        "annotating / comments": pymupdf.PDF_PERM_ANNOTATE,
+        "filling form fields": pymupdf.PDF_PERM_FORM,
+        "assembling pages": pymupdf.PDF_PERM_ASSEMBLE,
+        "accessibility extraction": pymupdf.PDF_PERM_ACCESSIBILITY,
+    }
+
+
+def all_permissions() -> int:
+    """The permission bitmask that allows every action."""
+    bits = 0
+    for bit in permission_bits().values():
+        bits |= int(bit)
+    return bits
+
+
+def denied_permissions(doc) -> list:
+    """Human-readable actions the (opened) document forbids."""
+    return [name for name, bit in permission_bits().items()
+            if not (doc.permissions & bit)]
+
+
+def detect_protection(doc) -> ProtectionPolicy:
+    """Classify an opened source document's protection into a policy.
+
+    Uses the ``needs_pass`` value captured at open time (PyMuPDF clears it after
+    authentication) plus the live permission bits.
+    """
+    needed_pass = bool(getattr(doc, "_pdfforge_needed_pass", False))
+    try:
+        permissions = int(doc.permissions)
+    except Exception:  # noqa: BLE001
+        permissions = all_permissions()
+    all_bits = all_permissions()
+    denied = tuple(
+        name for name, bit in permission_bits().items() if not (permissions & bit)
+    )
+    if needed_pass:
+        return ProtectionPolicy(
+            kind="password",
+            password=source_password(doc),
+            permissions=permissions,
+            denied=denied,
+        )
+    if permissions != all_bits and denied:
+        return ProtectionPolicy(
+            kind="restricted", permissions=permissions, denied=denied
+        )
+    return ProtectionPolicy(kind="none", permissions=all_bits)
+
+
 def _save_doc_to_path_safely(out_doc, out_path: Path, expected_pages: int,
-                             validate) -> None:
-    """Save a document via temp file -> validate -> atomic rename."""
+                             validate, protection: "ProtectionPolicy" = None) -> None:
+    """Save a document via temp file -> validate -> atomic rename.
+
+    ``protection`` (optional) re-applies the source's encryption policy to the
+    output so a transformation never silently strips protection.
+    """
     tmp_fd, tmp_name = tempfile.mkstemp(
         suffix=".tmp", prefix=".pdfforge_", dir=str(out_path.parent)
     )
     os.close(tmp_fd)
     tmp_path = Path(tmp_name)
     logger.debug("Temporary write file: '%s'", tmp_path)
+    extra = protection.save_kwargs() if protection is not None else {}
     try:
         # garbage=3 deduplicates unused/identical objects; deflate compresses
         # streams. Cheap wins on every output, identical visual result.
-        out_doc.save(str(tmp_path), garbage=3, deflate=True)
-        validate(tmp_path, expected_pages=expected_pages)
+        out_doc.save(str(tmp_path), garbage=3, deflate=True, **extra)
+        validate(tmp_path, expected_pages=expected_pages,
+                 password=(protection.password if extra else None))
         logger.debug("Validated temporary output (%d page(s)).", expected_pages)
         # Atomic promotion. The final path is guaranteed unique by the caller.
         os.replace(tmp_path, out_path)
+        # Remember it so a later folder run never reprocesses our own output.
+        record_generated_output(out_path)
     except Exception:
         try:
             if tmp_path.exists():
@@ -120,12 +311,13 @@ def _save_doc_to_path_safely(out_doc, out_path: Path, expected_pages: int,
 
 
 def write_pages_to_pdf(doc, pages_zero_based: Sequence[int], out_path: Path,
-                       progress=None) -> int:
+                       progress=None, protection: "ProtectionPolicy" = None) -> int:
     """Write the given 0-based pages to ``out_path`` using a safe temp file.
 
     The data is first written to a temporary file in the destination directory,
     validated, then atomically renamed to the final path. Temporary files are
-    removed on failure. Returns the number of pages written.
+    removed on failure. ``protection`` re-applies the source's encryption policy
+    so a page transformation never silently strips it. Returns pages written.
     """
     pymupdf = _import_pymupdf()
 
@@ -142,7 +334,8 @@ def write_pages_to_pdf(doc, pages_zero_based: Sequence[int], out_path: Path,
             out_doc.insert_pdf(doc, from_page=page_index, to_page=page_index)
             if progress is not None:
                 progress(index, total)
-        _save_doc_to_path_safely(out_doc, out_path, total, _validate_written_pdf)
+        _save_doc_to_path_safely(out_doc, out_path, total, _validate_written_pdf,
+                                 protection=protection)
     finally:
         out_doc.close()
 
@@ -151,11 +344,20 @@ def write_pages_to_pdf(doc, pages_zero_based: Sequence[int], out_path: Path,
     return total
 
 
-def _validate_written_pdf(path: Path, expected_pages: int) -> None:
-    """Reopen a freshly written PDF and confirm its page count."""
+def _validate_written_pdf(path: Path, expected_pages: int, password=None) -> None:
+    """Reopen a freshly written PDF and confirm its page count.
+
+    ``password`` is supplied when the output was deliberately encrypted (the
+    preserved source policy), so validation can authenticate before reading.
+    """
     pymupdf = _import_pymupdf()
     check = pymupdf.open(str(path))
     try:
+        if check.needs_pass and not check.authenticate(password or ""):
+            raise PdfOpenError(
+                "Output validation failed: the protected output could not be "
+                "reopened with its own password."
+            )
         actual = check.page_count
     finally:
         check.close()
@@ -166,17 +368,20 @@ def _validate_written_pdf(path: Path, expected_pages: int) -> None:
         )
 
 
-def _validate_merged_pdf(path: Path, expected_pages: int) -> None:
+def _validate_merged_pdf(path: Path, expected_pages: int, password=None) -> None:
     """Reopen a freshly merged PDF and confirm it is usable.
 
-    Verifies the output can be opened, is not encrypted, and contains exactly
-    the expected total page count.
+    Verifies the output can be opened (authenticating when it was deliberately
+    protected), is not *unexpectedly* encrypted, and has the expected page count.
     """
     pymupdf = _import_pymupdf()
     check = pymupdf.open(str(path))
     try:
         if check.needs_pass:
-            raise PdfOpenError("Output validation failed: the merged PDF is encrypted.")
+            if not password or not check.authenticate(password):
+                raise PdfOpenError(
+                    "Output validation failed: the merged PDF is encrypted."
+                )
         actual = check.page_count
     finally:
         check.close()
@@ -187,7 +392,8 @@ def _validate_merged_pdf(path: Path, expected_pages: int) -> None:
         )
 
 
-def write_merged_pdfs_to_pdf(docs, out_path: Path, progress=None) -> int:
+def write_merged_pdfs_to_pdf(docs, out_path: Path, progress=None,
+                             protection: "ProtectionPolicy" = None) -> int:
     """Merge already-opened PDF documents into a single PDF at ``out_path``.
 
     Pages from each document are appended in order. The data is written to a
@@ -220,7 +426,8 @@ def write_merged_pdfs_to_pdf(docs, out_path: Path, progress=None) -> int:
                 "Appended source %d/%d (%d page(s); running total=%d).",
                 doc_index, len(docs), page_count, written,
             )
-        _save_doc_to_path_safely(out_doc, out_path, total, _validate_merged_pdf)
+        _save_doc_to_path_safely(out_doc, out_path, total, _validate_merged_pdf,
+                                 protection=protection)
     finally:
         out_doc.close()
 

@@ -8,3 +8,14 @@ pymupdf==1.28.0
 
 # Image validation for rendered PNGs and watermark preview handling.
 pillow==12.3.0
+
+# CLI/control layer for the "Convert documents/spreadsheets/presentations to
+# PDF" tool (main menu 11). Pure Python: its client talks to a task-owned
+# headless LibreOffice over a private localhost port and passes any document
+# password in memory (never on a command line).
+#
+# LibreOffice itself is a native renderer and cannot be installed into a
+# virtualenv; PDF Forge provisions it project-locally under .tools/libreoffice/
+# (pinned version + checksum in office_runtime_meta.json). It is never
+# installed system-wide and no GUI is ever shown.
+unoserver==3.7

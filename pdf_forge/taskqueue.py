@@ -42,8 +42,22 @@ def queue_task(summary: str, run: Callable[[], None]) -> None:
     raise _TaskQueued()
 
 
+def _discard_queue() -> None:
+    """Empty the queue and release every path reservation it held.
+
+    Called after the queue runs, when it is discarded at the Start confirmation,
+    and when the user exits - so no reservation ever outlives its queue.
+    """
+    _task_queue.clear()
+    clear_reservations()
+
+
 def _run_task_queue() -> None:
-    """Execute every queued task in order, isolating per-task failures."""
+    """Execute every queued task in order, isolating per-task failures.
+
+    Empties the queue and releases reservations when finished (each output has
+    been written to disk by then, so on-disk uniqueness protects later runs).
+    """
     count = len(_task_queue)
     print_heading(f"\nRunning {count} queued task(s)...")
     logger.info("Running task queue: %d task(s).", count)
@@ -62,24 +76,38 @@ def _run_task_queue() -> None:
             logger.exception("Queued task %d failed.", index)
     print_success(f"\nAll {count} queued task(s) processed.")
     logger.info("Task queue finished: %d task(s).", count)
+    _discard_queue()
 
 
-def finalize_queue() -> None:
+def finalize_queue() -> bool:
     """Show the full queue, confirm once, then run it (or discard on 'no').
 
-    Clears the queue afterwards either way. Does nothing when the queue is empty.
+    Empties the queue and releases path reservations afterwards either way.
+    Does nothing when the queue is empty. Returns ``True`` when the user typed
+    ``exit``/``quit`` at the Start confirmation - a deliberate exit, which the
+    caller turns into a normal application shutdown (the queue is discarded
+    cleanly first, never surfaced as an unexpected top-level error).
     """
     if not _task_queue:
-        return
+        return False
     print_heading(f"\nComplete summary - {len(_task_queue)} task(s) queued")
     for index, task in enumerate(_task_queue, start=1):
         print_kv(f"Task {index}", task.summary, Color.AQUA)
 
-    if ask_yes_no("\nStart now?", default_yes=True):
+    try:
+        start = ask_yes_no("\nStart now?", default_yes=True)
+    except _ExitRequested:
+        print_warning("Exiting; the queued task(s) were discarded.")
+        logger.info("Queue discarded via exit/quit at the Start confirmation.")
+        _discard_queue()
+        return True
+
+    if start:
         _run_task_queue()
     else:
         print_warning("Cancelled. Discarded the queued task(s).")
         logger.info(
             "Queue discarded at start confirmation (%d task(s)).", len(_task_queue)
         )
-    _task_queue.clear()
+        _discard_queue()
+    return False

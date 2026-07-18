@@ -8,7 +8,8 @@ from .ui import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
-__all__ = ['_input', 'ask_yes_no', 'prompt_password', 'prompt_new_password', 'prompt_source_pdf', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
+__all__ = ['_input', 'ask_yes_no', 'prompt_password', 'prompt_new_password',
+           'resolve_protection', 'resolve_merge_protection', 'prompt_source_pdf', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
 
 def _input(prompt: str) -> str:
     """Read a line of input, treating EOF as a request to exit."""
@@ -41,15 +42,39 @@ def ask_yes_no(question: str, default_yes: bool = True) -> bool:
         print_error("Please answer with 'y', 'n', or type 'exit' to quit.")
 
 
-def prompt_password() -> Optional[str]:
-    """Prompt for a PDF password without echoing it when possible."""
+def prompt_password(previous_failed: bool = False) -> Optional[str]:
+    """Prompt for a PDF password without echoing it when possible.
+
+    Returns the entered password, or ``None`` when the user navigates away by
+    typing ``0``, ``back``, or ``skip`` (case-insensitive). ``exit``/``quit``
+    raise :class:`_ExitRequested`. There is no attempt limit: the caller
+    (:func:`open_source_pdf`) re-invokes this until a correct password is
+    entered or the user cancels. Because input is hidden, the navigation words
+    cannot double as a literal password (a documented, intentional limitation).
+    """
     import getpass
 
-    print_warning("This PDF is encrypted.")
+    if previous_failed:
+        print_error(
+            "Incorrect password. Try again, or type 0/back to cancel "
+            "(exit/quit to close)."
+        )
+    else:
+        print_warning("This PDF is encrypted.")
     try:
-        return getpass.getpass(colorize("Enter PDF password (input hidden): ", Color.CYAN))
+        entry = getpass.getpass(
+            colorize(
+                "Enter PDF password (hidden; 0/back to cancel): ", Color.CYAN
+            )
+        )
     except (EOFError, KeyboardInterrupt):
         return None
+    nav = entry.strip().lower()
+    if nav in ("0", "back", "skip"):
+        return None
+    if nav in ("exit", "quit"):
+        raise _ExitRequested()
+    return entry
 
 
 def prompt_new_password(purpose: str) -> Optional[str]:
@@ -85,9 +110,83 @@ def prompt_new_password(purpose: str) -> Optional[str]:
         return first
 
 
+def resolve_protection(policy, context: str = "output") -> Optional[object]:
+    """Apply PDF Forge's protection policy, asking the user when it cannot be kept.
+
+    Policy (documented in the README):
+      * unprotected source  -> unprotected output, no question asked;
+      * open-password source -> the output is re-encrypted AES-256 with the same
+        password and permission bits (technically safe: the password is known).
+        The user is told, not asked;
+      * owner-restricted source -> the owner password cannot be recovered, so the
+        policy cannot be reproduced. Warn and require an intentional choice
+        instead of silently dropping the restrictions.
+
+    Returns the policy to apply when writing (possibly downgraded to "none"), or
+    ``None`` when the user cancels.
+    """
+    if policy is None or not policy.is_protected:
+        return policy
+
+    if policy.can_preserve:
+        print_note(
+            f"The source needs a password to open. The {context} will be "
+            "re-protected with the same password and permissions."
+        )
+        return policy
+
+    # Owner-restricted: cannot reproduce faithfully.
+    print_warning(
+        "This PDF opens without a password but restricts: "
+        + ", ".join(policy.denied)
+        + ".\nThose restrictions are enforced by an owner password that cannot "
+        f"be recovered, so the {context} cannot reproduce them."
+    )
+    if ask_yes_no(
+        "Create an UNPROTECTED output instead? "
+        "(No = cancel; use 'Protect PDF' afterwards to set your own policy)",
+        default_yes=True,
+    ):
+        logger.info("Protection policy: restricted source -> unprotected output.")
+        return ProtectionPolicy(kind="none")
+    logger.info("Protection policy: cancelled by user (restricted source).")
+    return None
+
+
+def resolve_merge_protection(policies) -> Optional[object]:
+    """Decide the protection policy for a merge of several sources.
+
+    A merge has no single correct answer when sources carry different passwords
+    or permissions, so PDF Forge never invents one: if any source is protected,
+    it warns and requires an intentional choice. The documented default is an
+    unprotected merged output (the user has already proven access to every
+    source and can apply 'Protect PDF' afterwards).
+    """
+    protected = [p for p in policies if p is not None and p.is_protected]
+    if not protected:
+        return ProtectionPolicy(kind="none")
+    print_warning(
+        f"{len(protected)} of {len(policies)} source(s) are protected, and a "
+        "merge cannot carry several different passwords or permission sets."
+    )
+    if ask_yes_no(
+        "Create an UNPROTECTED merged PDF? "
+        "(No = cancel; use 'Protect PDF' afterwards to set one policy)",
+        default_yes=True,
+    ):
+        logger.info("Merge protection policy: unprotected output (%d protected sources).",
+                    len(protected))
+        return ProtectionPolicy(kind="none")
+    logger.info("Merge cancelled at the protection policy question.")
+    return None
+
+
 def prompt_source_pdf() -> Optional[Path]:
     """Prompt for and validate a source PDF path. Returns None to go back."""
-    prompt = question_prompt("Source PDF path")
+    prompt = question_prompt(
+        "Source PDF path",
+        details=guidance_text(drag_drop_guidance(), GUIDANCE_KEYWORDS),
+    )
     while True:
         raw = _input(prompt)
         cleaned = strip_surrounding_quotes(raw)
@@ -160,23 +259,25 @@ def _choose_output_file(default_path: Path, source: Path) -> Optional[Path]:
             print_error("The output cannot be the same file as the source PDF.")
             continue
 
-        # Create destination directory only after explicit confirmation.
+        # Confirm intent to use a not-yet-existing directory, but do NOT create
+        # it here: the directory is created inside the task runner so a queued
+        # task that is later discarded leaves no empty folder behind (A18).
         if not chosen.parent.exists():
             if not ask_yes_no(
-                f"Directory does not exist:\n  {chosen.parent}\nCreate it?",
+                f"Directory does not exist (it will be created when the task "
+                f"runs):\n  {chosen.parent}\nUse it?",
                 default_yes=True,
             ):
                 continue
-            try:
-                chosen.parent.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                print_error(f"Could not create directory: {exc}")
-                continue
 
-        # Never overwrite: generate a unique name when needed.
-        final = unique_file_path(chosen)
+        # Never overwrite an existing file or collide with another queued task's
+        # reserved output: pick and reserve a unique name.
+        final = reserve_unique_file(chosen)
         if final != chosen:
-            print_warning(f"Output exists; using a unique name: {final.name}")
+            print_warning(
+                f"Output exists or is already queued; using a unique name: "
+                f"{final.name}"
+            )
         return final
 
 
@@ -190,13 +291,17 @@ def _choose_output_dir(default_folder: Path) -> Optional[Path]:
         raw = _input(prompt)
         cleaned = strip_surrounding_quotes(raw)
         if cleaned == "":
-            return default_folder
+            # Reserve even the default so a second queued task gets a fresh name.
+            return reserve_unique_dir(default_folder)
         if cleaned == "0":
             return None
         if cleaned.lower() in ("exit", "quit"):
             raise _ExitRequested()
-        # Prefer the safer unique-folder approach to avoid filename conflicts.
-        return unique_dir_path(Path(cleaned))
+        # Reserve a unique folder so two queued tasks never target the same one.
+        chosen = reserve_unique_dir(Path(cleaned))
+        if chosen.name != Path(cleaned).name:
+            print_warning(f"Folder exists or is already queued; using: {chosen.name}")
+        return chosen
 
 
 def _print_merge_order(sources: Sequence[Path], limit: int = 20) -> None:
@@ -303,7 +408,10 @@ def prompt_source_folder_pdfs() -> Optional[List[Path]]:
     Used by the batch image tools. Requires at least one PDF directly inside the
     folder (non-recursive). Entering ``0`` goes back one step.
     """
-    prompt = question_prompt("Folder containing PDFs")
+    prompt = question_prompt(
+        "Folder containing PDFs",
+        details=guidance_text(drag_drop_guidance(kind="folder"), GUIDANCE_KEYWORDS),
+    )
     while True:
         raw = _input(prompt)
         cleaned = strip_surrounding_quotes(raw)

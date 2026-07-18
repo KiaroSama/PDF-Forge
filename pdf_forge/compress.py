@@ -14,7 +14,8 @@ __all__ = ['compress_pdf']
 
 
 def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
-                 dpi_target: Optional[int], password_prompt=None) -> dict:
+                 dpi_target: Optional[int], password_prompt=None,
+                 password=None) -> dict:
     """Compress a PDF into a new file; the source is never modified.
 
     Always applied (lossless, zero quality change):
@@ -35,9 +36,14 @@ def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
     started = time.perf_counter()
     original_size = Path(path).stat().st_size
 
-    doc = open_source_pdf(path, password_prompt=password_prompt)
+    doc = open_source_pdf(path, password_prompt=password_prompt, password=password)
     try:
         page_count = doc.page_count
+        # Preserve an open-password source's protection on the compressed copy;
+        # an owner-restricted source cannot be reproduced (no owner password),
+        # so it is written unprotected - the caller warns about that up front.
+        policy = detect_protection(doc)
+        protect_kwargs = policy.save_kwargs()
 
         if jpeg_quality is not None:
             # Consider reducing any image above the target DPI, and never below
@@ -75,9 +81,12 @@ def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
         os.close(tmp_fd)
         tmp_path = Path(tmp_name)
         try:
-            doc.save(str(tmp_path), garbage=4, deflate=True, use_objstms=1)
-            _validate_written_pdf(tmp_path, expected_pages=page_count)
+            doc.save(str(tmp_path), garbage=4, deflate=True, use_objstms=1,
+                     **protect_kwargs)
+            _validate_written_pdf(tmp_path, expected_pages=page_count,
+                                  password=policy.password if protect_kwargs else None)
             os.replace(tmp_path, out_path)
+            record_generated_output(out_path)
         except Exception:
             try:
                 if tmp_path.exists():

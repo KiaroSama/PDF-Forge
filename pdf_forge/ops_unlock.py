@@ -38,22 +38,24 @@ def operation_unlock_pdf() -> None:
         logger.error("Unlock: failed to open '%s': %s", source, exc)
         return
 
-    # If an open password is required, the user must supply it (empty first).
+    # If an open password is required, the user must supply it. Authentication
+    # has no attempt limit: _authenticate_doc re-prompts until the password is
+    # accepted or the user types 0/back/skip (exit/quit propagates).
     had_open_password = bool(doc.needs_pass)
+    source_pw = ""
     if had_open_password:
-        if not doc.authenticate(""):
-            password = prompt_password()
-            authed = password is not None and doc.authenticate(password) != 0
-            if password is not None:
-                del password
-            if not authed:
-                print_error(
-                    "The PDF is password-protected and could not be opened with "
-                    "the provided password."
-                )
-                logger.info("Unlock cancelled: wrong/no password for '%s'.", source)
-                doc.close()
-                return
+        try:
+            source_pw = _authenticate_doc(doc, prompt_password, None)
+        except BaseException:
+            close_doc(doc)
+            raise
+        if source_pw is None:
+            print_error(
+                "The PDF is password-protected and was not unlocked (cancelled)."
+            )
+            logger.info("Unlock cancelled: no valid password for '%s'.", source)
+            close_doc(doc)
+            return
 
     restricted = denied_permissions(doc)
     total_pages = doc.page_count
@@ -65,8 +67,11 @@ def operation_unlock_pdf() -> None:
             "restrictions. Nothing to unlock."
         )
         logger.info("Unlock: '%s' is already unlocked.", source)
-        doc.close()
+        close_doc(doc)
         return
+
+    # Nothing but the path and its password crosses the queue boundary (A5).
+    close_doc(doc)
 
     default_path = unique_file_path(source.parent / f"{source.stem}_unlocked.pdf")
 
@@ -83,18 +88,20 @@ def operation_unlock_pdf() -> None:
     out_path = _choose_output_file(default_path, source)
     if out_path is None:
         print_warning("Returning to menu.")
-        doc.close()
         return
 
     def _run():
+        rdoc = None
         try:
-            written = unlock_pdf_doc(doc, out_path)
+            # Reopen silently with the captured password (no prompt mid-run).
+            rdoc = open_source_pdf(source, password=source_pw)
+            written = unlock_pdf_doc(rdoc, out_path)
         except Exception as exc:  # noqa: BLE001 - clean message, log details
             print_error(f"Failed to unlock the PDF: {exc}")
             logger.exception("Unlock failed for output '%s'", out_path)
             return
         finally:
-            doc.close()
+            close_doc(rdoc)
         print_success(f"Done. Unlocked {written} page(s):\n  {out_path}")
         logger.info("Unlock complete: output='%s' pages=%d", out_path, written)
 

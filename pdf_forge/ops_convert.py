@@ -60,6 +60,9 @@ def operation_images_all_pages() -> None:
         return
 
     try:
+        # Capture the working password now so the queued runner can reopen the
+        # source silently - no password prompt during queue execution (A13).
+        pw = source_password(pdf)
         print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
         _warn_if_dpi_exceeds_source(pdf, dpi)
         default_folder = unique_dir_path(default_images_output_dir(source))
@@ -81,9 +84,7 @@ def operation_images_all_pages() -> None:
 
         def _run():
             try:
-                rpdf, _count = open_render_document(
-                    source, password_prompt=prompt_password
-                )
+                rpdf, _count = open_render_document(source, password=pw)
             except (PdfOpenError, RuntimeError) as exc:
                 print_error(str(exc))
                 logger.error("Failed to reopen '%s' for rendering: %s", source, exc)
@@ -127,6 +128,8 @@ def operation_images_selected_pages() -> None:
         return
 
     try:
+        # Capture the working password for a silent reopen in the runner (A13).
+        pw = source_password(pdf)
         print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
         _warn_if_dpi_exceeds_source(pdf, dpi)
 
@@ -174,9 +177,7 @@ def operation_images_selected_pages() -> None:
 
         def _run():
             try:
-                rpdf, _count = open_render_document(
-                    source, password_prompt=prompt_password
-                )
+                rpdf, _count = open_render_document(source, password=pw)
             except (PdfOpenError, RuntimeError) as exc:
                 print_error(str(exc))
                 logger.error("Failed to reopen '%s' for rendering: %s", source, exc)
@@ -184,7 +185,7 @@ def operation_images_selected_pages() -> None:
             try:
                 _render_pngs_and_report(rpdf, pages_zero_based, out_dir, dpi)
             finally:
-                rpdf.close()
+                close_doc(rpdf)
 
         queue_task(
             f"PDF to PNG ({selection_label}) of {source.name} -> {out_dir.name}",
@@ -248,6 +249,7 @@ def operation_images_batch_folder() -> None:
     print_kv("Image format", "PNG", Color.ORANGE)
     print_kv("Quality", f"{dpi} DPI", Color.PINK)
     print_kv("Per-file output", "<name>_images folder beside each PDF", Color.AQUA)
+    print_note(BATCH_PASSWORD_NOTICE)
     print(colorize("\n  Files:", Color.GRAY))
     _print_merge_order(pdfs)
 
@@ -322,6 +324,9 @@ def operation_pdf_to_image_pdf() -> None:
         return
 
     try:
+        # Capture the working password for a silent reopen in the runner (A13).
+        pw = source_password(pdf)
+        protection = detect_protection(pdf)
         print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
         _warn_if_dpi_exceeds_source(pdf, dpi)
         default_path = unique_file_path(default_image_pdf_output(source))
@@ -332,6 +337,11 @@ def operation_pdf_to_image_pdf() -> None:
         print_kv("Quality", f"{dpi} DPI", Color.PINK)
         print_kv("Result", "image-only PDF (not editable)", Color.LIME)
         print_kv("Default Output Path", default_path, Color.AQUA)
+
+        protection = resolve_protection(protection, context="image-only PDF")
+        if protection is None:
+            print_warning("Cancelled. Returning to menu.")
+            return
 
         out_path = _choose_output_file(default_path, source)
         if out_path is None:
@@ -344,9 +354,7 @@ def operation_pdf_to_image_pdf() -> None:
         )
         def _run():
             try:
-                rpdf, count = open_render_document(
-                    source, password_prompt=prompt_password
-                )
+                rpdf, count = open_render_document(source, password=pw)
             except (PdfOpenError, RuntimeError) as exc:
                 print_error(str(exc))
                 logger.error("Failed to reopen '%s' for rendering: %s", source, exc)
@@ -362,6 +370,7 @@ def operation_pdf_to_image_pdf() -> None:
                     out_path,
                     dpi,
                     progress=lambda c, t: _print_progress("Rasterizing pages", c, t),
+                    protection=protection,
                 )
                 print_success(
                     f"Done. Wrote {written} rasterized page(s) to:\n  {out_path}"
@@ -408,6 +417,7 @@ def operation_image_pdf_batch_folder() -> None:
     print_kv("Quality", f"{dpi} DPI", Color.PINK)
     print_kv("Result", "image-only PDF per file (not editable)", Color.LIME)
     print_kv("Per-file output", "<name>_image.pdf beside each PDF", Color.AQUA)
+    print_note(BATCH_PASSWORD_NOTICE)
     print(colorize("\n  Files:", Color.GRAY))
     _print_merge_order(pdfs)
 
@@ -421,6 +431,7 @@ def operation_image_pdf_batch_folder() -> None:
             folder, len(pdfs), dpi,
         )
         ok = failed = total_pages = 0
+        unprotected_notes = []
         for index, src in enumerate(pdfs, start=1):
             print_info(f"[{index}/{len(pdfs)}] {src.name}")
             try:
@@ -434,9 +445,16 @@ def operation_image_pdf_batch_folder() -> None:
                 continue
             try:
                 out_path = unique_file_path(default_image_pdf_output(src))
+                # Per-file policy without mid-batch prompting: keep an open
+                # password; an owner-restricted source cannot be reproduced.
+                file_policy = detect_protection(pdf)
+                if file_policy.kind == "restricted":
+                    file_policy = None
+                    unprotected_notes.append(src.name)
                 written = render_pdf_to_image_pdf(
                     pdf, page_count, out_path, dpi,
                     progress=lambda c, t: _print_progress("  Rasterizing", c, t),
+                    protection=file_policy,
                 )
                 total_pages += written
                 ok += 1
@@ -452,6 +470,13 @@ def operation_image_pdf_batch_folder() -> None:
             f"Done. Converted {ok} file(s), {failed} failed, "
             f"{total_pages} page(s) total."
         )
+        if unprotected_notes:
+            print_warning(
+                f"{len(unprotected_notes)} file(s) had owner restrictions that "
+                "cannot be reproduced; their outputs are unprotected: "
+                + ", ".join(unprotected_notes[:5])
+                + (" ..." if len(unprotected_notes) > 5 else "")
+            )
         logger.info(
             "Batch image-only PDF complete: ok=%d failed=%d pages=%d",
             ok, failed, total_pages,
@@ -540,6 +565,8 @@ def operation_extract_images() -> None:
         return
 
     try:
+        # Capture the working password for a silent reopen in the runner (A13).
+        pw = source_password(pdf)
         image_count = count_embedded_images(pdf)
         print_success(
             f"Loaded '{source.name}' - {total_pages} page(s), "
@@ -570,7 +597,12 @@ def operation_extract_images() -> None:
         print_kv("Total source pages", total_pages, Color.GOLD)
         print_kv("Images to extract", image_count, Color.MAGENTA)
         if jpeg_quality is None:
-            print_kv("Quality", "original (raw bytes, no quality loss)", Color.LIME)
+            print_kv(
+                "Quality",
+                "original (raw bytes, no quality loss; transparent images are "
+                "rebuilt as PNG with their alpha)",
+                Color.LIME,
+            )
         else:
             print_kv("Quality", f"{label} (JPEG quality {jpeg_quality})", Color.LIME)
         print_kv("Output directory", default_folder, Color.AQUA)
@@ -582,9 +614,7 @@ def operation_extract_images() -> None:
 
         def _run():
             try:
-                rpdf, _count = open_render_document(
-                    source, password_prompt=prompt_password
-                )
+                rpdf, _count = open_render_document(source, password=pw)
             except (PdfOpenError, RuntimeError) as exc:
                 print_error(str(exc))
                 logger.error("Failed to reopen '%s' for extraction: %s", source, exc)

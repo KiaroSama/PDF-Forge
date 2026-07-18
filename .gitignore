@@ -55,6 +55,14 @@ htmlcov/
 # Project-local scratch folder (watermark previews, etc.).
 /temp/
 
+# Project-local native runtimes provisioned on demand (large payload; the
+# pinned version/checksum metadata in office_runtime_meta.json IS tracked).
+/.tools/
+
+# Record of PDFs this application generated, so folder tools never reprocess
+# their own output. Machine-local state, not project source.
+/.pdfforge_outputs.json
+
 # OS / editor junk.
 Thumbs.db
 desktop.ini

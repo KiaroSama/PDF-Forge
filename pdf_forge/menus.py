@@ -12,6 +12,7 @@ from .ops_watermark import *  # noqa: F401,F403
 from .ops_compress import *  # noqa: F401,F403
 from .ops_unlock import *  # noqa: F401,F403
 from .ops_encrypt import *  # noqa: F401,F403
+from .ops_office import *  # noqa: F401,F403
 
 __all__ = ['_show_pdf_to_images_menu', 'pdf_to_images_menu', '_show_image_pdf_menu', 'pdf_to_image_pdf_menu', '_show_delete_pages_menu', 'delete_pages_menu', '_show_compress_menu', 'compress_menu', '_show_protect_menu', 'protect_menu', 'show_menu', 'show_page_tools_menu', 'page_tools_menu', 'main_menu']
 
@@ -48,6 +49,7 @@ def pdf_to_images_menu() -> None:
             raise _ExitRequested()
 
         logger.debug("PDF-to-images menu selection: '%s'", choice)
+        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
         try:
             if choice == "1":
                 operation_images_all_pages()
@@ -95,6 +97,7 @@ def pdf_to_image_pdf_menu() -> None:
             raise _ExitRequested()
 
         logger.debug("Image-only-PDF menu selection: '%s'", choice)
+        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
         try:
             if choice == "1":
                 operation_pdf_to_image_pdf()
@@ -140,6 +143,7 @@ def delete_pages_menu() -> None:
             raise _ExitRequested()
 
         logger.debug("Delete-pages menu selection: '%s'", choice)
+        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
         try:
             if choice == "1":
                 operation_delete_pages_single()
@@ -185,6 +189,7 @@ def compress_menu() -> None:
             raise _ExitRequested()
 
         logger.debug("Compress menu selection: '%s'", choice)
+        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
         try:
             if choice == "1":
                 operation_compress_pdf()
@@ -230,6 +235,7 @@ def protect_menu() -> None:
             raise _ExitRequested()
 
         logger.debug("Protect menu selection: '%s'", choice)
+        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
         try:
             if choice == "1":
                 operation_protect_open_password()
@@ -250,14 +256,15 @@ def show_menu() -> None:
     print(f"  {colorize('1.', Color.LIGHT_BLUE)} Page tools "
           f"{colorize('[1]', Color.GREEN)}")
     print(f"  {colorize('2.', Color.LIGHT_BLUE)} Merge multiple PDFs")
-    print(f"  {colorize('3.', Color.LIGHT_BLUE)} PDF to images (PNG)")
-    print(f"  {colorize('4.', Color.LIGHT_BLUE)} PDF to image-only PDF")
-    print(f"  {colorize('5.', Color.LIGHT_BLUE)} Remove image watermark")
-    print(f"  {colorize('6.', Color.LIGHT_BLUE)} Delete pages")
-    print(f"  {colorize('7.', Color.LIGHT_BLUE)} Compress PDF (reduce file size)")
-    print(f"  {colorize('8.', Color.LIGHT_BLUE)} Extract images from PDF")
+    print(f"  {colorize('3.', Color.LIGHT_BLUE)} Delete pages")
+    print(f"  {colorize('4.', Color.LIGHT_BLUE)} PDF to images (PNG)")
+    print(f"  {colorize('5.', Color.LIGHT_BLUE)} PDF to image-only PDF")
+    print(f"  {colorize('6.', Color.LIGHT_BLUE)} Remove image watermark")
+    print(f"  {colorize('7.', Color.LIGHT_BLUE)} Extract images from PDF")
+    print(f"  {colorize('8.', Color.LIGHT_BLUE)} Compress PDF (reduce file size)")
     print(f"  {colorize('9.', Color.LIGHT_BLUE)} Protect PDF (set password / restrictions)")
     print(f"  {colorize('10.', Color.LIGHT_BLUE)} Unlock PDF (remove password & restrictions)")
+    print(f"  {colorize('11.', Color.LIGHT_BLUE)} Convert documents/spreadsheets/presentations to PDF")
     print(f"  {colorize('0.', Color.LIGHT_BLUE)} Exit")
     print()
 
@@ -298,6 +305,7 @@ def page_tools_menu() -> None:
             raise _ExitRequested()
 
         logger.debug("Page tools menu selection: '%s'", choice)
+        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
         try:
             if choice == "1":
                 operation_extract_pages()
@@ -319,7 +327,30 @@ def main_menu() -> int:
     another (default no); answering no shows the full summary and a single
     "Start now?" confirmation before the whole queue runs together.
     """
+    def _goodbye() -> int:
+        print_success("Goodbye.")
+        logger.info("Application exit.")
+        return 0
+
+    # Direct main-menu operations use their main-menu number as the numbering
+    # prefix; the submenu launchers set their own (submenu item) prefix.
+    direct_ops = {
+        "6": operation_remove_watermark,
+        "7": operation_extract_images,
+        "10": operation_unlock_pdf,
+    }
+    submenu_launchers = {
+        "1": page_tools_menu,
+        "3": delete_pages_menu,
+        "4": pdf_to_images_menu,
+        "5": pdf_to_image_pdf_menu,
+        "8": compress_menu,
+        "9": protect_menu,
+        "11": convert_menu,
+    }
+
     while True:
+        set_operation_prompt(None)  # menu-level prompts use plain numbering.
         show_menu()
         choice = _input(
             colorize("Select an option ", Color.BOLD)
@@ -335,54 +366,37 @@ def main_menu() -> int:
         if choice in ("0", "exit", "quit"):
             # Finish any pending queue before leaving.
             finalize_queue()
-            print_success("Goodbye.")
-            logger.info("Application exit requested by user.")
-            return 0
+            return _goodbye()
 
         logger.debug("Main menu selection: '%s'", choice)
         try:
-            if choice == "1":
-                page_tools_menu()
-            elif choice == "2":
-                operation_merge_pdfs()
-            elif choice == "3":
-                pdf_to_images_menu()
-            elif choice == "4":
-                pdf_to_image_pdf_menu()
-            elif choice == "5":
-                operation_remove_watermark()
-            elif choice == "6":
-                delete_pages_menu()
-            elif choice == "7":
-                compress_menu()
-            elif choice == "8":
-                operation_extract_images()
-            elif choice == "9":
-                protect_menu()
-            elif choice == "10":
-                operation_unlock_pdf()
+            if choice == "2":
+                operation_merge_pdfs()  # sets its own prefix from the merge submenu.
+            elif choice in direct_ops:
+                set_operation_prompt(choice)
+                direct_ops[choice]()
+            elif choice in submenu_launchers:
+                submenu_launchers[choice]()  # submenu sets the prefix per item.
             else:
-                print_error("Invalid option. Please choose 1-10 or 0.")
+                print_error("Invalid option. Please choose 1-11 or 0.")
                 continue
         except _ExitRequested:
             finalize_queue()
-            print_success("Goodbye.")
-            logger.info("Application exit requested during operation.")
-            return 0
+            return _goodbye()
         except _TaskQueued:
             # A task was configured and added to the queue. Ask whether to add
             # another (default no = Enter), then finalize when the user is done.
+            set_operation_prompt(None)  # control prompts use plain numbering.
             try:
                 add_more = ask_yes_no(
                     "\nDo you want to queue another task?", default_yes=False
                 )
             except _ExitRequested:
                 finalize_queue()
-                print_success("Goodbye.")
-                logger.info("Application exit requested while queuing tasks.")
-                return 0
+                return _goodbye()
             if not add_more:
-                finalize_queue()
+                if finalize_queue():  # True => exit/quit typed at "Start now?".
+                    return _goodbye()
             # Either way, loop back to a fresh main menu (the queue is now empty
             # unless the user chose to keep adding tasks).
             continue

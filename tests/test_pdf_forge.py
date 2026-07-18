@@ -517,17 +517,6 @@ def test_merge_unicode_persian_paths(tmp_path):
 # Image conversion: quality mapping, naming, PNG rendering, image-only PDF
 # --------------------------------------------------------------------------- #
 
-def test_image_dpi_for_quality():
-    assert app.image_dpi_for_quality("very low") == 72
-    assert app.image_dpi_for_quality("low") == 96
-    assert app.image_dpi_for_quality("MEDIUM") == 150
-    assert app.image_dpi_for_quality("High") == 300
-    assert app.image_dpi_for_quality("very high") == 450
-    assert app.image_dpi_for_quality("ultra") == 600
-    with pytest.raises(ValueError):
-        app.image_dpi_for_quality("bogus")
-
-
 def test_build_page_image_name():
     # Page number is used verbatim, with no zero-padding.
     assert app.build_page_image_name(2) == "2.png"
@@ -1000,9 +989,14 @@ def test_folder_dpi_stats(tmp_path):
     assert stats["files_text_only"] == 1
     assert 140 <= stats["max"] <= 160
 
-    # A folder of only text PDFs yields no DPI stats.
+    # A15: a folder of only text PDFs yields no image-DPI keys but still reports
+    # the honest per-file buckets (no false "no images" when nothing was skipped).
     make_pdf(tmp_path / "c.pdf", 1)
-    assert app._folder_dpi_stats([tmp_path / "b.pdf", tmp_path / "c.pdf"]) is None
+    text_only = app._folder_dpi_stats([tmp_path / "b.pdf", tmp_path / "c.pdf"])
+    assert "max" not in text_only
+    assert text_only["files_text_only"] == 2
+    assert text_only["files_with_images"] == 0
+    assert text_only["files_not_scanned"] == 0
 
 
 # --------------------------------------------------------------------------- #

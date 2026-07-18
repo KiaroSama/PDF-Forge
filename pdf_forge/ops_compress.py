@@ -130,7 +130,9 @@ def operation_compress_pdf() -> None:
         return
     total_pages = doc.page_count
     dpi_stats = scan_image_dpi_stats(doc)
-    doc.close()
+    # Capture the working password so the queued runner reopens silently (A13).
+    pw = source_password(doc)
+    close_doc(doc)
 
     original_size = source.stat().st_size
     print_success(
@@ -190,8 +192,7 @@ def operation_compress_pdf() -> None:
     def _run():
         try:
             stats = compress_pdf(
-                source, out_path, jpeg_quality, dpi_target,
-                password_prompt=prompt_password,
+                source, out_path, jpeg_quality, dpi_target, password=pw,
             )
         except Exception as exc:  # noqa: BLE001 - clean message, log details
             print_error(f"Failed to compress the PDF: {exc}")
@@ -226,7 +227,7 @@ def _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats) -> None:
     left as-is - so no image is ever enlarged. When the cap is at or above the
     document's own maximum image DPI, nothing needs downsampling.
     """
-    if jpeg_quality is None or dpi_stats is None:
+    if jpeg_quality is None or dpi_stats is None or "max" not in dpi_stats:
         return
     if dpi_target >= dpi_stats["max"]:
         print_warning(
@@ -237,21 +238,30 @@ def _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats) -> None:
         )
 
 
-def _folder_dpi_stats(pdfs) -> Optional[dict]:
+def _folder_dpi_stats(pdfs) -> dict:
     """Aggregate image-DPI stats across every PDF in a folder.
 
-    Opens each file once to measure its images, then combines them into a
-    folder-wide ``{min, max, median, count, files_with_images, files_text_only}``
-    (or ``None`` when the whole folder is text/vector).
+    Opens each file once (empty password only - encrypted files are not
+    prompted here) and sorts every file into one of three honest buckets:
+      * ``files_with_images``  - scanned, raster images found,
+      * ``files_text_only``    - scanned, no raster images (text/vector),
+      * ``files_not_scanned``  - could not be inspected (encrypted / unreadable).
+
+    Always returns a dict with those three counts. ``min``/``median``/``max``
+    are present only when at least one file contributed image DPIs. A folder of
+    only-encrypted files therefore reports "not scanned", never a false
+    "no raster images".
     """
     all_dpis = []
     files_with_images = 0
     files_text_only = 0
+    files_not_scanned = 0
     for src in pdfs:
         try:
             doc = open_source_pdf(src)
         except (PdfOpenError, RuntimeError) as exc:
             logger.warning("DPI scan skipped for '%s': %s", src, exc)
+            files_not_scanned += 1
             continue
         try:
             stats = scan_image_dpi_stats(doc)
@@ -263,16 +273,17 @@ def _folder_dpi_stats(pdfs) -> Optional[dict]:
             files_with_images += 1
             # Reconstruct representative points: min, median, max per file.
             all_dpis += [stats["min"], stats["median"], stats["max"]]
-    if not all_dpis:
-        return None
-    all_dpis.sort()
-    return {
-        "min": all_dpis[0],
-        "max": all_dpis[-1],
-        "median": all_dpis[len(all_dpis) // 2],
+    result = {
         "files_with_images": files_with_images,
         "files_text_only": files_text_only,
+        "files_not_scanned": files_not_scanned,
     }
+    if all_dpis:
+        all_dpis.sort()
+        result["min"] = all_dpis[0]
+        result["max"] = all_dpis[-1]
+        result["median"] = all_dpis[len(all_dpis) // 2]
+    return result
 
 
 def operation_compress_pdf_batch() -> None:
@@ -292,26 +303,41 @@ def operation_compress_pdf_batch() -> None:
     print_info(f"Scanning image resolution across {len(pdfs)} file(s)...")
     dpi_stats = _folder_dpi_stats(pdfs)
 
+    not_scanned = dpi_stats["files_not_scanned"]
     print_heading("\nSummary")
     print_kv("Folder", folder, Color.CYAN)
     print_kv("PDF files", len(pdfs), Color.MAGENTA)
-    if dpi_stats is not None:
+    if "max" in dpi_stats:
         print_kv(
             "Image DPI across folder",
             f"min {dpi_stats['min']}, median {dpi_stats['median']}, "
             f"max {dpi_stats['max']}",
             Color.GOLD,
         )
+        parts = [f"{dpi_stats['files_with_images']} file(s) contain images"]
         if dpi_stats["files_text_only"]:
-            print_note(
-                f"{dpi_stats['files_with_images']} file(s) contain images; "
-                f"{dpi_stats['files_text_only']} are text/vector only."
-            )
+            parts.append(f"{dpi_stats['files_text_only']} are text/vector only")
+        if not_scanned:
+            parts.append(f"{not_scanned} could not be scanned (encrypted/unreadable)")
+        print_note("; ".join(parts) + ".")
         logger.info("Folder DPI stats for '%s': %s", folder, dpi_stats)
-    else:
+    elif dpi_stats["files_text_only"] and not not_scanned:
         print_note(
-            "No raster images found in any file - these are text/vector PDFs. "
-            "Compression is lossless for text; every level behaves like Ultra."
+            "No raster images found in any scanned file - these are text/vector "
+            "PDFs. Compression is lossless for text; every level behaves like Ultra."
+        )
+    elif dpi_stats["files_text_only"] and not_scanned:
+        print_note(
+            f"No raster images in the {dpi_stats['files_text_only']} scanned "
+            f"file(s) (text/vector); {not_scanned} could not be scanned "
+            "(encrypted/unreadable) and were not inspected."
+        )
+    else:
+        # Nothing could be inspected at all (e.g. every file is encrypted).
+        print_warning(
+            f"None of the {not_scanned} file(s) could be scanned for image "
+            "resolution (encrypted or unreadable). Image-DPI stats are "
+            "unavailable; compression will still be attempted per file."
         )
 
     level = _prompt_compression_level()
@@ -323,6 +349,7 @@ def operation_compress_pdf_batch() -> None:
 
     print_kv("Level", label, Color.LIME)
     print_kv("Per-file output", "<name>_compressed.pdf beside each PDF", Color.AQUA)
+    print_note(BATCH_PASSWORD_NOTICE)
     print(colorize("\n  Files:", Color.GRAY))
     _print_merge_order(pdfs)
 
@@ -360,12 +387,25 @@ def operation_compress_pdf_batch() -> None:
             )
 
         saved_total = total_old - total_new
-        pct_total = (100.0 * saved_total / total_old) if total_old else 0.0
-        print_success(
+        head = (
             f"Done. Compressed {ok} file(s), {failed} failed. "
-            f"Total {_format_size(total_old)} -> {_format_size(total_new)} "
-            f"(saved {_format_size(saved_total)}, {pct_total:.1f}%)."
+            f"Total {_format_size(total_old)} -> {_format_size(total_new)}"
         )
+        if total_old and saved_total > 0:
+            pct = 100.0 * saved_total / total_old
+            print_success(f"{head} (saved {_format_size(saved_total)}, {pct:.1f}%).")
+        elif total_old and saved_total < 0:
+            # Aggregate output grew: never render a negative "saved" size. Report
+            # the increase as a warning, not a success claim.
+            grew = total_new - total_old
+            pct = 100.0 * grew / total_old
+            print_warning(
+                f"{head} (increased by {_format_size(grew)}, +{pct:.1f}%). "
+                "The set was already efficiently compressed; some outputs got "
+                "larger. The originals are unchanged - you can discard the outputs."
+            )
+        else:
+            print_success(f"{head} (no net size change).")
         logger.info(
             "Batch compress complete: ok=%d failed=%d saved=%d bytes.",
             ok, failed, saved_total,

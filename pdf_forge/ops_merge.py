@@ -26,25 +26,38 @@ def _show_merge_source_menu() -> None:
 def prompt_merge_source_files() -> Optional[List[Path]]:
     """Collect PDF paths one at a time for a merge. Returns None to go back.
 
-    Requires at least 2 distinct PDF files. Pressing Enter on an empty prompt
-    finishes once enough files are gathered. Entering '0' cancels (Back). The
-    merge order matches the order entered. Duplicate files are rejected.
+    Requires at least 2 distinct PDF files. Type ``done`` (or press Enter) to
+    finish once enough files are gathered, ``b`` to drop the file added last and
+    enter it again, ``0`` to cancel (Back). The merge order matches the order
+    entered. Duplicate files are rejected.
     """
     print_note(
-        "Enter PDF paths one at a time. Add at least 2 files, then press Enter "
-        "to finish."
+        "Enter PDF paths one at a time. Add at least 2 files, then type 'done' "
+        "to finish. Type 'b' to re-enter the previous file."
     )
     selected: List[Path] = []
     while True:
-        default = "finish" if len(selected) >= 2 else None
-        prompt = question_prompt(f"PDF file #{len(selected) + 1}", default=default)
+        prompt = question_prompt(
+            f"PDF file #{len(selected) + 1}",
+            details=guidance_text(
+                drag_drop_guidance(repeated=True), GUIDANCE_KEYWORDS
+            ),
+        )
         raw = _input(prompt)
         cleaned = strip_surrounding_quotes(raw)
 
-        if cleaned == "":
+        # 'done' (or a blank Enter) finishes once enough files exist.
+        if cleaned == "" or cleaned.lower() == "done":
             if len(selected) >= 2:
                 return selected
             print_error("Add at least 2 PDF files before finishing.")
+            continue
+        if cleaned.lower() == "b":
+            if not selected:
+                print_error("There is no previous file to re-enter yet.")
+                continue
+            removed = selected.pop()
+            print_warning(f"Removed: {removed.name}. Enter file #{len(selected) + 1} again.")
             continue
         if cleaned == "0":
             return None
@@ -77,7 +90,10 @@ def prompt_merge_source_folder() -> Optional[List[Path]]:
     Returns the discovered, A-Z sorted list, or None to go back. When fewer
     than 2 PDFs are found, a clear error is shown and None is returned.
     """
-    prompt = question_prompt("Folder containing PDFs")
+    prompt = question_prompt(
+        "Folder containing PDFs",
+        details=guidance_text(drag_drop_guidance(kind="folder"), GUIDANCE_KEYWORDS),
+    )
     while True:
         raw = _input(prompt)
         cleaned = strip_surrounding_quotes(raw)
@@ -137,23 +153,23 @@ def _choose_output_file_for_merge(default_path: Path,
             print_error("The output cannot be the same file as any source PDF.")
             continue
 
-        # Create destination directory only after explicit confirmation.
+        # Confirm intent for a not-yet-existing directory, but defer creation to
+        # the task runner (no empty folder left if the task is discarded).
         if not chosen.parent.exists():
             if not ask_yes_no(
-                f"Directory does not exist:\n  {chosen.parent}\nCreate it?",
+                f"Directory does not exist (it will be created when the task "
+                f"runs):\n  {chosen.parent}\nUse it?",
                 default_yes=True,
             ):
                 continue
-            try:
-                chosen.parent.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                print_error(f"Could not create directory: {exc}")
-                continue
 
-        # Never overwrite: generate a unique name when needed.
-        final = unique_file_path(chosen)
+        # Never overwrite / collide with another queued output: reserve a name.
+        final = reserve_unique_file(chosen)
         if final != chosen:
-            print_warning(f"Output exists; using a unique name: {final.name}")
+            print_warning(
+                f"Output exists or is already queued; using a unique name: "
+                f"{final.name}"
+            )
         return final
 
 
@@ -221,6 +237,9 @@ def operation_merge_pdfs() -> None:
             return  # Back to the main menu.
         if choice in ("exit", "quit"):
             raise _ExitRequested()
+        # The chosen merge submenu item is the hierarchical numbering prefix:
+        # "Add files one by one" -> 1-1, 1-2, ...; "folder" -> 2-1, ...
+        set_operation_prompt(choice)
         if choice == "1":
             mode = "files"
             sources = prompt_merge_source_files()
@@ -249,25 +268,43 @@ def _run_merge_with_sources(mode: str, sources: List[Path]) -> None:
     """
     logger.info("Merge source selected: mode=%s files=%d", mode, len(sources))
 
-    # Open every source up front. Fail before writing if any source cannot be
-    # opened, so no partial output is ever created.
+    # Open every source up front to validate it, count its pages, and capture
+    # the password that opens it - then close it again. Nothing but immutable
+    # paths/passwords is carried into the queue, so a discarded task leaks no
+    # file handles (A5) and the runner never re-prompts for a password (A13).
     readers = []
+    passwords: List[str] = []
+    policies = []
     total_pages = 0
     current = sources[0]
     try:
         for current in sources:
             reader = open_source_pdf(current, password_prompt=prompt_password)
             readers.append(reader)
+            passwords.append(source_password(reader))
+            policies.append(detect_protection(reader))
             total_pages += reader.page_count
     except (PdfOpenError, RuntimeError) as exc:
         print_error(f"Cannot merge: failed to open '{current.name}': {exc}")
         logger.error("Merge aborted; failed to open '%s': %s", current, exc)
         return
+    finally:
+        # Close every handle opened above, including on a mid-way failure.
+        for reader in readers:
+            close_doc(reader)
+        readers = []
 
     logger.info(
         "All %d merge source(s) opened successfully; total pages=%d (sort=%s).",
         len(sources), total_pages, _describe_merge_sort_mode(mode),
     )
+
+    # A merge never invents a protection policy: if any source is protected the
+    # user makes an explicit choice (documented default: unprotected output).
+    merge_protection = resolve_merge_protection(policies)
+    if merge_protection is None:
+        print_warning("Cancelled. Returning to the merge menu.")
+        return
 
     # Choose the output path (Enter accepts a safe default beside the source).
     default_path = unique_file_path(_default_merge_output(mode, sources))
@@ -286,16 +323,24 @@ def _run_merge_with_sources(mode: str, sources: List[Path]) -> None:
 
     def _run():
         logger.info("Merge start: sources=%d output='%s'", len(sources), out_path)
+        docs = []
         try:
+            # Reopen each source silently with its captured password.
+            for src, src_pw in zip(sources, passwords):
+                docs.append(open_source_pdf(src, password=src_pw))
             written = write_merged_pdfs_to_pdf(
-                readers,
+                docs,
                 out_path,
                 progress=lambda c, t: _print_progress("Merging pages", c, t),
+                protection=merge_protection,
             )
         except Exception as exc:  # noqa: BLE001 - present a clean message, log details
             print_error(f"Failed to create the merged PDF: {exc}")
             logger.exception("Merge failed for output '%s'", out_path)
             return
+        finally:
+            for doc in docs:
+                close_doc(doc)
         print_success(
             f"Done. Merged {len(sources)} file(s), {written} page(s) into:\n  {out_path}"
         )

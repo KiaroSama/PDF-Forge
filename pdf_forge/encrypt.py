@@ -7,35 +7,28 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .constants import *  # noqa: F401,F403
+from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
-__all__ = ['all_permissions', 'restrictable_actions', 'save_encrypted_pdf']
-
-
-def all_permissions() -> int:
-    """The permission bitmask that allows every action."""
-    pymupdf = _import_pymupdf()
-    return int(
-        pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_PRINT_HQ | pymupdf.PDF_PERM_COPY
-        | pymupdf.PDF_PERM_MODIFY | pymupdf.PDF_PERM_ANNOTATE | pymupdf.PDF_PERM_FORM
-        | pymupdf.PDF_PERM_ASSEMBLE | pymupdf.PDF_PERM_ACCESSIBILITY
-    )
+__all__ = ['restrictable_actions', 'save_encrypted_pdf']
 
 
 def restrictable_actions() -> List[Tuple[str, int]]:
     """User-selectable actions that can be blocked, as ``(label, bits)`` pairs.
 
-    Accessibility (screen-reader text extraction) is intentionally not listed:
-    it is always kept allowed so protected files stay accessible.
+    Derived from :func:`permission_bits`. Both print bits are offered as one
+    "printing" choice, and accessibility (screen-reader text extraction) is
+    intentionally omitted: it is always kept allowed so protected files stay
+    accessible.
     """
-    pymupdf = _import_pymupdf()
+    bits = permission_bits()
     return [
-        ("printing", int(pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_PRINT_HQ)),
-        ("copying text/images", int(pymupdf.PDF_PERM_COPY)),
-        ("editing content", int(pymupdf.PDF_PERM_MODIFY)),
-        ("annotating / comments", int(pymupdf.PDF_PERM_ANNOTATE)),
-        ("filling form fields", int(pymupdf.PDF_PERM_FORM)),
-        ("assembling pages", int(pymupdf.PDF_PERM_ASSEMBLE)),
+        ("printing", int(bits["printing"] | bits["high-quality printing"])),
+        ("copying text/images", int(bits["copying text/images"])),
+        ("editing content", int(bits["editing content"])),
+        ("annotating / comments", int(bits["annotating / comments"])),
+        ("filling form fields", int(bits["filling form fields"])),
+        ("assembling pages", int(bits["assembling pages"])),
     ]
 
 
@@ -99,6 +92,7 @@ def save_encrypted_pdf(doc, out_path: Path, user_pw: Optional[str] = None,
         doc.save(str(tmp_path), **save_kwargs)
         _validate_encrypted(tmp_path, total, user_pw or owner_pw)
         os.replace(tmp_path, out_path)
+        record_generated_output(out_path)
     except Exception:
         try:
             if tmp_path.exists():

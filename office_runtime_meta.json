@@ -1,0 +1,18 @@
+{
+  "_comment": "Pinned metadata for the project-local, CLI-only LibreOffice runtime used by the Convert-to-PDF tool. Tracked in git; the downloaded/extracted runtime under .tools/libreoffice/ is git-ignored. Checksums are the official DocumentFoundation .sha256 sidecar values. Provisioning uses an official administrative extraction (msiexec /a) - no system install, PATH, registry, shortcut, or service changes.",
+  "product": "LibreOffice",
+  "version": "25.8.7",
+  "arch": "x86-64",
+  "license": "MPL-2.0 (LibreOffice). See https://www.libreoffice.org/about-us/licenses/",
+  "windows": {
+    "url": "https://download.documentfoundation.org/libreoffice/stable/25.8.7/win/x86_64/LibreOffice_25.8.7_Win_x86-64.msi",
+    "filename": "LibreOffice_25.8.7_Win_x86-64.msi",
+    "sha256": "ecdb65e76f5e91dc198b8c8dce5b5d6e1eb12fea6023553e52b591afd10b619d",
+    "sha256_source": "https://download.documentfoundation.org/libreoffice/stable/25.8.7/win/x86_64/LibreOffice_25.8.7_Win_x86-64.msi.sha256",
+    "approx_bytes": 366170112
+  },
+  "python_dependency": {
+    "package": "unoserver",
+    "version": "3.7"
+  }
+}

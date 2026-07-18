@@ -7,7 +7,7 @@ from typing import Optional
 
 from .constants import *  # noqa: F401,F403
 
-__all__ = ['Color', 'enable_ansi_colors', 'colorize', 'print_success', 'print_warning', 'print_error', 'print_heading', 'print_info', 'print_note', 'print_kv', 'back_text', 'reset_questions', 'question_prompt', 'print_banner', '_print_progress']
+__all__ = ['Color', 'enable_ansi_colors', 'colorize', 'print_success', 'print_warning', 'print_error', 'print_heading', 'print_info', 'print_note', 'print_kv', 'back_text', 'reset_questions', 'set_operation_prompt', 'question_prompt', 'guidance_text', 'print_banner', '_print_progress']
 
 class Color:
     """ANSI color codes used for readable terminal output.
@@ -151,13 +151,63 @@ def back_text(text: str = "back=0, quit=exit") -> str:
     return colorize("{", Color.WHITE) + joined + colorize("}", Color.WHITE)
 
 
+def guidance_text(plain: str, keywords=()) -> str:
+    """Colour constant prompt guidance the way FFmWiz colours its own.
+
+    The guidance body stays in the normal hint colour and only the parts you
+    can actually *type* are picked out in light blue - the same split FFmWiz
+    uses when it highlights the example value inside an otherwise hint-coloured
+    detail string. Each highlight restores the hint colour afterwards so the
+    rest of the line does not fall back to the terminal default.
+    """
+    if not _COLOR_ENABLED:
+        return plain
+    text = plain
+    for keyword in keywords:
+        text = text.replace(
+            keyword,
+            f"{Color.LIGHT_BLUE}{keyword}{Color.RESET}{Color.HINT_YELLOW}",
+            1,
+        )
+    return text
+
+
 _question_no = 0
+_prompt_prefix: Optional[str] = None
 
 
 def reset_questions() -> None:
-    """Reset the per-operation question counter."""
+    """Reset the local per-operation question counter (prefix is preserved).
+
+    Only the local occurrence counter is reset; the fixed operation prefix set
+    by :func:`set_operation_prompt` is left in place. Operations may call this
+    at the top without disturbing the prefix the launching menu chose.
+    """
     global _question_no
     _question_no = 0
+
+
+def set_operation_prompt(prefix: Optional[object]) -> None:
+    """Begin a new hierarchical numbering context.
+
+    ``prefix`` is the menu/submenu number the user selected to launch the
+    operation (e.g. ``"1"`` for "Add PDF files one by one"). Prompts then read
+    ``prefix-1``, ``prefix-2``, ... where only the local counter advances -
+    validation retries advance the counter but never the prefix. Pass ``None``
+    for menu- or queue-control prompts, which fall back to plain numbering.
+    """
+    global _prompt_prefix, _question_no
+    _prompt_prefix = None if prefix is None else str(prefix)
+    _question_no = 0
+
+
+def _next_question_label() -> str:
+    """Advance the local counter and return the hierarchical prompt label."""
+    global _question_no
+    _question_no += 1
+    if _prompt_prefix:
+        return f"{_prompt_prefix}-{_question_no}"
+    return str(_question_no)
 
 
 def question_prompt(
@@ -168,15 +218,19 @@ def question_prompt(
 ) -> str:
     """Build a numbered prompt string ending with ': '.
 
-    Format: '\\nN. {title} ({details}) [{default}] {back}: '
-        * title   -> bold (white)
+    Format: '\\n{prefix}-{n}. {title} ({details}) [{default}] {back}: '
+        * title   -> bold (white); the dynamic field name
         * details -> hint-yellow inside white parentheses
         * default -> green [default] marker (the Enter value)
         * back    -> colored {back=0, quit=exit} control hint
+
+    The leading label is ``{prefix}-{n}`` when an operation prefix is active
+    (see :func:`set_operation_prompt`), otherwise the plain occurrence number.
+    Path prompts pass their guidance through :func:`guidance_text`, which picks
+    out the typeable keywords inside this hint-coloured detail string.
     """
-    global _question_no
-    _question_no += 1
-    text = "\n" + colorize(f"{_question_no}. {title}", Color.BOLD)
+    label = _next_question_label()
+    text = "\n" + colorize(f"{label}. {title}", Color.BOLD)
     if details:
         text += (
             " "

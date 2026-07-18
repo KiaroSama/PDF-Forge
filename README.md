@@ -46,8 +46,16 @@ images. The original PDFs are never modified, overwritten, or deleted.
   [`PyMuPDF`](https://pypi.org/project/PyMuPDF/) (the single PDF engine for
   every operation — page tools, merging, rendering, compression, and watermark
   removal; AGPL-licensed) and
-  [`Pillow`](https://pypi.org/project/pillow/) (image validation and previews).
-  Both ship as prebuilt wheels, so no external tools are required.
+  [`Pillow`](https://pypi.org/project/pillow/) (image validation and previews),
+  and [`unoserver`](https://pypi.org/project/unoserver/) (the CLI control layer
+  for the convert-to-PDF tool). All ship as prebuilt wheels, so no external
+  tools are required for the PDF tools.
+- **Only for main menu 11 (Convert to PDF):** a LibreOffice runtime. It is a
+  native renderer, so it cannot live inside the virtual environment; PDF Forge
+  downloads a pinned, checksum-verified official build into the project folder
+  (`.tools/libreoffice/`) on request with
+  `.\.venv\Scripts\python.exe -m pdf_forge --setup-office`. It is **never**
+  installed system-wide and no GUI is shown. Every other tool works without it.
 
 ## How to run it
 
@@ -99,20 +107,62 @@ pdf-forge
 PDF Forge Main menu:
   1. Page tools [1]
   2. Merge multiple PDFs
-  3. PDF to images (PNG)
-  4. PDF to image-only PDF
-  5. Remove image watermark
-  6. Delete pages
-  7. Compress PDF (reduce file size)
-  8. Extract images from PDF
+  3. Delete pages
+  4. PDF to images (PNG)
+  5. PDF to image-only PDF
+  6. Remove image watermark
+  7. Extract images from PDF
+  8. Compress PDF (reduce file size)
   9. Protect PDF (set password / restrictions)
   10. Unlock PDF (remove password & restrictions)
+  11. Convert documents/spreadsheets/presentations to PDF
   0. Exit
 ```
 
 - Option `1` is the default; pressing **Enter** opens **Page tools**.
 - Type `exit` or `quit` at any prompt to close the app immediately.
 - In the main menu, `0` exits. In submenus, `0` means **Back**.
+- Invalid input is rejected with `Please choose 1-11 or 0.`
+
+> **Menu numbering changed in 2.0.0.** The tools were regrouped (page/merge/delete
+> first, then the image tools, then compress/protect/unlock, then convert). If you
+> have notes or scripts referring to the old numbers, re-read the list above —
+> the old numbers now open different tools.
+
+### Prompt numbering
+
+Prompts are numbered **hierarchically** as `<operation>-<question>`:
+
+```
+1-1. PDF file #1 (drag and drop a file here or paste a path; b=re-enter previous file; type done when finished) {back=0, quit=exit}:
+1-2. PDF file #2 (drag and drop a file here or paste a path; b=re-enter previous file; type done when finished) {back=0, quit=exit}:
+1-3. PDF file #2 (drag and drop a file here or paste a path; b=re-enter previous file; type done when finished) {back=0, quit=exit}:
+```
+
+The first number is the menu item you selected and never changes while you stay
+in that operation. Only the second number advances — including on validation
+retries, which is why `1-3` above re-asks for file **#2** after a rejected entry.
+Going back and re-entering an operation restarts the count at `-1`.
+
+### Path prompts
+
+Every prompt that wants a file or folder accepts a **dragged-and-dropped** path
+or a pasted one, with or without surrounding single/double quotes:
+
+```
+(drag and drop a file here or paste a path)
+(drag and drop a folder here or paste a path)
+```
+
+Prompts that collect **several files in a row** also offer two keywords, shown
+highlighted inside the guidance:
+
+```
+(drag and drop a file here or paste a path; b=re-enter previous file; type done when finished)
+```
+
+- **`done`** finishes the list (a blank Enter does the same).
+- **`b`** removes the file you added last and asks for it again.
 
 ### Batch queue (run several tasks together)
 
@@ -190,10 +240,11 @@ PDF Forge Merge:
 
 1. Enter PDF paths one at a time (quotes are accepted and stripped).
 2. At least 2 valid PDFs are required.
-3. Press **Enter** on an empty prompt (after at least 2 files) to finish.
-4. Enter `0` to cancel and go back.
-5. The merge order matches exactly the order you enter.
-6. Duplicate files are rejected with a clear message.
+3. Type `done` (or press **Enter**) after at least 2 files to finish.
+4. Type `b` to drop the file you added last and enter it again.
+5. Enter `0` to cancel and go back.
+6. The merge order matches exactly the order you enter.
+7. Duplicate files are rejected with a clear message.
 
 **Mode 2 — Use all PDFs from a folder**
 
@@ -228,7 +279,7 @@ File-by-file merge (one combined PDF beside the first source):
 Main menu -> 2 (Merge) -> 1 (Add files one by one)
   PDF file #1: C:\docs\chapter1.pdf
   PDF file #2: C:\docs\chapter2.pdf
-  PDF file #3: <Enter to finish>
+  PDF file #3: done
   -> C:\docs\chapter1_merged.pdf
 ```
 
@@ -578,6 +629,143 @@ Flow:
    source); the task is added to the queue and produces a copy that opens
    freely and allows every action.
 
+### Convert documents/spreadsheets/presentations to PDF
+
+Main menu → `11`. Converts Word, PowerPoint, Excel, and CSV files to PDF
+**locally and offline**, through a command-line-only LibreOffice runtime.
+
+```
+PDF Forge Convert to PDF:
+  1. Add supported files one by one [1]
+  2. Use all supported files from a folder
+  0. Back
+```
+
+Supported extensions: `.doc`, `.docx`, `.ppt`, `.pptx`, `.xls`, `.xlsx`, `.csv`.
+One menu handles them all — the file family is detected automatically and shown
+as each file is accepted.
+
+- **Option 1** takes one or many mixed files; after the first, type `done`
+  (or press Enter) to finish, or `b` to re-enter the previous file. Duplicates
+  are rejected and your exact order is preserved.
+- **Option 2** discovers supported files **directly inside** a folder
+  (non-recursive), skipping Office lock files such as `~$report.docx`, and
+  reports the counts per family.
+
+Each file becomes `<source-stem>.pdf` beside the source. Output paths are
+reserved through the same queue-time system as every other tool, so nothing is
+ever overwritten and two queued jobs cannot collide.
+
+#### How the conversion stack works
+
+| Layer | What it is | Where it lives |
+|-------|------------|----------------|
+| Control | `unoserver` / `unoconvert` (Python) | the project `.venv`, pinned in `requirements.txt` |
+| Rendering | LibreOffice **headless** | project-local `.tools/libreoffice/` (git-ignored) |
+| Validation | PyMuPDF | already a runtime dependency |
+
+Important details:
+
+- **PyMuPDF validates the produced PDF; it does not render Office or spreadsheet
+  files.** All document rendering is LibreOffice's job.
+- LibreOffice is **not installed globally**. It is provisioned into the project
+  folder by an official *administrative extraction* — no system install, no
+  PATH, registry, shortcut, file-association, update-service, or Start-Menu
+  change, and **no GUI window ever appears**.
+- The pinned version, official download URL, and SHA-256 checksum live in the
+  tracked `office_runtime_meta.json`; the large runtime payload itself is
+  ignored by git.
+- Each conversion run starts its **own** headless `soffice` on a random
+  localhost port with an isolated temporary profile, and terminates only that
+  process tree (never an unrelated LibreOffice you have open) on success,
+  failure, timeout, cancellation, or exit.
+- Every conversion is time-bounded. If LibreOffice stops responding or dies, the
+  runtime is restarted with a **fresh** profile (a crashed profile is never
+  reused) and the file is retried once; the rest of the batch continues either
+  way.
+- The verified download is cached in `.tools/cache/`, so repairing or re-running
+  setup never downloads the package again.
+
+Set up (or repair) the runtime — idempotent, and a no-op once verified:
+
+```powershell
+.\.venv\Scripts\python.exe -m pdf_forge --setup-office     # download + verify + extract
+.\.venv\Scripts\python.exe -m pdf_forge --clean-office     # remove ONLY the project-local copy
+.\.venv\Scripts\python.exe -m pdf_forge --diagnose         # show versions and paths
+```
+
+To use a LibreOffice you already have instead, set `PDF_FORGE_SOFFICE` to its
+`soffice` path. The project-local runtime is preferred when both exist.
+
+#### Password-protected sources
+
+If LibreOffice reports that a file needs a password, PDF Forge asks for it with
+hidden input:
+
+```
+Password for "report.docx" (hidden; 0/back/skip to skip):
+```
+
+- The password is passed to LibreOffice **in memory** through the unoserver
+  Python API — never on a command line, in an environment variable, in a
+  filename, or in a log.
+- **Retries are unlimited.** There is no attempt cap, lockout, or growing delay.
+- Type `0`, `back`, or `skip` to skip that file (the rest of the batch
+  continues); `exit`/`quit` closes the app.
+- A successful password is kept only for that one file and cleared afterwards.
+
+After converting an encrypted source you are asked whether the PDF should stay
+unencrypted, reuse the same password, or take a different one (applied with the
+same AES-256 protection the **Protect PDF** tool uses).
+
+#### Spreadsheets and CSV
+
+- Every visible, non-empty sheet is processed in order; hidden/empty sheets are
+  skipped and reported.
+- Existing print areas and page setup are respected. Where none are set, the
+  used range is fitted to one page **wide** (multiple pages tall is fine) with
+  readable margins — the workbook is never flattened onto one giant page and no
+  rows, columns, or cell contents are silently truncated.
+- CSV encoding (BOM, strict UTF-8 first, then a deterministic fallback) and the
+  delimiter (comma, semicolon, tab, colon, space — honouring quoted and
+  multi-line fields) are detected automatically. Only when detection is
+  genuinely uncertain does one compact correction prompt appear.
+- The detected dialect is applied by converting a **canonical temporary copy**
+  of the CSV (parsed with the sniffed delimiter/encoding, re-emitted as UTF-8
+  comma-separated). Your CSV is only ever read, never modified, and the copy is
+  deleted afterwards. This is done because the converter API cannot forward
+  import-filter options.
+
+#### Limitations
+
+LibreOffice can occasionally crash while exporting a PDF (observed
+intermittently on the first export after a cold start). PDF Forge recognises
+this, restarts the runtime with a fresh profile, and retries the file up to
+three times; the rest of the batch is unaffected either way, and a file that
+still cannot be converted is reported as failed rather than silently skipped.
+
+LibreOffice's fidelity is very good but not identical to Microsoft Office:
+complex DOCX layouts, uncommon fonts, SmartArt, advanced chart styling, and some
+macros-driven content can shift. Fonts that are not installed are substituted.
+Macros and external links/data updates are **disabled** by design, and sources
+are opened **read-only** — a source file is never modified.
+
+## Protection policy (encrypted sources)
+
+PDF Forge never silently changes a document's protection state:
+
+| Source | What the output gets |
+|--------|----------------------|
+| Not protected | Not protected. |
+| Needs an **open password** (you supplied it) | Re-encrypted AES-256 with the **same password** and the source's permission bits. You are told, not asked — this is safe because the password is known. |
+| Opens freely but carries **owner restrictions** | The owner password is *not recoverable*, so the policy cannot be reproduced. You are **warned and asked** whether to produce an unprotected output or cancel. |
+| **Merge** of several sources | A merge cannot carry several different passwords or permission sets, so PDF Forge never invents one: if any source is protected you are asked, and the documented default is an unprotected merged PDF (use **Protect PDF** afterwards). |
+
+Batch tools apply the same per-file rules without stopping to ask mid-run, and
+list at the end any file whose owner restrictions could not be reproduced.
+**Unlock PDF** and **Protect PDF** are unaffected — they exist to change
+protection intentionally.
+
 ## Page-selection examples
 
 | Input              | Result                                             |
@@ -670,9 +858,21 @@ captures `DEBUG` and above while the console stays quiet.
 - Encrypted PDFs are detected automatically.
 - If the file opens with an empty password, processing continues.
 - Otherwise you are prompted for a password (input hidden where supported).
-- The password is never stored or logged. If decryption fails, a clear error is
-  shown and you return to the menu. PDF Forge does not attempt to bypass
+- **Retries are unlimited.** A wrong password shows a clear message and asks
+  again — there is no maximum attempt count, no lockout, no growing delay, and
+  no automatic skip. Blank input never counts against anything.
+- To stop trying, type `0` or `back` (in a batch, `skip` moves to the next file
+  and the batch continues); `exit`/`quit` closes the app. Cancelling always
+  cleans up open handles, temporary files, and queued path reservations.
+- Because the prompt hides what you type, the words `0`, `back`, and `skip` are
+  treated as navigation rather than as a literal password.
+- The password is never stored, logged, echoed, or included in a task summary,
+  and a failed password is never retained. PDF Forge does not attempt to bypass
   encryption.
+- **You are not asked again while the queue runs.** Single-file operations
+  authenticate while you configure them and reopen the file silently at run
+  time. Batch operations can only discover an encrypted file when they open it,
+  so they say so before you start.
 
 ## Project structure
 
@@ -684,11 +884,17 @@ pdf_forge/            Main application package (run with: python -m pdf_forge)
   app.py              main()
   menus.py            Menu rendering and the main loop
   taskqueue.py        Batch task queue (queue, summary, run)
-  ops_*.py            Operations: pages, merge, convert, watermark, compress
+  ops_*.py            Operations: pages, merge, convert, watermark, compress,
+                      encrypt, unlock, office (convert to PDF)
   prompts.py          Interactive prompts and output-path pickers
-  core.py             Pure logic: page parsing, chunking, filename rules
+  core.py             Pure logic: page parsing, chunking, filename rules,
+                      queue-time path reservations, generated-output manifest
   pdf_io.py render.py compress.py watermark.py   I/O adapters (PyMuPDF engine)
+  encrypt.py unlock.py               Protection (AES-256) and unlocking
+  office.py           Office/CSV detection, validation, dialect sniffing
+  office_runtime.py   Project-local LibreOffice + unoserver lifecycle
   ui.py logsetup.py constants.py     Terminal UI, logging, constants
+office_runtime_meta.json   Pinned LibreOffice version, URL, and SHA-256
 requirements.txt      Python runtime dependencies
 requirements-dev.txt  Development dependencies (pytest)
 README.md             This file
@@ -696,8 +902,9 @@ CHANGELOG.md          Version history
 LICENSE               MIT license
 .gitignore
 .github/              GitHub Actions CI and Dependabot config
-tests/                Automated tests
+tests/                Automated tests (core + regression suites)
 logs/                 Created at runtime
+.tools/               Project-local native runtimes (git-ignored, on demand)
 ```
 
 ## Development and testing
