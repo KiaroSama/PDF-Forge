@@ -19,7 +19,8 @@ __all__ = ['_import_pymupdf', 'PdfOpenError', 'PdfPasswordCancelled',
            'write_pages_to_pdf', '_validate_written_pdf', '_validate_merged_pdf',
            'write_merged_pdfs_to_pdf', 'resolves_to_same_file',
            'scan_image_dpi_stats', 'has_meaningful_text',
-           'permission_bits', 'all_permissions', 'denied_permissions']
+           'permission_bits', 'all_permissions', 'denied_permissions',
+           'promote_atomically']
 
 
 def _import_pymupdf():

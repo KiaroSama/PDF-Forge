@@ -293,3 +293,45 @@ def test_csv_temp_dir_is_removed_on_success(tmp_path, monkeypatch):
     app.ops_office._convert_one(FakeServer(), job)
 
     assert not (set(_csv_temp_dirs()) - before)
+
+
+# --------------------------------------------------------------------------- #
+# Sibling defect: the conversion success path was never exercised
+# --------------------------------------------------------------------------- #
+
+def test_convert_one_success_path_finalizes_the_output(tmp_path, monkeypatch):
+    """Regression: _convert_one's *success* branch raised NameError.
+
+    Every unit test drove a failure path, so a missing import in the finalize
+    step (promote_atomically) only surfaced during real conversion. This drives
+    the success branch with a stubbed converter.
+    """
+    src = tmp_path / "ok.csv"
+    src.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    class FakeServer:
+        port = 1
+
+    def fake_convert(_server, _in_path, out_path, **_kw):
+        Path(out_path).write_bytes(b"%PDF-1.4\n%stub\n")
+
+    monkeypatch.setattr(app.office_runtime, "convert_to_pdf", fake_convert)
+    monkeypatch.setattr(app.ops_office, "_validate_pdf_output", lambda _p: None)
+
+    plan = app.ops_office._build_jobs([src])
+    job = plan.accepted[0]
+    assert app.ops_office._convert_one(FakeServer(), job) == "ok"
+    assert job["out"].exists(), "the finalized PDF must exist"
+    assert job["out"].read_bytes().startswith(b"%PDF")
+
+
+def test_every_writer_module_resolves_the_promotion_helper():
+    """A star-import cannot silently drop the shared promotion helper."""
+    import importlib
+
+    for name in ("pdf_io", "render", "watermark", "compress", "encrypt",
+                 "unlock", "ops_office"):
+        module = importlib.import_module(f"pdf_forge.{name}")
+        assert hasattr(module, "promote_atomically"), (
+            f"pdf_forge.{name} cannot resolve promote_atomically"
+        )

@@ -18,6 +18,7 @@ from .constants import *  # noqa: F401,F403
 from .ui import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
+from .safeio import promote_atomically
 from .encrypt import *  # noqa: F401,F403
 from .office import *  # noqa: F401,F403
 from . import office_runtime as ort
