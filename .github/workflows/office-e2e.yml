@@ -25,7 +25,10 @@ permissions:
 
 concurrency:
   group: office-e2e-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a run in flight: this job provisions a ~360 MB runtime and takes
+  # minutes, so a later push would otherwise destroy the only real evidence of
+  # whether conversion works. Queue behind the running one instead.
+  cancel-in-progress: false
 
 jobs:
   convert:
