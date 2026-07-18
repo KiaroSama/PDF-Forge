@@ -473,7 +473,10 @@ def start_conversion_server(
         "--interface", "127.0.0.1",
         "--port", str(port),
         "--uno-port", str(uno_port),
-        "--conversion-timeout", str(CONVERT_TIMEOUT),
+        # The server-side cap must be the *ceiling*, not the base allowance:
+        # the per-file timeout is scaled by input size on the client, and a
+        # fixed server cap would cut a large document off first.
+        "--conversion-timeout", str(CONVERT_TIMEOUT_MAX),
     ]
     logger.info("Starting conversion server on 127.0.0.1:%d (uno %d).", port, uno_port)
     creationflags = 0
