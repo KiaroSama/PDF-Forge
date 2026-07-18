@@ -38,15 +38,40 @@ if (-not (Test-Path -LiteralPath $Launcher)) {
     exit 1
 }
 
-# --- Clean up the old bin\ PATH entry from a previous installer version ----- #
-$oldBin = Join-Path $ScriptDir 'bin'
+# --- Clean up PATH entries owned by PDF Forge, including old locations ------ #
+# A previous installer added "<checkout>\bin" to PATH. If the project has since
+# been moved, removing only the *current* checkout's bin leaves the stale entry
+# behind forever. An entry is removed only when it is verifiably ours: it must
+# be named 'bin' and sit next to this project's marker files, or be the current
+# checkout's bin. Anything else - including a similarly named unrelated folder -
+# is left untouched.
+function Test-IsPdfForgeBin {
+    param([string] $Candidate)
+    if ([string]::IsNullOrWhiteSpace($Candidate)) { return $false }
+    $trimmed = $Candidate.TrimEnd('\')
+    if ((Split-Path -Leaf $trimmed) -ine 'bin') { return $false }
+    $parent = Split-Path -Parent $trimmed
+    if ([string]::IsNullOrWhiteSpace($parent)) { return $false }
+    # Verifiable ownership: the parent must look like a PDF Forge checkout.
+    $marker = Join-Path $parent 'pdf_forge\__init__.py'
+    $launcher = Join-Path $parent 'Run.ps1'
+    return (Test-Path -LiteralPath $marker) -and (Test-Path -LiteralPath $launcher)
+}
+
+$currentBin = (Join-Path $ScriptDir 'bin').TrimEnd('\')
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath) {
     $parts = $userPath -split ';' | Where-Object { $_ }
-    $kept = $parts | Where-Object { $_.TrimEnd('\') -ine $oldBin.TrimEnd('\') }
-    if ($kept.Count -ne $parts.Count) {
+    $removed = @()
+    $kept = $parts | Where-Object {
+        $entry = $_.TrimEnd('\')
+        $isOurs = ($entry -ieq $currentBin) -or (Test-IsPdfForgeBin $entry)
+        if ($isOurs) { $removed += $entry }
+        -not $isOurs
+    }
+    if ($removed.Count -gt 0) {
         [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
-        Write-Warn "Removed the old bin PATH entry: $oldBin"
+        foreach ($entry in $removed) { Write-Warn "Removed a PDF Forge PATH entry: $entry" }
     }
 }
 
@@ -63,12 +88,22 @@ $escapedLauncher = $Launcher.Replace("'", "''")
 $block = @"
 $begin
 function pdf-forge {
+    # Runs under your existing execution policy - the launcher is NOT started
+    # with -ExecutionPolicy Bypass. If your policy blocks local scripts, run
+    # once:  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
     `$launcher = '$escapedLauncher'
     `$pwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
     if (`$pwsh) {
-        & `$pwsh.Source -NoLogo -NoProfile -ExecutionPolicy Bypass -File `$launcher @args
+        & `$pwsh.Source -NoLogo -NoProfile -File `$launcher @args
     } else {
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `$launcher @args
+        & powershell.exe -NoLogo -NoProfile -File `$launcher @args
+    }
+    if (`$LASTEXITCODE -ne 0) {
+        Write-Host "PDF Forge exited with code `$LASTEXITCODE." -ForegroundColor Yellow
+        Write-Host (
+            'If this says running scripts is disabled, allow local scripts once with: ' +
+            'Set-ExecutionPolicy -Scope CurrentUser RemoteSigned'
+        ) -ForegroundColor Yellow
     }
 }
 $end
