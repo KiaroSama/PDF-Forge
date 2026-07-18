@@ -968,7 +968,10 @@ def test_provisioning_refuses_an_unverified_download(tmp_path, monkeypatch):
         "version": "test",
         "windows": {"url": "https://example.invalid/x.msi", "sha256": "0" * 64},
     })
-    monkeypatch.setattr(app.office_runtime, "find_soffice", lambda: None)
+    empty = tmp_path / "no-runtime"
+    empty.mkdir()
+    monkeypatch.setattr(app.office_runtime, "libreoffice_dir", lambda: empty)
+    monkeypatch.setattr(app.office_runtime, "runtime_root", lambda: tmp_path)
 
     def fake_download(url, dest):
         Path(dest).write_bytes(b"corrupted payload")
@@ -985,7 +988,10 @@ def test_provisioning_refuses_when_no_checksum_is_pinned(tmp_path, monkeypatch):
         "version": "test",
         "windows": {"url": "https://example.invalid/x.msi"},
     })
-    monkeypatch.setattr(app.office_runtime, "find_soffice", lambda: None)
+    empty = tmp_path / "no-runtime3"
+    empty.mkdir()
+    monkeypatch.setattr(app.office_runtime, "libreoffice_dir", lambda: empty)
+    monkeypatch.setattr(app.office_runtime, "runtime_root", lambda: tmp_path)
     with pytest.raises(app.office_runtime.OfficeRuntimeError) as excinfo:
         app.office_runtime.provision_runtime(
             download=lambda u, d: Path(d).write_bytes(b"x")
