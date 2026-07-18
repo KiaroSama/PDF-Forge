@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from .constants import *  # noqa: F401,F403
 from .ui import *  # noqa: F401,F403
+from .safeio import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 from .logsetup import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
@@ -27,5 +28,6 @@ from .app import *  # noqa: F401,F403
 
 # Submodules referenced directly (e.g. tests monkeypatch pdf_forge.pdf_io.*).
 from . import (compress, core, encrypt, menus, office, office_runtime,  # noqa: F401
+               safeio,
                ops_compress, ops_office, pdf_io, render, taskqueue, ui,
                unlock, watermark)

@@ -19,3 +19,7 @@ pillow==12.3.0
 # (pinned version + checksum in office_runtime_meta.json). It is never
 # installed system-wide and no GUI is ever shown.
 unoserver==3.7
+
+# OLE2 compound-file parser: identifies password-protected OOXML packages
+# (an encrypted .docx is an OLE2 container, not a ZIP).
+olefile==0.47

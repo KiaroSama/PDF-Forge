@@ -3,21 +3,26 @@ from __future__ import annotations
 import os
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
 from .constants import *  # noqa: F401,F403
+from .safeio import promote_atomically
 from .core import *  # noqa: F401,F403
 
 __all__ = ['_import_pymupdf', 'PdfOpenError', 'PdfPasswordCancelled',
            'open_source_pdf', 'source_password',
            'close_doc', '_authenticate_doc',
            'ProtectionPolicy', 'detect_protection',
+           'SourceRef', 'SourceChangedError', 'capture_source', 'source_fingerprint',
            'write_pages_to_pdf', '_validate_written_pdf', '_validate_merged_pdf',
+           'validate_page_selection_output', 'validate_protection_postcondition',
+           'validate_watermark_removed', '_page_fingerprints',
            'write_merged_pdfs_to_pdf', 'resolves_to_same_file',
            'scan_image_dpi_stats', 'has_meaningful_text',
-           'permission_bits', 'all_permissions', 'denied_permissions']
+           'permission_bits', 'all_permissions', 'denied_permissions',
+           'promote_atomically']
 
 
 def _import_pymupdf():
@@ -170,6 +175,86 @@ def open_source_pdf(path: Path, password_prompt=None, password=None):
     return doc
 
 
+def source_fingerprint(path: Path) -> dict:
+    """Identity of a source file at configuration time.
+
+    Size plus nanosecond mtime plus the OS file id where available. Cheap to
+    take, and strong enough to notice a file that was replaced or edited between
+    configuring an operation and running it.
+    """
+    st = os.stat(str(path))
+    fingerprint = {"size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
+    file_id = getattr(st, "st_ino", 0)
+    if file_id:
+        fingerprint["file_id"] = int(file_id)
+        fingerprint["volume"] = int(getattr(st, "st_dev", 0))
+    return fingerprint
+
+
+class SourceChangedError(PdfOpenError):
+    """Raised when a source changed between configuration and execution."""
+
+
+@dataclass
+class SourceRef:
+    """Immutable description of a configured source PDF.
+
+    Queued tasks carry one of these instead of a live ``Document``: a path, the
+    captured password, the expected page count, and a fingerprint. Nothing is
+    held open, so a queued (or discarded) task never keeps a file handle, and
+    the runner can prove it is still operating on the same file.
+    """
+
+    path: Path
+    password: str = ""
+    page_count: int = 0
+    fingerprint: dict = field(default_factory=dict)
+
+    def verify_unchanged(self) -> None:
+        """Raise :class:`SourceChangedError` when the file is not what we configured."""
+        try:
+            current = source_fingerprint(self.path)
+        except OSError as exc:
+            raise SourceChangedError(
+                f"'{self.path.name}' is no longer available: {exc}"
+            ) from exc
+        if not self.fingerprint:
+            return
+        for key in ("size", "mtime_ns", "file_id"):
+            if key in self.fingerprint and key in current:
+                if self.fingerprint[key] != current[key]:
+                    raise SourceChangedError(
+                        f"'{self.path.name}' changed after this task was "
+                        "configured; nothing was written. Re-run the operation."
+                    )
+
+    def open(self):
+        """Reopen the source for a runner: verify, authenticate silently, check pages."""
+        self.verify_unchanged()
+        doc = open_source_pdf(self.path, password=self.password)
+        if self.page_count and doc.page_count != self.page_count:
+            actual = doc.page_count
+            close_doc(doc)
+            raise SourceChangedError(
+                f"'{self.path.name}' now has {actual} page(s) instead of "
+                f"{self.page_count}; nothing was written."
+            )
+        return doc
+
+    def __repr__(self) -> str:  # never leak the password
+        return f"SourceRef({self.path.name!r}, pages={self.page_count})"
+
+
+def capture_source(doc, path: Path) -> SourceRef:
+    """Build a :class:`SourceRef` from an open, authenticated configuration doc."""
+    return SourceRef(
+        path=Path(path),
+        password=source_password(doc),
+        page_count=doc.page_count,
+        fingerprint=source_fingerprint(path),
+    )
+
+
 @dataclass
 class ProtectionPolicy:
     """How a produced PDF should be protected (see README "Protection policy").
@@ -297,9 +382,8 @@ def _save_doc_to_path_safely(out_doc, out_path: Path, expected_pages: int,
                  password=(protection.password if extra else None))
         logger.debug("Validated temporary output (%d page(s)).", expected_pages)
         # Atomic promotion. The final path is guaranteed unique by the caller.
-        os.replace(tmp_path, out_path)
+        out_path = promote_atomically(tmp_path, out_path)
         # Remember it so a later folder run never reprocesses our own output.
-        record_generated_output(out_path)
     except Exception:
         try:
             if tmp_path.exists():
@@ -336,12 +420,136 @@ def write_pages_to_pdf(doc, pages_zero_based: Sequence[int], out_path: Path,
                 progress(index, total)
         _save_doc_to_path_safely(out_doc, out_path, total, _validate_written_pdf,
                                  protection=protection)
+        # Deep postcondition: the output must hold exactly the selected pages,
+        # in order, with exactly the protection that was decided (PF-035).
+        validate_page_selection_output(
+            out_path, doc, pages_zero_based,
+            password=getattr(protection, "password", "") or None,
+        )
+        validate_protection_postcondition(out_path, protection)
     finally:
         out_doc.close()
 
     elapsed = time.perf_counter() - started
     logger.info("Wrote '%s' (%d page(s)) in %.2fs.", out_path, total, elapsed)
     return total
+
+
+def _page_fingerprints(doc):
+    """A cheap per-page identity used to verify page *order*, not just count.
+
+    Uses the page's media box plus a digest of its extracted text and the
+    content-stream length. Two different pages of a real document almost never
+    collide, and identical blank pages legitimately compare equal.
+    """
+    import hashlib
+
+    prints = []
+    for index in range(doc.page_count):
+        page = doc[index]
+        try:
+            text = page.get_text()
+        except Exception:  # noqa: BLE001 - a broken page must not kill validation
+            text = ""
+        try:
+            length = sum(len(doc.xref_stream(x) or b"") for x in page.get_contents())
+        except Exception:  # noqa: BLE001
+            length = 0
+        rect = page.rect
+        raw = f"{round(rect.width, 2)}x{round(rect.height, 2)}|{length}|{text}"
+        prints.append(hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest())
+    return prints
+
+
+def validate_page_selection_output(out_path: Path, source_doc, pages_zero_based,
+                                   password=None) -> None:
+    """Verify an extract/split/delete output really holds the selected pages.
+
+    A page-count check alone passes for a file with the *right number* of the
+    *wrong* pages - a silent data defect. This compares per-page fingerprints
+    against the source, in order (PF-035).
+    """
+    pymupdf = _import_pymupdf()
+    expected = [_page_fingerprints(source_doc)[i] for i in pages_zero_based]
+    check = pymupdf.open(str(out_path))
+    try:
+        if check.needs_pass and not check.authenticate(password or ""):
+            raise PdfOpenError(
+                "Output validation failed: the protected output could not be "
+                "reopened with its own password."
+            )
+        actual = _page_fingerprints(check)
+    finally:
+        check.close()
+    if len(actual) != len(expected):
+        raise PdfOpenError(
+            f"Output validation failed: expected {len(expected)} page(s), "
+            f"found {len(actual)}."
+        )
+    for position, (want, got) in enumerate(zip(expected, actual), start=1):
+        if want != got:
+            raise PdfOpenError(
+                f"Output validation failed: page {position} of the output does "
+                "not match the selected source page (wrong page or wrong order)."
+            )
+
+
+def validate_protection_postcondition(out_path: Path, policy) -> None:
+    """Verify the produced file carries exactly the protection that was decided.
+
+    Catches both directions: protection silently dropped, and protection
+    unexpectedly present.
+    """
+    pymupdf = _import_pymupdf()
+    check = pymupdf.open(str(out_path))
+    try:
+        needs_pass = bool(check.needs_pass)
+        expects_password = bool(policy is not None and getattr(policy, "password", ""))
+        if expects_password and not needs_pass:
+            raise PdfOpenError(
+                "Output validation failed: the output should require a password "
+                "but does not - protection was lost."
+            )
+        if not expects_password and needs_pass:
+            raise PdfOpenError(
+                "Output validation failed: the output unexpectedly requires a "
+                "password."
+            )
+        if needs_pass and not check.authenticate(policy.password):
+            raise PdfOpenError(
+                "Output validation failed: the protected output could not be "
+                "reopened with its own password."
+            )
+    finally:
+        check.close()
+
+
+def validate_watermark_removed(out_path: Path, signatures, password=None) -> None:
+    """Verify the chosen watermark signature is absent from the saved file.
+
+    Removal reporting a page count is not evidence; this reopens the result and
+    fails if the target image is still painted anywhere (PF-013/PF-035).
+    """
+    from .watermark import _image_identity, _painted_images
+
+    pymupdf = _import_pymupdf()
+    targets = set(signatures)
+    check = pymupdf.open(str(out_path))
+    try:
+        if check.needs_pass and not check.authenticate(password or ""):
+            raise PdfOpenError(
+                "Output validation failed: the protected output could not be "
+                "reopened with its own password."
+            )
+        for page_index in range(check.page_count):
+            for item in _painted_images(check, page_index):
+                if _image_identity(item) in targets:
+                    raise PdfOpenError(
+                        "Output validation failed: the selected watermark is "
+                        f"still present on page {page_index + 1}."
+                    )
+    finally:
+        check.close()
 
 
 def _validate_written_pdf(path: Path, expected_pages: int, password=None) -> None:

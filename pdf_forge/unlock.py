@@ -4,9 +4,9 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import List
 
 from .constants import *  # noqa: F401,F403
+from .safeio import promote_atomically
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
@@ -41,8 +41,7 @@ def unlock_pdf_doc(doc, out_path: Path) -> int:
             use_objstms=1,
         )
         _validate_written_pdf(tmp_path, expected_pages=total)
-        os.replace(tmp_path, out_path)
-        record_generated_output(out_path)
+        out_path = promote_atomically(tmp_path, out_path)
     except Exception:
         try:
             if tmp_path.exists():

@@ -5,6 +5,47 @@ All notable changes to PDF Forge are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [2.0.1] - 2026-07-19
+
+### Fixed
+- **Piped input is read as UTF-8**, so a path containing non-Latin
+  characters is no longer mangled by the Windows ANSI code page and
+  reported as missing.
+- The watermark output suffix is `_no_watermark` (was `_nowatermark`,
+  which reads as "now atermark").
+- **Output promotion can no longer overwrite a destination** that appeared
+  between configuring a task and running it; a unique name is allocated instead.
+  Proven with a multi-process race test.
+- **Queued extract/split/delete no longer hold an open document**, so a source
+  can be renamed or deleted immediately after queueing, and discarding a queue
+  leaks nothing. Batch delete closes every document on every path.
+- **A source replaced or edited after configuration is refused** with no output.
+- **Encrypted OOXML files reach the password prompt** instead of being rejected
+  as "not a ZIP"; OOXML packages are validated per family and reject fake ZIPs,
+  cross-family renames, traversal members and ZIP bombs. OLE detection parses
+  the directory (olefile) rather than scanning the first megabyte.
+- **CSV**: a sample cut mid-code-point no longer turns valid UTF-8 into
+  Windows-1252; normalization streams instead of loading the file; delimiter
+  detection ranks row consistency ahead of column count; temp directories are
+  cleaned on every failure path.
+- **Generated-output tracking** moved out of the checkout into per-user state,
+  written atomically under a cross-process lock, with strong file identity and
+  visible warnings when it is unavailable. Image-only PDFs are now tracked.
+- **Queue and reservation cleanup run in a `finally`**, including on SystemExit.
+- **Prompt numbers are allocated when displayed**, so retries and nested prompts
+  stay strictly monotonic instead of repeating a used number.
+- Folder iteration errors, retry-count messages and `exit_code` binding fixed.
+- Conversion runs in a hardened profile with macros and link updates disabled.
+
+### Added
+- `pyproject.toml` (pytest/ruff/mypy/coverage), pinned dev dependencies, and CI
+  gates for lint, type checking, coverage, dependency audit, secret scanning,
+  PowerShell analysis and checkout cleanliness.
+- A dedicated Windows workflow that provisions the pinned LibreOffice with
+  production code and runs real conversion end-to-end tests.
+
 ## [2.0.0] - 2026-07-18
 
 ### Changed (breaking)

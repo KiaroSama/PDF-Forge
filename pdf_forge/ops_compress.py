@@ -130,6 +130,7 @@ def operation_compress_pdf() -> None:
         return
     total_pages = doc.page_count
     dpi_stats = scan_image_dpi_stats(doc)
+    protection = detect_protection(doc)
     # Capture the working password so the queued runner reopens silently (A13).
     pw = source_password(doc)
     close_doc(doc)
@@ -167,6 +168,12 @@ def operation_compress_pdf() -> None:
 
     _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats)
 
+    # Consent BEFORE any output is configured or written (PF-006).
+    protection = resolve_protection(protection, context="compressed PDF")
+    if protection is None:
+        print_warning("Cancelled. Returning to menu.")
+        return
+
     default_path = unique_file_path(source.parent / f"{source.stem}_compressed.pdf")
 
     print_heading("\nSummary")
@@ -193,6 +200,7 @@ def operation_compress_pdf() -> None:
         try:
             stats = compress_pdf(
                 source, out_path, jpeg_quality, dpi_target, password=pw,
+                protection=protection,
             )
         except Exception as exc:  # noqa: BLE001 - clean message, log details
             print_error(f"Failed to compress the PDF: {exc}")
@@ -286,6 +294,84 @@ def _folder_dpi_stats(pdfs) -> dict:
     return result
 
 
+def _batch_protection_preflight(pdfs):
+    """Inspect every source and decide ONE protection policy before queueing.
+
+    PF-008: a batch must never create a downgraded file and warn afterwards.
+    Every readable file is classified up front; if any source carries owner
+    restrictions that cannot be reproduced, the user chooses once - skip those
+    files, cancel, or knowingly write them unprotected. The decision is stored
+    per file, so execution never prompts and never re-decides.
+
+    Returns ``(decisions, cancelled)`` where ``decisions`` maps a normalized
+    path to a policy (or ``None`` meaning "skip this file").
+    """
+    restricted, unreadable = [], []
+    decisions = {}
+    for src in pdfs:
+        try:
+            doc = open_source_pdf(src)
+        except (PdfOpenError, RuntimeError):
+            unreadable.append(src)
+            decisions[normalized_path_key(src)] = "unreadable"
+            continue
+        try:
+            policy = detect_protection(doc)
+        finally:
+            close_doc(doc)
+        if policy.kind == "restricted":
+            restricted.append(src)
+        decisions[normalized_path_key(src)] = policy
+
+    if unreadable:
+        print_warning(
+            f"{len(unreadable)} file(s) could not be inspected (encrypted or "
+            "unreadable); they will be attempted individually and may ask for a "
+            "password while the queue runs."
+        )
+    if not restricted:
+        return decisions, False
+
+    print_warning(
+        f"{len(restricted)} file(s) open freely but restrict actions that "
+        "cannot be reproduced (the owner password is not recoverable):"
+    )
+    for src in restricted[:5]:
+        print(colorize(f"    - {src.name}", Color.YELLOW))
+    if len(restricted) > 5:
+        print(colorize(f"    ... (+{len(restricted) - 5} more)", Color.DIM))
+
+    prompt = question_prompt(
+        "Restricted files",
+        details="1=skip them, 2=cancel the batch, 3=write them unprotected",
+        default="1",
+    )
+    while True:
+        raw = _input(prompt).strip().lower()
+        if raw in ("", "1"):
+            for src in restricted:
+                decisions[normalized_path_key(src)] = None   # skip
+            logger.info("Batch protection: skipping %d restricted file(s).",
+                        len(restricted))
+            return decisions, False
+        if raw == "2" or raw == "0":
+            logger.info("Batch cancelled at the protection decision.")
+            return decisions, True
+        if raw == "3":
+            for src in restricted:
+                decisions[normalized_path_key(src)] = ProtectionPolicy(kind="none")
+            print_warning(
+                "Their compressed copies will be UNPROTECTED. The originals are "
+                "unchanged."
+            )
+            logger.info("Batch protection: %d restricted file(s) -> unprotected.",
+                        len(restricted))
+            return decisions, False
+        if raw in ("exit", "quit"):
+            raise _ExitRequested()
+        print_error("Choose 1, 2, or 3.")
+
+
 def operation_compress_pdf_batch() -> None:
     """Compress every PDF in a folder into its own ``<name>_compressed.pdf``.
 
@@ -302,6 +388,16 @@ def operation_compress_pdf_batch() -> None:
     folder = pdfs[0].parent
     print_info(f"Scanning image resolution across {len(pdfs)} file(s)...")
     dpi_stats = _folder_dpi_stats(pdfs)
+
+    # Decide protection ONCE, before anything is queued or written (PF-008).
+    decisions, cancelled = _batch_protection_preflight(pdfs)
+    if cancelled:
+        print_warning("Cancelled. Returning to menu.")
+        return
+    pdfs = [p for p in pdfs if decisions.get(normalized_path_key(p)) is not None]
+    if not pdfs:
+        print_warning("No files remain after the protection decision.")
+        return
 
     not_scanned = dpi_stats["files_not_scanned"]
     print_heading("\nSummary")
@@ -366,9 +462,12 @@ def operation_compress_pdf_batch() -> None:
             if resolves_to_same_file(out_path, src):
                 out_path = unique_file_path(src.parent / f"{src.stem}_smaller.pdf")
             try:
+                decided = decisions.get(normalized_path_key(src))
                 stats = compress_pdf(
                     src, out_path, jpeg_quality, dpi_target,
                     password_prompt=prompt_password,
+                    protection=decided if isinstance(decided, ProtectionPolicy)
+                    else None,
                 )
             except Exception as exc:  # noqa: BLE001 - keep the batch going
                 print_error(f"  Failed: {exc}")

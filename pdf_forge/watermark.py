@@ -5,11 +5,12 @@ import re
 import tempfile
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set
 
 from .constants import *  # noqa: F401,F403
+from .safeio import promote_atomically
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
@@ -69,6 +70,12 @@ def _painted_images(doc, page_index: int) -> List[dict]:
         return []
 
 
+# Images smaller than this on either side cannot be a meaningful watermark.
+# It also excludes the tiny transparent placeholder that replaces a removed
+# image, so a re-scan after removal does not offer it as a new candidate.
+_MIN_WATERMARK_SIDE = 8
+
+
 def scan_watermark_candidates(doc, min_pages: int = 2, max_candidates: int = 10):
     """Find images that repeat across pages (watermark candidates).
 
@@ -82,6 +89,9 @@ def scan_watermark_candidates(doc, min_pages: int = 2, max_candidates: int = 10)
     total = doc.page_count
     for page_index in range(total):
         for item in _painted_images(doc, page_index):
+            if (item.get("width", 0) < _MIN_WATERMARK_SIDE
+                    or item.get("height", 0) < _MIN_WATERMARK_SIDE):
+                continue  # degenerate/placeholder image, never a watermark
             identity = _image_identity(item)
             group = groups[identity]
             group["pages"].add(page_index + 1)
@@ -137,87 +147,28 @@ def export_watermark_preview(doc, candidate: WatermarkCandidate, out_path: Path)
 _XOBJ_ENTRY_RE = re.compile(rb"/([^\s/\[\]<>()]+)\s+(\d+)\s+0\s+R")
 
 
-def _xobject_names_for(doc, container_xref: int, targets: Set[int]) -> List[bytes]:
-    """Resource names in ``container_xref``'s /Resources /XObject that point at
-    one of ``targets``. ``container_xref`` is a Form XObject's own xref."""
-    try:
-        kind, value = doc.xref_get_key(container_xref, "Resources/XObject")
-    except Exception:  # noqa: BLE001
-        return []
-    if not value or kind == "null":
-        return []
-    names = []
-    for match in _XOBJ_ENTRY_RE.finditer(
-        value.encode() if isinstance(value, str) else value
-    ):
-        name, xref_text = match.group(1), match.group(2)
-        if int(xref_text) in targets:
-            names.append(name)
-    return names
-
-
-def _strip_paint_calls(data: bytes, names) -> bytes:
-    """Remove every ``/Name Do`` paint call for the given resource names.
-
-    Only the paint operator is dropped; the surrounding ``q``/``cm``/``Q`` state
-    operators remain and draw nothing on their own.
-    """
-    for name in names:
-        raw = name if isinstance(name, bytes) else name.encode()
-        data = re.sub(rb"/" + re.escape(raw) + rb"\s+Do\b", b"", data)
-    return data
-
-
-def _collect_form_xobjects(doc, page, seen=None) -> Set[int]:
-    """Every Form XObject xref reachable from a page (recursively, bounded)."""
-    if seen is None:
-        seen = set()
-    try:
-        entries = page.get_xobjects()
-    except Exception:  # noqa: BLE001
-        return seen
-    for entry in entries:
-        xref = int(entry[0])
-        if xref in seen:
-            continue
-        seen.add(xref)
-        # Recurse into nested forms via their own resource dictionaries.
-        for nested in _nested_form_xrefs(doc, xref):
-            if nested not in seen:
-                seen.add(nested)
-    return seen
-
-
-def _nested_form_xrefs(doc, form_xref: int) -> Set[int]:
-    """Form XObject xrefs referenced from another form's resources."""
-    try:
-        kind, value = doc.xref_get_key(form_xref, "Resources/XObject")
-    except Exception:  # noqa: BLE001
-        return set()
-    if not value or kind == "null":
-        return set()
-    found = set()
-    for match in _XOBJ_ENTRY_RE.finditer(
-        value.encode() if isinstance(value, str) else value
-    ):
-        found.add(int(match.group(2)))
-    return found
-
 
 def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
-                            progress=None) -> int:
+                            progress=None, protection=None) -> int:
     """Remove the chosen repeated images from every page and save a new PDF.
 
-    The paint call (``/Name Do``) that draws a matching image is deleted from
-    the page's content stream **and** from any Form XObject that paints it, so a
-    watermark drawn through a form is really removed rather than silently
-    missed. The page's resources are then sanitized so the now-unused image
-    object is dropped and garbage-collected on save.
+    Removal works on the **object graph**, not on content-stream text: each
+    matching image XObject is replaced through PyMuPDF's ``Page.delete_image``,
+    which swaps it for a tiny transparent placeholder. Nothing in any content
+    stream is rewritten, so this cannot corrupt a PDF - the previous
+    regex-over-bytes approach could match ``/Name Do`` inside literal strings,
+    hex strings, comments, or inline-image data and destroy unrelated content
+    (PF-012).
 
-    This targets *only* the chosen image: any other image on the page - even one
-    the watermark is stamped on top of - and all text and vector graphics are
-    left untouched. Written safely (temp file -> validate -> atomic rename).
-    Returns the number of pages modified.
+    Because the image *object* is replaced, the watermark disappears wherever it
+    is painted - directly on the page, or through Form XObjects nested to any
+    depth, including forms shared by several pages (PF-024, PF-025). No manual
+    traversal is required and no paint call is touched, so surrounding text,
+    vector graphics, and other images are left exactly as they were.
+
+    Returns the number of pages whose visible content actually changed - counted
+    from painted occurrences before mutation, not from the number of objects
+    written (PF-025).
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -225,63 +176,42 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
     started = time.perf_counter()
     targets = set(signatures_to_remove)
     total = doc.page_count
-    modified = 0
 
-    # Resolve the chosen content identities to the concrete xrefs carrying them.
+    # Resolve the chosen content identities to concrete xrefs, and record which
+    # pages actually show them. Both are computed BEFORE any mutation.
     target_xrefs: Set[int] = set()
+    affected_pages: Set[int] = set()
     for page_index in range(total):
         for item in _painted_images(doc, page_index):
             if _image_identity(item) in targets:
                 xref = int(item.get("xref", 0) or 0)
                 if xref:
                     target_xrefs.add(xref)
+                    affected_pages.add(page_index)
 
+    modified = len(affected_pages)
+
+    # Replace each target image object once per page that references it.
     for page_index in range(total):
         page = doc[page_index]
-        changed = False
-
-        # 1) Paint calls in the page's own content streams.
-        page_names = [
-            entry[7] for entry in page.get_images(full=True)
-            if int(entry[0]) in target_xrefs
-        ]
-        if page_names:
-            for content_xref in page.get_contents():
-                data = doc.xref_stream(content_xref)
-                if data is None:
-                    continue
-                new_data = _strip_paint_calls(data, page_names)
-                if new_data != data:
-                    doc.update_stream(content_xref, new_data)
-                    changed = True
-
-        # 2) Paint calls inside Form XObjects reachable from this page.
-        for form_xref in _collect_form_xobjects(doc, page):
-            form_names = _xobject_names_for(doc, form_xref, target_xrefs)
-            if not form_names:
-                continue
+        page_xrefs = {
+            int(entry[0]) for entry in page.get_images(full=True)
+        } & target_xrefs
+        for xref in page_xrefs:
             try:
-                data = doc.xref_stream(form_xref)
-            except Exception:  # noqa: BLE001
-                continue
-            if data is None:
-                continue
-            new_data = _strip_paint_calls(data, form_names)
-            if new_data != data:
-                doc.update_stream(form_xref, new_data)
-                changed = True
-
-        if changed:
-            # Prune the now-unreferenced image from the page resources so it is
-            # garbage-collected on save and never re-detected as a watermark.
-            try:
-                page.clean_contents(sanitize=True)
-            except Exception as exc:  # noqa: BLE001 - keep going on odd pages
-                logger.warning("clean_contents failed on page %d: %s",
-                               page_index + 1, exc)
-            modified += 1
+                page.delete_image(xref)
+            except Exception as exc:  # noqa: BLE001 - one page must not abort
+                logger.warning(
+                    "Could not remove image xref %d on page %d: %s",
+                    xref, page_index + 1, exc,
+                )
         if progress is not None:
             progress(page_index + 1, total)
+
+    logger.info(
+        "Watermark removal: %d target image(s) across %d affected page(s).",
+        len(target_xrefs), modified,
+    )
 
     tmp_fd, tmp_name = tempfile.mkstemp(
         suffix=".tmp", prefix=".pdfforge_", dir=str(out_path.parent)
@@ -289,8 +219,9 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
     os.close(tmp_fd)
     tmp_path = Path(tmp_name)
     logger.debug("Temporary watermark-removal file: '%s'", tmp_path)
-    # Preserve an open-password source's protection on the cleaned copy.
-    policy = detect_protection(doc)
+    # Decided during configuration and passed in, so this writer can never
+    # silently drop a protected source's policy (PF-007).
+    policy = protection if protection is not None else detect_protection(doc)
     protect_kwargs = policy.save_kwargs()
     try:
         # garbage=4 drops the now-unreferenced watermark object; use_objstms
@@ -299,8 +230,7 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
                  **protect_kwargs)
         _validate_written_pdf(tmp_path, expected_pages=total,
                               password=policy.password if protect_kwargs else None)
-        os.replace(tmp_path, out_path)
-        record_generated_output(out_path)
+        out_path = promote_atomically(tmp_path, out_path)
     except Exception:
         try:
             if tmp_path.exists():
@@ -308,6 +238,12 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
         except OSError:
             logger.warning("Failed to remove temporary file: %s", tmp_path)
         raise
+
+    # Postcondition: prove the chosen watermark is really gone from the file we
+    # just wrote, rather than trusting the modified count (PF-013/PF-035).
+    validate_watermark_removed(
+        out_path, targets, password=getattr(policy, "password", "") or None
+    )
 
     elapsed = time.perf_counter() - started
     logger.info(

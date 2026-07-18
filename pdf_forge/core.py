@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
 from .constants import *  # noqa: F401,F403
+from .safeio import load_generated_outputs
 
-__all__ = ['_sanitize_for_filename', 'PageSelectionError', 'ChunkSizeError', 'PageSelectionResult', 'parse_page_selection', 'PageGroup', 'parse_multi_file_selection', 'parse_delete_pages', 'compute_deletion', 'build_delete_output_name', 'compute_chunks', 'parse_page_number', 'parse_chunk_size', 'parse_index_list', 'sanitize_selection_text', 'build_extract_output_name', 'build_chunk_output_name', 'pad_width_for', 'build_page_image_name', 'default_images_output_dir', 'default_image_pdf_output', 'unique_file_path', 'unique_dir_path', 'strip_surrounding_quotes', 'natural_sort_key', 'discover_pdfs_in_folder', 'summarize_ranges', 'GUIDANCE_KEYWORDS', 'drag_drop_guidance', 'BATCH_PASSWORD_NOTICE', 'normalized_path_key', 'reserve_unique_file', 'reserve_unique_dir', 'release_reservations', 'clear_reservations',
-'load_generated_outputs', 'record_generated_output', 'forget_generated_outputs']
+__all__ = ['_sanitize_for_filename', 'PageSelectionError', 'ChunkSizeError', 'PageSelectionResult', 'parse_page_selection', 'PageGroup', 'parse_multi_file_selection', 'parse_delete_pages', 'compute_deletion', 'build_delete_output_name', 'compute_chunks', 'parse_page_number', 'parse_chunk_size', 'parse_index_list', 'sanitize_selection_text', 'build_extract_output_name', 'build_chunk_output_name', 'pad_width_for', 'build_page_image_name', 'default_images_output_dir', 'default_image_pdf_output', 'unique_file_path', 'unique_dir_path', 'strip_surrounding_quotes', 'natural_sort_key', 'discover_pdfs_in_folder', 'FolderScanError', 'summarize_ranges', 'GUIDANCE_KEYWORDS', 'drag_drop_guidance', 'BATCH_PASSWORD_NOTICE', 'normalized_path_key', 'reserve_unique_file', 'reserve_unique_dir', 'release_reservations', 'clear_reservations',
+]
 
 # Command keywords picked out in the guidance (see ui.guidance_text): the
 # highlighted parts are the things you can actually type.
@@ -50,6 +51,32 @@ def drag_drop_guidance(kind: str = "file", repeated: bool = False) -> str:
 def _sanitize_for_filename(name: str) -> str:
     """Remove characters that are unsafe in a filename."""
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip()
+
+
+class FolderScanError(OSError):
+    """Raised when a folder cannot be listed (permissions, removed, I/O)."""
+
+
+def _iter_dir(folder: Path):
+    """List a directory, turning every OS failure into :class:`FolderScanError`.
+
+    Discovery must never return a silently partial result or crash the CLI: the
+    caller reports the reason and stays in the current menu.
+    """
+    try:
+        return list(folder.iterdir())
+    except PermissionError as exc:
+        raise FolderScanError(
+            f"Permission denied reading '{folder}'."
+        ) from exc
+    except FileNotFoundError as exc:
+        raise FolderScanError(
+            f"The folder '{folder}' no longer exists."
+        ) from exc
+    except NotADirectoryError as exc:
+        raise FolderScanError(f"'{folder}' is not a folder.") from exc
+    except OSError as exc:
+        raise FolderScanError(f"Could not read '{folder}': {exc}") from exc
 
 
 class PageSelectionError(ValueError):
@@ -631,90 +658,9 @@ def natural_sort_key(name: str) -> List[Tuple[int, int, str]]:
     return key
 
 
+# Generated-output tracking now lives in pdf_forge.safeio (a locked, atomic,
+# per-user state store). Folder discovery consumes it through the import below.
 # --------------------------------------------------------------------------- #
-# Generated-output manifest
-#
-# Folder/batch tools write their results *beside* the sources, so a second run
-# over the same folder would otherwise pick up the first run's outputs and
-# compress/rasterize/merge them again - growing pages or degrading quality on
-# every pass. Excluding names by substring ("_compressed") is unsafe: it would
-# also hide a user's own file that happens to be named that way. Instead every
-# output PDF this application writes is recorded by its exact normalized path,
-# and folder discovery skips exactly those paths - nothing else.
-# --------------------------------------------------------------------------- #
-
-_MANIFEST_LIMIT = 5000
-
-
-def _manifest_path() -> Path:
-    """Project-local, git-ignored record of PDFs this application generated."""
-    return Path(__file__).resolve().parent.parent / ".pdfforge_outputs.json"
-
-
-def _load_manifest_entries() -> List[dict]:
-    """Raw manifest entries, each ``{path, size, mtime}``."""
-    import json
-
-    try:
-        raw = json.loads(_manifest_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    entries = raw.get("outputs", []) if isinstance(raw, dict) else []
-    return [e for e in entries if isinstance(e, dict) and e.get("path")]
-
-
-def _still_ours(entry: dict) -> bool:
-    """True when the recorded file is still exactly the one we wrote.
-
-    Size and modification time are compared, not just the path: if the file was
-    deleted, replaced, or edited by the user, it is no longer our output and is
-    treated as an ordinary source again.
-
-    ponytail: mtime has 1-second granularity, so a replacement written in the
-    same second *and* with an identical byte count would still look like ours.
-    Storing a content hash would close that gap; not worth hashing every output
-    for a case this narrow.
-    """
-    try:
-        stat = os.stat(entry["path"])
-    except OSError:
-        return False
-    return (stat.st_size == entry.get("size")
-            and int(stat.st_mtime) == entry.get("mtime"))
-
-
-def load_generated_outputs() -> Set[str]:
-    """Normalized paths of outputs this application created and still owns."""
-    return {e["path"] for e in _load_manifest_entries() if _still_ours(e)}
-
-
-def record_generated_output(path: Path) -> None:
-    """Record ``path`` as an application-generated output (best effort)."""
-    import json
-
-    try:
-        key = normalized_path_key(path)
-        stat = os.stat(path)
-        entries = [e for e in _load_manifest_entries()
-                   if e["path"] != key and _still_ours(e)]
-        entries.append(
-            {"path": key, "size": stat.st_size, "mtime": int(stat.st_mtime)}
-        )
-        _manifest_path().write_text(
-            json.dumps({"outputs": entries[-_MANIFEST_LIMIT:]}, indent=1),
-            encoding="utf-8",
-        )
-    except Exception as exc:  # noqa: BLE001 - never fail a write over bookkeeping
-        logger.debug("Could not record generated output '%s': %s", path, exc)
-
-
-def forget_generated_outputs() -> None:
-    """Clear the manifest (used by tests and a clean/reset action)."""
-    try:
-        _manifest_path().unlink()
-    except OSError:
-        pass
-
 
 def discover_pdfs_in_folder(folder: Path, include_generated: bool = False) -> List[Path]:
     """Return the ``*.pdf`` files directly inside ``folder`` (non-recursive).
@@ -732,7 +678,7 @@ def discover_pdfs_in_folder(folder: Path, include_generated: bool = False) -> Li
     generated = set() if include_generated else load_generated_outputs()
     pdfs = []
     skipped = 0
-    for entry in folder.iterdir():
+    for entry in _iter_dir(folder):
         if not entry.is_file() or entry.suffix.lower() != ".pdf":
             continue
         if generated and normalized_path_key(entry) in generated:

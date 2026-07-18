@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -38,10 +39,14 @@ __all__ = [
     'OfficeRuntimeError', 'runtime_root', 'libreoffice_dir', 'load_runtime_meta',
     'find_soffice', 'find_soffice_python', 'venv_site_packages',
     'unoserver_installed', 'unoserver_version', 'libreoffice_version',
-    'runtime_status', 'random_localhost_port',
+    'runtime_status', 'random_localhost_port', 'RuntimeCandidate',
+    'verify_runtime_directory',
+    'resolve_runtime_candidates', 'select_runtime', 'probe_soffice_version',
+    'marker_version',
     'ConversionServer', 'convert_to_pdf', 'provision_runtime', 'clean_runtime',
-    'start_conversion_server', 'is_bridge_lost',
-    'PASSWORD_SENTINEL', 'BRIDGE_LOST_SENTINEL', 'warm_up',
+    'start_conversion_server', 'is_bridge_lost', 'convert_via_soffice_cli',
+    'PASSWORD_SENTINEL', 'BRIDGE_LOST_SENTINEL', 'warm_up', 'save_with_password',
+    'conversion_timeout_for',
 ]
 
 
@@ -57,7 +62,29 @@ _SOFFICE_ENV = "PDF_FORGE_SOFFICE"
 # Bounded timeouts (seconds). A timeout is a failure signal, never a password
 # attempt limit.
 SERVER_START_TIMEOUT = 90
+# Base allowance for a small document. Real presentations with embedded media
+# run to hundreds of megabytes and legitimately need longer, so the effective
+# timeout scales with the input size (see conversion_timeout_for).
 CONVERT_TIMEOUT = 180
+# Extra seconds granted per megabyte of input.
+CONVERT_SECONDS_PER_MB = 4
+# Ceiling, so a pathological input still cannot block a queue forever.
+CONVERT_TIMEOUT_MAX = 3600
+
+
+def conversion_timeout_for(path) -> int:
+    """Timeout allowance for converting ``path``, scaled by its size.
+
+    A fixed 180s was fine for small documents but silently failed a 120 MB
+    PowerPoint that converts correctly given time. The value is still bounded:
+    a timeout remains a failure signal, never an attempt limit.
+    """
+    try:
+        megabytes = Path(path).stat().st_size / (1024 * 1024)
+    except OSError:
+        return CONVERT_TIMEOUT
+    allowance = CONVERT_TIMEOUT + int(megabytes * CONVERT_SECONDS_PER_MB)
+    return max(CONVERT_TIMEOUT, min(allowance, CONVERT_TIMEOUT_MAX))
 # Provisioning unpacks a ~360 MB package; generous, but never unbounded.
 EXTRACT_TIMEOUT = 1800
 # Abort sooner when Windows Installer writes nothing at all (a silent stall).
@@ -129,18 +156,11 @@ def find_soffice() -> Optional[Path]:
     via ``PDF_FORGE_SOFFICE``. A system-wide LibreOffice is used only when that
     env var points at it - never auto-registered or modified.
     """
-    local = _search_soffice_under(libreoffice_dir())
-    if local is not None:
-        return local
-    override = os.environ.get(_SOFFICE_ENV)
-    if override:
-        p = Path(override)
-        if p.is_file():
-            return p
-        found = _search_soffice_under(p)
-        if found is not None:
-            return found
-    return None
+    # Version probing is skipped here: this is the cheap path used while a
+    # server is being started, and completeness (soffice + bundled Python) is
+    # what decides whether a candidate can work at all.
+    chosen = select_runtime(verify_version=False)
+    return chosen.soffice if chosen else None
 
 
 def find_soffice_python() -> Optional[Path]:
@@ -208,26 +228,145 @@ def unoserver_version() -> Optional[str]:
         return None
 
 
-def libreoffice_version() -> Optional[str]:
-    """Best-effort LibreOffice version from the provisioning metadata sidecar."""
-    marker = libreoffice_dir() / ".provisioned.json"
+def marker_version(base: Optional[Path] = None) -> Optional[str]:
+    """Version recorded by provisioning. A cache hint only - never authority."""
+    root = base if base is not None else libreoffice_dir()
     try:
-        return json.loads(marker.read_text(encoding="utf-8")).get("version")
+        return json.loads(
+            (root / ".provisioned.json").read_text(encoding="utf-8")
+        ).get("version")
     except (OSError, ValueError):
         return None
 
 
-def runtime_status() -> dict:
-    """Summarize what parts of the conversion runtime are available."""
-    soffice = find_soffice()
+def probe_soffice_version(soffice: Path, timeout: int = 60) -> Optional[str]:
+    """Ask the actual binary for its version, or ``None`` if it cannot answer.
+
+    A provisioning marker can be stale, hand-edited, or left behind by a
+    half-removed runtime, so the binary is the authority (PF-037).
+
+    On Windows the probe must use ``soffice.com``: ``soffice.exe`` is a GUI
+    binary that writes nothing to a captured stdout, so probing it would report
+    "no version" for a perfectly good runtime. (The *server* still launches
+    soffice.exe - the .com shim exits immediately and unoserver would conclude
+    LibreOffice had died.)
+    """
+    probe = soffice
+    if os.name == "nt" and soffice.suffix.lower() == ".exe":
+        console = soffice.with_suffix(".com")
+        if console.exists():
+            probe = console
+    try:
+        result = subprocess.run(
+            [str(probe), "--version"], capture_output=True, text=True,
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if os.name == "nt" else 0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (result.stdout or result.stderr or "").strip()
+    match = re.search(r"(\d+\.\d+(?:\.\d+)*)", text)
+    return match.group(1) if match else None
+
+
+@dataclass
+class RuntimeCandidate:
+    """A complete, self-consistent LibreOffice runtime (or an explained reject).
+
+    Resolution works on *candidates*, not individual paths, so a broken
+    project-local runtime can no longer mask a valid explicit override (PF-016).
+    """
+
+    source: str                       # "project-local" | "PDF_FORGE_SOFFICE"
+    soffice: Optional[Path] = None
+    python: Optional[Path] = None
+    version: Optional[str] = None
+    complete: bool = False
+    reason: str = ""
+
+
+def _describe_candidate(source: str, base: Optional[Path],
+                        soffice: Optional[Path], verify_version: bool) -> RuntimeCandidate:
+    """Build a candidate and say precisely why it is or is not usable."""
+    if soffice is None:
+        return RuntimeCandidate(source=source, reason="no soffice executable found")
+    python = None
+    program = soffice.parent
+    for name in ("python.exe", "python3", "python"):
+        if (program / name).exists():
+            python = program / name
+            break
+    if python is None:
+        return RuntimeCandidate(
+            source=source, soffice=soffice,
+            reason="LibreOffice's bundled Python is missing (incomplete runtime)",
+        )
+    version = probe_soffice_version(soffice) if verify_version else marker_version(base)
+    if verify_version and version is None:
+        return RuntimeCandidate(
+            source=source, soffice=soffice, python=python,
+            reason="the binary did not report a version (corrupt or blocked)",
+        )
+    return RuntimeCandidate(source=source, soffice=soffice, python=python,
+                            version=version, complete=True)
+
+
+def resolve_runtime_candidates(verify_version: bool = True):
+    """Every candidate runtime, best first, each marked complete or rejected."""
+    candidates = []
+    local_root = libreoffice_dir()
+    candidates.append(_describe_candidate(
+        "project-local", local_root, _search_soffice_under(local_root), verify_version
+    ))
+    override = os.environ.get(_SOFFICE_ENV)
+    if override:
+        path = Path(override)
+        found = path if path.is_file() else _search_soffice_under(path)
+        base = path if path.is_dir() else (found.parent.parent if found else None)
+        candidates.append(
+            _describe_candidate(_SOFFICE_ENV, base, found, verify_version)
+        )
+    return candidates
+
+
+def select_runtime(verify_version: bool = True) -> Optional[RuntimeCandidate]:
+    """The first *complete* candidate: project-local preferred, override next."""
+    for candidate in resolve_runtime_candidates(verify_version):
+        if candidate.complete:
+            return candidate
+    return None
+
+
+def libreoffice_version() -> Optional[str]:
+    """Version of the runtime actually in use (probed from the binary)."""
+    candidate = select_runtime()
+    return candidate.version if candidate else None
+
+
+def runtime_status(verify_version: bool = True) -> dict:
+    """Summarize the conversion runtime, based on a complete verified candidate.
+
+    ``ready`` is true only when a candidate is complete *and* its binary
+    answered a version probe, so a forged marker or a half-removed runtime can
+    never report ready (PF-037). Rejected candidates are reported with the
+    reason they were skipped (PF-016).
+    """
+    candidates = resolve_runtime_candidates(verify_version)
+    chosen = next((c for c in candidates if c.complete), None)
     return {
         "unoserver_installed": unoserver_installed(),
         "unoserver_version": unoserver_version(),
-        "soffice": str(soffice) if soffice else None,
-        "soffice_python": str(find_soffice_python() or "") or None,
-        "libreoffice_version": libreoffice_version(),
-        "ready": bool(soffice) and unoserver_installed()
-        and find_soffice_python() is not None,
+        "soffice": str(chosen.soffice) if chosen else None,
+        "soffice_python": str(chosen.python) if chosen else None,
+        "libreoffice_version": chosen.version if chosen else None,
+        "runtime_source": chosen.source if chosen else None,
+        "rejected": [
+            {"source": c.source, "reason": c.reason,
+             "soffice": str(c.soffice) if c.soffice else None}
+            for c in candidates if not c.complete
+        ],
+        "ready": bool(chosen) and unoserver_installed(),
     }
 
 
@@ -255,9 +394,25 @@ class ConversionServer:
     port: int
     profile_dir: Path
     soffice: Path
+    log_handle: object = None
+    log_path: Optional[Path] = None
+
+    def read_log(self, limit: int = 8000) -> str:
+        """Tail of the child's diagnostics (empty when unavailable)."""
+        try:
+            data = Path(self.log_path).read_bytes()[-limit:]
+            return data.decode("utf-8", errors="replace")
+        except (OSError, TypeError):
+            return ""
 
     def stop(self) -> None:
         _terminate(self.process)
+        # Close our end of the log before the profile (which holds it) is removed.
+        try:
+            if self.log_handle is not None:
+                self.log_handle.close()
+        except Exception:  # noqa: BLE001 - teardown must never raise
+            pass
         shutil.rmtree(self.profile_dir, ignore_errors=True)
 
 
@@ -270,6 +425,84 @@ def _profile_argument(profile_dir: Path) -> str:
     as relative and abort with "relative path can't be expressed as a file URI".
     """
     return str(profile_dir.resolve())
+
+
+def _xcu_prop(path: str, name: str, value_type: str, value: str) -> str:
+    return (
+        f'  <item oor:path="{path}">'
+        f'<prop oor:name="{name}" oor:op="fuse" oor:type="xs:{value_type}">'
+        f"<value>{value}</value></prop></item>\n"
+    )
+
+
+def _harden_profile(profile_dir: Path) -> Path:
+    """Write a locked-down LibreOffice profile before the server starts.
+
+    Applied to every conversion profile (set ``PDF_FORGE_HARDEN_PROFILE=0`` only
+    to debug). An earlier revision made this opt-in on the assumption that it
+    destabilised the UNO bridge; measuring it disproved that - with the
+    lockdown applied, Writer documents that otherwise crash the bridge convert
+    natively, because link and index updating is exactly what fails.
+
+    What it writes:
+
+      * ``MacroSecurityLevel = 3`` (very high) and macro execution disabled, so
+        a macro inside a converted document is never run;
+      * link/update modes set to 0, so a document cannot refresh external links,
+        DDE, or data sources - i.e. cannot reach the network - while converting;
+      * document recovery and the first-start wizard disabled, so conversion
+        never blocks on a dialog.
+
+    The profile is created fresh per run and removed on teardown, so these
+    settings can never leak into a user's own LibreOffice configuration.
+    """
+    registry = profile_dir / "user"
+    registry.mkdir(parents=True, exist_ok=True)
+    (registry / "registrymodifications.xcu").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<oor:items xmlns:oor="http://openoffice.org/2001/registry" '
+        'xmlns:xs="http://www.w3.org/2001/XMLSchema">\n'
+        + _xcu_prop("/org.openoffice.Office.Common/Security/Scripting",
+                    "MacroSecurityLevel", "int", "3")
+        + _xcu_prop("/org.openoffice.Office.Common/Security/Scripting",
+                    "DisableMacrosExecution", "boolean", "true")
+        + _xcu_prop("/org.openoffice.Office.Writer/Content/Update",
+                    "Link", "int", "0")
+        + _xcu_prop("/org.openoffice.Office.Calc/Content/Update",
+                    "Link", "int", "0")
+        + _xcu_prop("/org.openoffice.Office.Common/Save/Document",
+                    "CreateBackup", "boolean", "false")
+        + _xcu_prop("/org.openoffice.Office.Recovery/RecoveryInfo",
+                    "Enabled", "boolean", "false")
+        + _xcu_prop("/org.openoffice.Setup/Office",
+                    "FirstStartWizardCompleted", "boolean", "true")
+        + "</oor:items>\n",
+        encoding="utf-8",
+    )
+    return profile_dir
+
+
+def save_with_password(server, src: Path, out: Path, password: str) -> bool:
+    """Save ``src`` as a password-protected copy using LibreOffice itself.
+
+    Used to build encrypted fixtures for the end-to-end tests without needing
+    Microsoft Office. Returns ``False`` when this build cannot do it, so callers
+    skip rather than fail. The password is passed in memory only.
+    """
+    from unoserver.client import UnoClient
+
+    try:
+        client = UnoClient(server="127.0.0.1", port=str(server.port))
+        client.convert(
+            inpath=str(src),
+            outpath=str(out),
+            convert_to="docx",
+            filter_options=[f"EncryptFile={password}"],
+        )
+        return Path(out).exists() and Path(out).stat().st_size > 0
+    except Exception as exc:  # noqa: BLE001 - fixture creation is best effort
+        logger.info("Could not create an encrypted fixture: %s", exc)
+        return False
 
 
 def _terminate(process: subprocess.Popen) -> None:
@@ -329,6 +562,11 @@ def start_conversion_server(
     port = random_localhost_port()
     uno_port = random_localhost_port()
     profile_dir = Path(tempfile.mkdtemp(prefix="pdfforge_loprofile_"))
+    # Always hardened unless explicitly disabled for debugging. Beyond the
+    # safety it enforces, disabling link/index updates is what keeps Writer
+    # exports from crashing the UNO bridge in this runtime (measured).
+    if os.environ.get("PDF_FORGE_HARDEN_PROFILE") != "0":
+        _harden_profile(profile_dir)
 
     env = dict(os.environ)
     # Let LibreOffice's bundled Python import the venv-installed unoserver.
@@ -337,6 +575,12 @@ def start_conversion_server(
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
     )
 
+    # The child's diagnostics go to a file inside its own profile directory, not
+    # to an OS pipe. An undrained PIPE can fill its buffer and block the child
+    # mid-conversion (PF-014); a file also means a crash leaves readable evidence
+    # instead of output nobody ever consumed. The file dies with the profile, so
+    # it cannot grow without bound across runs.
+    log_path = profile_dir / "unoserver.log"
     cmd = [
         str(lo_python), "-m", "unoserver.server",
         "--executable", str(soffice),
@@ -344,21 +588,32 @@ def start_conversion_server(
         "--interface", "127.0.0.1",
         "--port", str(port),
         "--uno-port", str(uno_port),
+        # The server-side cap must be the *ceiling*, not the base allowance:
+        # the per-file timeout is scaled by input size on the client, and a
+        # fixed server cap would cut a large document off first.
+        "--conversion-timeout", str(CONVERT_TIMEOUT_MAX),
     ]
     logger.info("Starting conversion server on 127.0.0.1:%d (uno %d).", port, uno_port)
     creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
+        log_handle = open(log_path, "wb")
+    except OSError as exc:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        raise OfficeRuntimeError(f"Could not open the server log: {exc}") from exc
+    try:
         process = subprocess.Popen(
-            cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cmd, env=env, stdout=log_handle, stderr=subprocess.STDOUT,
             creationflags=creationflags,
         )
     except OSError as exc:
+        log_handle.close()
         shutil.rmtree(profile_dir, ignore_errors=True)
         raise OfficeRuntimeError(f"Could not start the conversion server: {exc}") from exc
 
-    server = ConversionServer(process, port, profile_dir, soffice)
+    server = ConversionServer(process, port, profile_dir, soffice, log_handle,
+                              log_path)
     try:
         _wait_until_ready(server, start_timeout)
     except Exception:
@@ -404,7 +659,7 @@ def convert_to_pdf(
     in_path: Path,
     out_path: Path,
     password: Optional[str] = None,
-    timeout: int = CONVERT_TIMEOUT,
+    timeout: Optional[int] = None,
 ) -> None:
     """Convert one source file to PDF through the running server.
 
@@ -414,6 +669,8 @@ def convert_to_pdf(
     """
     from unoserver.client import UnoClient
 
+    if timeout is None:
+        timeout = conversion_timeout_for(in_path)
     client = UnoClient(server="127.0.0.1", port=str(server.port))
     # Deliberately no explicit output filter: LibreOffice picks the right PDF
     # exporter for the loaded document type (writer_pdf_Export /
@@ -461,8 +718,23 @@ def convert_to_pdf(
         raise OfficeRuntimeError(BRIDGE_LOST_SENTINEL)
     error = outcome.get("error")
     if error is not None:
+        classified = _classify_convert_error(error)
+        # A lost bridge with no password involved is recoverable: the same
+        # document converts through the command line with the same runtime.
+        if classified == BRIDGE_LOST_SENTINEL and password is None:
+            logger.info(
+                "unoserver could not export '%s'; retrying via the soffice CLI.",
+                Path(in_path).name,
+            )
+            try:
+                convert_via_soffice_cli(server.soffice, in_path, out_path,
+                                        timeout=timeout)
+                return
+            except OfficeRuntimeError as cli_exc:
+                logger.error("CLI fallback also failed: %s", cli_exc)
+                raise
         # Never include the password in the message.
-        raise OfficeRuntimeError(_classify_convert_error(error)) from error
+        raise OfficeRuntimeError(classified) from error
 
 
 #: Sentinel returned when the source needs a password.
@@ -506,6 +778,56 @@ def warm_up(server: "ConversionServer") -> "ConversionServer":
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
     return server
+
+
+
+def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
+                            timeout: Optional[int] = None) -> None:
+    """Convert to PDF by driving ``soffice --convert-to`` directly.
+
+    Fallback for documents the unoserver bridge cannot export. unoserver 3.7 on
+    LibreOffice 25.8 fails on **Writer** documents here: the export raises inside
+    the UNO bridge and pyuno then cannot marshal its own exception
+    ("'traceback' object has no attribute 'getTypes'"), which destroys the real
+    error and disposes the bridge. Calc documents are unaffected. The same
+    document converts correctly through the command-line interface, so this path
+    keeps the feature working with the *same* project-local runtime - still
+    local, still headless, still no GUI.
+
+    It cannot carry a password (that would put the secret on a command line), so
+    encrypted sources stay on the unoserver in-memory path.
+    """
+    out_path = Path(out_path)
+    if timeout is None:
+        timeout = conversion_timeout_for(in_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    profile = Path(tempfile.mkdtemp(prefix="pdfforge_cliprof_"))
+    outdir = Path(tempfile.mkdtemp(prefix="pdfforge_cliout_"))
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    cmd = [
+        str(soffice), "--headless", "--invisible", "--nologo", "--nofirststartwizard",
+        "--norestore", "--nodefault", "--nocrashreport",
+        f"-env:UserInstallation={profile.resolve().as_uri()}",
+        "--convert-to", "pdf", "--outdir", str(outdir), str(in_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=timeout, creationflags=creationflags)
+        produced = list(outdir.glob("*.pdf"))
+        if not produced:
+            detail = (result.stderr or result.stdout or "").strip()[:300]
+            raise OfficeRuntimeError(
+                "LibreOffice produced no PDF for this document"
+                + (f": {detail}" if detail else ".")
+            )
+        shutil.move(str(produced[0]), str(out_path))
+    except subprocess.TimeoutExpired as exc:
+        raise OfficeRuntimeError(
+            f"LibreOffice timed out converting this document after {timeout}s."
+        ) from exc
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+        shutil.rmtree(outdir, ignore_errors=True)
 
 
 def _classify_convert_error(exc: Exception) -> str:
@@ -553,6 +875,46 @@ def clean_runtime() -> bool:
     return False
 
 
+def verify_runtime_directory(base: Path, expect_version: str = None) -> "RuntimeCandidate":
+    """Validate a runtime directory as a complete, self-consistent tuple.
+
+    Checks the executable, the bundled Python/UNO interpreter, and the version
+    the binary itself reports. A directory that merely contains a ``soffice``
+    file is NOT accepted as installed (PF-015), and the provisioning marker is
+    only a hint - the binary decides.
+    """
+    base = Path(base)
+    if not base.exists():
+        return RuntimeCandidate(source="runtime-dir", reason="directory does not exist")
+    soffice = _search_soffice_under(base)
+    if soffice is None:
+        return RuntimeCandidate(source="runtime-dir", reason="soffice executable missing")
+    program = soffice.parent
+    python = None
+    for name in ("python.exe", "python3", "python"):
+        if (program / name).exists():
+            python = program / name
+            break
+    if python is None:
+        return RuntimeCandidate(
+            source="runtime-dir", soffice=soffice,
+            reason="LibreOffice's bundled Python is missing",
+        )
+    version = probe_soffice_version(soffice)
+    if version is None:
+        return RuntimeCandidate(
+            source="runtime-dir", soffice=soffice, python=python,
+            reason="the binary did not report a version",
+        )
+    if expect_version and not version.startswith(expect_version.split(".")[0]):
+        return RuntimeCandidate(
+            source="runtime-dir", soffice=soffice, python=python, version=version,
+            reason=f"version mismatch: expected {expect_version}, found {version}",
+        )
+    return RuntimeCandidate(source="runtime-dir", soffice=soffice, python=python,
+                            version=version, complete=True)
+
+
 def provision_runtime(
     progress=None, force: bool = False, download=None, verify_checksum: bool = True,
 ) -> dict:
@@ -572,9 +934,21 @@ def provision_runtime(
     meta = load_runtime_meta()
     target = libreoffice_dir()
 
-    if not force and find_soffice() is not None and _search_soffice_under(target):
-        logger.info("LibreOffice runtime already present at %s.", target)
-        return {"status": "already-present", "soffice": str(find_soffice())}
+    if not force:
+        existing = verify_runtime_directory(target)
+        if existing.complete:
+            logger.info("Verified LibreOffice runtime already present at %s.", target)
+            return {"status": "already-present", "soffice": str(existing.soffice),
+                    "version": existing.version}
+        if target.exists():
+            # Exists but does not verify: interrupted extraction, partial
+            # delete, missing bundled Python, or a forged marker. Treat it as
+            # damaged and rebuild rather than reporting it installed (PF-015).
+            logger.warning(
+                "Existing runtime at %s is incomplete (%s); rebuilding it.",
+                target, existing.reason,
+            )
+            shutil.rmtree(target, ignore_errors=True)
 
     if os.name != "nt":
         raise OfficeRuntimeError(
@@ -632,21 +1006,44 @@ def provision_runtime(
 
     if force:
         clean_runtime()
-    target.mkdir(parents=True, exist_ok=True)
-    if progress:
-        progress("Extracting (administrative install, no system changes)...")
-    _admin_extract_msi(installer, target)
+    # Extract into a unique staging directory and promote it only once the
+    # complete runtime verifies, so an interrupted or partial extraction can
+    # never be mistaken for an installed runtime (PF-015).
+    runtime_root().mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix="pdfforge_lostage_",
+                                    dir=str(runtime_root())))
+    try:
+        if progress:
+            progress("Extracting (administrative install, no system changes)...")
+        _admin_extract_msi(installer, staging)
 
-    soffice = _search_soffice_under(target)
-    if soffice is None:
-        raise OfficeRuntimeError(
-            "Extraction finished but soffice was not found under the runtime "
-            "directory; the runtime is incomplete."
+        staged = verify_runtime_directory(staging, expect_version=version)
+        if not staged.complete:
+            raise OfficeRuntimeError(
+                f"The extracted runtime is incomplete: {staged.reason}. "
+                "Nothing was installed."
+            )
+        # The marker is written LAST, so its presence implies a verified tree.
+        (staging / ".provisioned.json").write_text(
+            json.dumps({"version": staged.version,
+                        "soffice": str(staged.soffice)}, indent=2),
+            encoding="utf-8",
         )
-    (target / ".provisioned.json").write_text(
-        json.dumps({"version": version, "soffice": str(soffice)}, indent=2),
-        encoding="utf-8",
-    )
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(str(staging), str(target))     # atomic promotion
+        staging = None
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    final = verify_runtime_directory(target, expect_version=version)
+    if not final.complete:
+        raise OfficeRuntimeError(
+            f"The promoted runtime does not verify: {final.reason}."
+        )
+    soffice = final.soffice
     logger.info("Provisioned LibreOffice %s at %s.", version, soffice)
     return {"status": "provisioned", "version": version, "soffice": str(soffice)}
 
@@ -665,37 +1062,28 @@ def _download(url: str, dest: Path, download=None) -> None:
 
 
 def _ensure_installer_service() -> None:
-    """Make sure the Windows Installer service is running before calling msiexec.
+    """Check the Windows Installer service WITHOUT changing its state.
 
-    ``msiexec /a`` does not reliably start ``msiserver`` from a non-interactive
-    session: when the service is stopped it can block indefinitely instead of
-    failing. Starting it first (or reporting clearly that it cannot be started)
-    turns a silent hang into an actionable message.
+    Provisioning documents that it makes no system changes, so it must not start
+    a stopped service behind the user's back (PF-017): that alters machine state
+    outside the project folder and may be blocked by policy. A stopped service
+    stops provisioning with an actionable message instead - and never silently
+    hangs, which is what msiexec would do on its own.
     """
     try:
         query = subprocess.run(["sc", "query", "msiserver"], capture_output=True,
                                text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
-        return  # Cannot query; let msiexec try anyway (guarded by its timeout).
-    if "RUNNING" in query.stdout.upper():
+        return  # Cannot query; let msiexec try (bounded by its own timeout).
+    state = query.stdout.upper()
+    if "RUNNING" in state or "STATE" not in state:
         return
-    logger.info("Windows Installer service is not running; starting it.")
-    try:
-        started = subprocess.run(["net", "start", "msiserver"], capture_output=True,
-                                 text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise OfficeRuntimeError(
-            "The Windows Installer service (msiserver) is not running and could "
-            f"not be started ({exc}). Start it and run --setup-office again."
-        ) from exc
-    if started.returncode != 0:
-        message = (started.stdout + started.stderr).strip().splitlines()
-        detail = message[-1] if message else f"exit code {started.returncode}"
-        raise OfficeRuntimeError(
-            "The Windows Installer service (msiserver) is stopped and could not "
-            f"be started: {detail}. Start it (an elevated 'net start msiserver') "
-            "and run --setup-office again. Nothing was installed."
-        )
+    raise OfficeRuntimeError(
+        "The Windows Installer service (msiserver) is stopped, and PDF Forge "
+        "does not change Windows service state. Start it yourself and run "
+        "--setup-office again:  net start msiserver  (elevated). "
+        "Nothing was downloaded or installed."
+    )
 
 
 def _admin_extract_msi(installer: Path, target: Path,

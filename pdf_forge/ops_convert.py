@@ -568,6 +568,7 @@ def operation_extract_images() -> None:
         # Capture the working password for a silent reopen in the runner (A13).
         pw = source_password(pdf)
         image_count = count_embedded_images(pdf)
+        inline_count = count_inline_images(pdf)
         print_success(
             f"Loaded '{source.name}' - {total_pages} page(s), "
             f"{image_count} distinct image(s)."
@@ -582,6 +583,13 @@ def operation_extract_images() -> None:
             "The same image reused on many pages (e.g. a watermark) is "
             "extracted once, named after the first page it appears on."
         )
+        if inline_count:
+            # Say so up front rather than quietly producing fewer files.
+            print_warning(
+                f"{inline_count} inline image(s) are drawn directly inside the "
+                "page content and have no separate image object, so they cannot "
+                "be extracted. Use 'PDF to images (PNG)' to capture those pages."
+            )
 
         quality = _prompt_extract_quality()
         if quality is None:

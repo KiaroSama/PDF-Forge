@@ -9,19 +9,20 @@ from __future__ import annotations
 
 import csv
 import io
+import itertools
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from .constants import *  # noqa: F401,F403
-from .core import natural_sort_key
+from .core import natural_sort_key, _iter_dir
 
 __all__ = [
     'OFFICE_FAMILIES', 'SUPPORTED_OFFICE_EXTS', 'classify_office_file',
     'is_office_lock_file', 'validate_office_file', 'discover_office_files',
     'family_counts', 'CsvDialect', 'detect_csv_dialect',
-    'is_encrypted_office_file', 'normalize_csv_for_import',
+    'is_encrypted_office_file', 'is_encrypted_ooxml', 'normalize_csv_for_import',
 ]
 
 # extension -> human family label. Detection is by extension; validation below
@@ -62,45 +63,185 @@ def is_office_lock_file(name: str) -> bool:
     return name.startswith("~$")
 
 
+def _open_ole(path: Path):
+    """Open an OLE2 compound file with the maintained parser, or ``None``.
+
+    Uses ``olefile`` rather than scanning raw bytes for markers: a marker can
+    appear anywhere in ordinary data (false positive) and the real directory can
+    live far past any fixed scan window (false negative).
+    """
+    import olefile
+
+    try:
+        if not olefile.isOleFile(str(path)):
+            return None
+        return olefile.OleFileIO(str(path))
+    except Exception:  # noqa: BLE001 - malformed OLE is simply "not OLE"
+        return None
+
+
+def _ole_stream_names(path: Path):
+    """Top-level stream names inside an OLE2 container (lower-cased), or None."""
+    ole = _open_ole(path)
+    if ole is None:
+        return None
+    try:
+        return {"/".join(entry).lower() for entry in ole.listdir(streams=True)}
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        try:
+            ole.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def is_encrypted_ooxml(path: Path) -> bool:
+    """True for a password-to-open OOXML file (an OLE2 "encrypted package").
+
+    A protected .docx/.xlsx/.pptx is not a ZIP at all: it is an OLE2 compound
+    file holding ``EncryptionInfo`` and ``EncryptedPackage`` streams. Both must
+    be present, so an arbitrary OLE2 file (e.g. a legacy .doc) is not accepted.
+    """
+    names = _ole_stream_names(path)
+    if names is None:
+        return False
+    return "encryptioninfo" in names and "encryptedpackage" in names
+
+
+# Required marker part and folder root per OOXML family, so a cross-family
+# rename (an .xlsx called .docx) is rejected instead of confusing the converter.
+_OOXML_FAMILY_RULES = {
+    "word": {
+        "root": "word/",
+        "main": "word/document.xml",
+        "content_type": "wordprocessingml.document.main+xml",
+    },
+    "excel": {
+        "root": "xl/",
+        "main": "xl/workbook.xml",
+        "content_type": "spreadsheetml.sheet.main+xml",
+    },
+    "powerpoint": {
+        "root": "ppt/",
+        "main": "ppt/presentation.xml",
+        "content_type": "presentationml.presentation.main+xml",
+    },
+}
+
+# Validation-time decompression guards: a package whose declared content
+# expands beyond these limits is treated as hostile rather than read into memory.
+_MAX_VALIDATION_BYTES = 512 * 1024 * 1024
+_MAX_COMPRESSION_RATIO = 200
+
+
+def _validate_plain_ooxml(path: Path, family: str) -> tuple:
+    """Validate an unencrypted OOXML package and confirm its real family."""
+    rules = _OOXML_FAMILY_RULES[family]
+    root, main = rules["root"], rules["main"]
+    try:
+        with zipfile.ZipFile(str(path)) as zf:
+            infos = zf.infolist()
+            names = [i.filename for i in infos]
+
+            # Reject path traversal and absolute members outright.
+            for name in names:
+                normalized = name.replace("\\", "/")
+                if normalized.startswith("/") or ".." in normalized.split("/"):
+                    return False, "unsafe entry path in package: " + repr(name)
+
+            # ZIP-bomb guards: total declared size and per-entry ratio.
+            total = sum(i.file_size for i in infos)
+            if total > _MAX_VALIDATION_BYTES:
+                return False, "package expands to an implausible size"
+            for info in infos:
+                if info.compress_size > 0 and info.file_size > (1 << 20):
+                    if info.file_size / info.compress_size > _MAX_COMPRESSION_RATIO:
+                        return False, (
+                            "package entry has an implausible compression ratio"
+                        )
+
+            lowered = [n.lower() for n in names]
+            if "[content_types].xml" not in lowered:
+                return False, "not a valid OOXML package ([Content_Types].xml missing)"
+            if lowered.count("[content_types].xml") > 1:
+                return False, "package declares [Content_Types].xml more than once"
+
+            index = lowered.index("[content_types].xml")
+            with zf.open(infos[index]) as handle:
+                content_types = handle.read(4 * 1024 * 1024).decode(
+                    "utf-8", errors="replace"
+                ).lower()
+
+            if rules["content_type"] not in content_types:
+                actual = None
+                for fam, other in _OOXML_FAMILY_RULES.items():
+                    if other["content_type"] in content_types:
+                        actual = fam
+                        break
+                if actual:
+                    return False, (
+                        "this is really " + actual + " content saved with a "
+                        + family + " extension"
+                    )
+                return False, "not a " + family + " package (main content type missing)"
+
+            if not any(n.lower().startswith(root) for n in names):
+                return False, "not a " + family + " package (" + root + " missing)"
+            if main not in lowered:
+                return False, "not a " + family + " package (" + main + " missing)"
+    except (zipfile.BadZipFile, OSError, RuntimeError) as exc:
+        return False, "corrupt OOXML package: " + str(exc)
+    return True, ""
+
+
 def validate_office_file(path: Path) -> tuple:
     """Confirm a file's real container matches its extension.
 
-    Returns ``(ok, reason)``. ``reason`` is empty when ``ok`` is True.
-    Rejects a binary file renamed to ``.csv`` and an OOXML/CFB file whose magic
-    bytes do not match its claimed format, so a corrupt or mislabelled input
-    fails per-file instead of crashing the converter.
+    Returns ``(ok, reason)``; ``reason`` is empty when ``ok`` is True.
+
+    An OOXML extension is accepted in exactly two shapes:
+      * a plain ZIP package whose content types and parts match the family, or
+      * an OLE2 "encrypted package" (password-to-open), accepted here precisely
+        so the conversion flow can *ask for the password* rather than rejecting
+        the file before any prompt can happen.
+
+    Anything else - a fake ZIP with only [Content_Types].xml, a cross-family
+    rename, an arbitrary OLE2 file renamed .docx - is rejected.
     """
     path = Path(path)
     ext = path.suffix.lower()
     if ext not in OFFICE_FAMILIES:
-        return False, f"unsupported extension '{ext}'"
+        return False, "unsupported extension " + repr(ext)
     try:
         if not path.is_file():
             return False, "not a regular file"
         size = path.stat().st_size
     except OSError as exc:
-        return False, f"cannot access file: {exc}"
+        return False, "cannot access file: " + str(exc)
     if size == 0:
         return False, "file is empty"
 
+    family = OFFICE_FAMILIES[ext]
+
     if ext in _OOXML_EXTS:
-        if not zipfile.is_zipfile(str(path)):
-            return False, "not a valid OOXML package (expected a ZIP container)"
-        try:
-            with zipfile.ZipFile(str(path)) as zf:
-                names = zf.namelist()
-        except (zipfile.BadZipFile, OSError) as exc:
-            return False, f"corrupt OOXML package: {exc}"
-        if "[Content_Types].xml" not in names:
-            return False, "not a valid OOXML package ([Content_Types].xml missing)"
-        return True, ""
+        if zipfile.is_zipfile(str(path)):
+            return _validate_plain_ooxml(path, family)
+        if is_encrypted_ooxml(path):
+            return True, ""  # valid but locked: the caller requests the password
+        if _ole_stream_names(path) is not None:
+            return False, (
+                "this is an OLE2 file that is not an encrypted OOXML package "
+                "(a legacy .doc/.xls/.ppt renamed to a modern extension?)"
+            )
+        return False, "not a valid OOXML package (expected a ZIP container)"
 
     if ext in _CFB_EXTS:
         try:
             with open(path, "rb") as handle:
                 head = handle.read(8)
         except OSError as exc:
-            return False, f"cannot read file: {exc}"
+            return False, "cannot read file: " + str(exc)
         if head != _CFB_MAGIC:
             return False, "not a valid legacy Office file (bad signature)"
         return True, ""
@@ -110,7 +251,7 @@ def validate_office_file(path: Path) -> tuple:
         with open(path, "rb") as handle:
             chunk = handle.read(4096)
     except OSError as exc:
-        return False, f"cannot read file: {exc}"
+        return False, "cannot read file: " + str(exc)
     if b"\x00" in chunk:
         return False, "not a text CSV (contains NUL bytes - looks binary)"
     return True, ""
@@ -119,28 +260,17 @@ def validate_office_file(path: Path) -> tuple:
 def is_encrypted_office_file(path: Path) -> bool:
     """Detect an encrypted Office/ODF document *before* handing it to LibreOffice.
 
-    Detecting this up front means the password can be requested before the
-    conversion is attempted. It also avoids relying on the converter's error
-    path, which reports a password failure as an opaque marshalling error and
-    can tear down the UNO bridge.
-
-    Two real-world forms are recognized:
-      * OOXML with password-to-open - the file is no longer a ZIP but an OLE2
-        compound document holding an ``EncryptedPackage`` stream;
+    Recognized forms:
+      * OOXML with password-to-open - an OLE2 container whose *parsed* directory
+        holds ``EncryptionInfo`` and ``EncryptedPackage`` (never byte-scanned, so
+        a directory beyond any fixed offset is still found and stray marker bytes
+        in ordinary data cannot cause a false positive);
       * ODF with password-to-open - a ZIP whose ``META-INF/manifest.xml``
-        declares ``encryption-data`` for its entries.
+        declares ``encryption-data``.
     """
     path = Path(path)
-    try:
-        with open(path, "rb") as handle:
-            head = handle.read(8)
-            if head == _CFB_MAGIC:
-                handle.seek(0)
-                # The stream name is stored UTF-16LE in the CFB directory.
-                blob = handle.read(1 << 20)
-                return b"E\x00n\x00c\x00r\x00y\x00p\x00t\x00e\x00d\x00" in blob
-    except OSError:
-        return False
+    if is_encrypted_ooxml(path):
+        return True
 
     if not zipfile.is_zipfile(str(path)):
         return False
@@ -159,19 +289,27 @@ def normalize_csv_for_import(path: Path, dialect: "CsvDialect", out_path: Path) 
 
     LibreOffice's import-filter options cannot be passed through the converter
     API, so the detected dialect is applied here instead: the CSV is parsed with
-    the sniffed delimiter/encoding and re-emitted canonically. The *source file
-    is only read* - never modified - and the copy lives in a temporary location.
+    the sniffed delimiter/encoding and re-emitted canonically.
+
+    Rows are streamed straight from the reader to the writer, so memory stays
+    bounded no matter how many rows the file has (a whole-file ``list()`` used
+    to scale with the input). Quoting, embedded delimiters, embedded newlines,
+    and Unicode are preserved by the csv module. The *source is only read* -
+    never modified - and the copy lives in a temporary location.
     """
-    with open(path, "r", encoding=_python_encoding(dialect.encoding),
-              newline="") as handle:
-        rows = list(csv.reader(handle, delimiter=dialect.delimiter))
-    with open(out_path, "w", encoding="utf-8", newline="") as handle:
-        csv.writer(handle, delimiter=",").writerows(rows)
+    encoding = _python_encoding(dialect.encoding)
+    with open(path, "r", encoding=encoding, newline="") as source, \
+            open(out_path, "w", encoding="utf-8", newline="") as target:
+        reader = csv.reader(source, delimiter=dialect.delimiter)
+        writer = csv.writer(target, delimiter=",")
+        for row in reader:
+            writer.writerow(row)
     return out_path
 
 
 def _python_encoding(label: str) -> str:
-    return {"UTF-8": "utf-8", "windows-1252": "cp1252"}.get(label, "utf-8")
+    return {"UTF-8": "utf-8", "windows-1252": "cp1252",
+            "UTF-16": "utf-16"}.get(label, "utf-8")
 
 
 def discover_office_files(folder: Path) -> List[Path]:
@@ -183,7 +321,7 @@ def discover_office_files(folder: Path) -> List[Path]:
     folder = Path(folder)
     files = [
         entry
-        for entry in folder.iterdir()
+        for entry in _iter_dir(folder)
         if entry.is_file()
         and entry.suffix.lower() in OFFICE_FAMILIES
         and not is_office_lock_file(entry.name)
@@ -219,20 +357,42 @@ class CsvDialect:
         }.get(self.delimiter, repr(self.delimiter))
 
 
-def _decode_csv_bytes(raw: bytes):
-    """Return ``(text, encoding, had_bom)`` decoding CSV bytes safely.
+def _decode_csv_sample(raw: bytes, complete: bool):
+    """Decode a CSV *sample* to text without misreading a split code point.
 
-    UTF-8 (with or without BOM) is tried strictly first; a deterministic
-    single-byte fallback (cp1252) is used only when strict UTF-8 fails, so a
-    valid UTF-8 file is never mis-decoded.
+    A fixed-size read can land in the middle of a multi-byte UTF-8 sequence.
+    Decoding that strictly raises ``UnicodeDecodeError``, which previously made
+    a perfectly valid UTF-8 file look like Windows-1252 and corrupted every
+    non-ASCII character. An incremental decoder distinguishes the two cases:
+    an *incomplete* trailing sequence is simply held back, while genuinely
+    invalid bytes still fail and fall back.
+
+    Returns ``(text, encoding, had_bom)``. ``complete`` says whether ``raw`` is
+    the entire file (then a trailing partial sequence really is invalid).
     """
-    if raw.startswith(b"\xef\xbb\xbf"):
-        return raw[3:].decode("utf-8"), "UTF-8", True
+    import codecs
+
+    had_bom = False
+    encoding = "UTF-8"
+    if raw.startswith(codecs.BOM_UTF8):
+        raw = raw[len(codecs.BOM_UTF8):]
+        had_bom = True
+    elif raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+        # UTF-16 is decoded whole; the BOM selects the byte order.
+        try:
+            return raw.decode("utf-16"), "UTF-16", True
+        except UnicodeDecodeError:
+            pass
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
     try:
-        return raw.decode("utf-8"), "UTF-8", False
+        # final=complete: mid-code-point tails are buffered, not treated as
+        # invalid, unless this really is the end of the file.
+        text = decoder.decode(raw, complete)
+        return text, encoding, had_bom
     except UnicodeDecodeError:
-        # Deterministic fallback; cp1252 maps every byte, so this never raises.
-        return raw.decode("cp1252"), "windows-1252", False
+        # Genuinely not UTF-8. cp1252 maps every byte, so this cannot raise.
+        return raw.decode("cp1252"), "windows-1252", had_bom
 
 
 def detect_csv_dialect(path: Path, sample_bytes: int = 65536) -> CsvDialect:
@@ -244,9 +404,10 @@ def detect_csv_dialect(path: Path, sample_bytes: int = 65536) -> CsvDialect:
     ``"low"`` when the delimiter is ambiguous so the caller can offer a single
     correction prompt instead of guessing silently.
     """
+    file_size = path.stat().st_size
     with open(path, "rb") as handle:
         raw = handle.read(sample_bytes)
-    text, encoding, had_bom = _decode_csv_bytes(raw)
+    text, encoding, had_bom = _decode_csv_sample(raw, complete=len(raw) >= file_size)
     notes: List[str] = []
     if had_bom:
         notes.append("BOM detected")
@@ -255,19 +416,32 @@ def detect_csv_dialect(path: Path, sample_bytes: int = 65536) -> CsvDialect:
     confidence = "high"
     has_header = False
 
+    # csv.Sniffer is treated as ONE signal, not as truth: it happily returns a
+    # delimiter that shreds rows into ragged widths. Score every candidate on
+    # row-width consistency first, and only accept the sniffer when the scoring
+    # agrees with it.
+    delimiter, confidence = _score_delimiter(text)
+    sniffed = None
     try:
-        sniffer = csv.Sniffer()
-        dialect = sniffer.sniff(text, delimiters="".join(_CSV_DELIMITERS))
-        delimiter = dialect.delimiter
-        try:
-            has_header = sniffer.has_header(text)
-        except csv.Error:
-            has_header = _guess_header(text, delimiter)
-    except csv.Error:
-        # Sniffer failed: fall back to a per-delimiter field-count heuristic.
-        delimiter, confidence = _guess_delimiter(text)
+        sniffed = csv.Sniffer().sniff(
+            text, delimiters="".join(_CSV_DELIMITERS)
+        ).delimiter
+    except (csv.Error, ValueError):
+        # ValueError: the sniffer can infer a multi-character delimiter on
+        # ragged input, which csv rejects. Either way it simply could not decide.
+        notes.append("csv.Sniffer could not decide")
+    if sniffed is not None and sniffed != delimiter:
+        if confidence == "low":
+            delimiter = sniffed  # scoring had nothing better to offer
+        else:
+            notes.append(
+                "csv.Sniffer suggested " + repr(sniffed) + "; kept the more "
+                "consistent " + repr(delimiter)
+            )
+    try:
+        has_header = csv.Sniffer().has_header(text)
+    except (csv.Error, ValueError):
         has_header = _guess_header(text, delimiter)
-        notes.append("delimiter guessed by field-count heuristic")
 
     return CsvDialect(
         encoding=encoding,
@@ -278,43 +452,68 @@ def detect_csv_dialect(path: Path, sample_bytes: int = 65536) -> CsvDialect:
     )
 
 
-def _guess_delimiter(text: str) -> tuple:
-    """Pick the delimiter giving the most consistent multi-field split.
+def _score_delimiter(text: str) -> tuple:
+    """Choose the delimiter with the most *consistent* row shape.
 
-    Returns ``(delimiter, confidence)``. Confidence is ``"low"`` when no
-    delimiter produces a consistent multi-column shape.
+    Returns ``(delimiter, confidence)``. Consistency dominates column count:
+    prose containing commas can yield more columns than the true delimiter while
+    producing wildly ragged rows, which previously won on column count alone.
+
+    Penalties: width variance, empty-column explosions, implausibly wide rows,
+    and single-row samples (which carry almost no evidence). ``confidence`` is
+    ``"low"`` when nothing scores convincingly, so the caller asks instead of
+    silently picking.
     """
-    lines = [ln for ln in text.splitlines() if ln.strip()][:20]
+    lines = [ln for ln in text.splitlines() if ln.strip()][:50]
     if not lines:
         return ",", "low"
-    best = (",", 0, 0.0)  # (delimiter, columns, consistency)
+    sample = "\n".join(lines)
+
+    best = (",", -1.0, "low")
     for delim in _CSV_DELIMITERS:
         try:
-            rows = list(csv.reader(io.StringIO("\n".join(lines)), delimiter=delim))
-        except csv.Error:
+            rows = [r for r in csv.reader(io.StringIO(sample), delimiter=delim) if r]
+        except (csv.Error, ValueError):
             continue
-        counts = [len(r) for r in rows if r]
-        if not counts:
+        if not rows:
             continue
-        cols = max(counts)
-        if cols < 2:
-            continue
-        consistency = sum(1 for c in counts if c == cols) / len(counts)
-        if (cols, consistency) > (best[1], best[2]):
-            best = (delim, cols, consistency)
-    if best[1] < 2:
+        widths = [len(r) for r in rows]
+        modal = max(set(widths), key=widths.count)
+        if modal < 2:
+            continue  # not actually splitting anything
+        consistency = widths.count(modal) / len(widths)
+        # Variance penalty: how far off the ragged rows are.
+        spread = (max(widths) - min(widths)) / modal
+        # Empty-cell penalty: a wrong delimiter shreds text into blanks.
+        cells = [c for row in rows for c in row]
+        empties = sum(1 for c in cells if not c.strip()) / max(1, len(cells))
+        score = consistency - 0.5 * min(spread, 1.0) - 0.5 * empties
+        if modal > 64:
+            score -= 0.5           # implausibly wide for a real sheet
+        if len(rows) < 2:
+            score -= 0.25          # one row proves very little
+        if score > best[1]:
+            confident = (
+                consistency >= 0.9 and empties < 0.4 and spread <= 0.25
+                and len(rows) >= 2
+            )
+            best = (delim, score, "high" if confident else "low")
+    if best[1] < 0:
         return ",", "low"
-    return best[0], ("high" if best[2] >= 0.8 else "low")
+    return best[0], best[2]
 
 
 def _guess_header(text: str, delimiter: str) -> bool:
     """Heuristic: first row is a header when it is all-non-numeric and the
     second row contains at least one numeric cell."""
     try:
-        rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
-    except csv.Error:
+        # Only the first two rows matter; do not build the whole list.
+        rows = list(itertools.islice(
+            csv.reader(io.StringIO(text), delimiter=delimiter), 2
+        ))
+    except (csv.Error, ValueError):
         return False
-    rows = [r for r in rows if r][:2]
+    rows = [r for r in rows if r]
     if len(rows) < 2:
         return False
     first, second = rows[0], rows[1]

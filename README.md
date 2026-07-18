@@ -164,6 +164,44 @@ highlighted inside the guidance:
 - **`done`** finishes the list (a blank Enter does the same).
 - **`b`** removes the file you added last and asks for it again.
 
+### Safety guarantees
+
+These are enforced in code and covered by regression tests:
+
+- **Outputs never overwrite anything.** A final name is claimed atomically
+  (`O_CREAT|O_EXCL`); if the destination appeared after you configured the task -
+  even from another program or a second PDF Forge instance - the output is
+  written to the next free `_2`/`_3` name instead. Two concurrent PDF Forge
+  processes cannot select the same final path.
+- **Queued tasks hold no file handles.** An operation carries the source path,
+  page selection, captured password and a fingerprint - never an open document -
+  so a queued or discarded task never locks your file.
+- **A source that changed after configuration is refused.** If the file is
+  replaced or edited between configuring and running a task, the task fails with
+  a clear message and writes nothing.
+- **Generated-output tracking lives outside the checkout**, in your per-user
+  application-data directory, written atomically under a cross-process lock. If
+  it cannot be written, PDF Forge says so rather than silently pretending folder
+  tools will skip their own output.
+
+### Office validation and safety
+
+- A **password-protected** `.docx`/`.xlsx`/`.pptx` is an OLE2 container, not a
+  ZIP. PDF Forge recognises it (by parsing the OLE directory, not by scanning
+  bytes) and asks for the password instead of rejecting the file.
+- Packages are validated **per family**: a spreadsheet renamed `.docx`, a ZIP
+  containing only `[Content_Types].xml`, a traversal entry, or a ZIP bomb is
+  rejected with the exact reason, in both the manual and folder flows.
+- Conversion runs in a **fresh, hardened, isolated LibreOffice profile**:
+  macro execution is disabled, and external link/DDE/data updates are turned
+  off, so a converted document cannot run code or reach the network. The
+  profile is created per run, deleted afterwards, and never touches your own
+  LibreOffice settings. (Set `PDF_FORGE_HARDEN_PROFILE=0` only for debugging.)
+- **Inline images cannot be extracted.** An image drawn directly inside a page's
+  content stream has no separate image object, so "Extract images" reports how
+  many it skipped rather than quietly producing fewer files. Use **PDF to
+  images (PNG)** to capture those pages.
+
 ### Batch queue (run several tasks together)
 
 PDF Forge collects tasks and runs them **together at the end** rather than one at
@@ -407,7 +445,7 @@ How it works:
    the operation finishes, and cleared at startup if anything was left behind.
 4. Choose the candidate(s) to remove (e.g. `1`, or `1,3` for several).
 5. Review the summary and pick the output path (Enter accepts
-   `<source>_nowatermark.pdf` beside the source); the task is added to the queue.
+   `<source>_no_watermark.pdf` beside the source); the task is added to the queue.
 6. When the queue runs, the watermark's paint calls are removed from every page,
    the now-unused watermark image is physically dropped, duplicate objects are
    merged, and a new file is written. The original is never modified.
@@ -423,7 +461,7 @@ Main menu -> 5 (Remove image watermark)
   Watermark candidates:
     [1] 899x674px  on 231/231 pages (100%) - preview: candidate_1.png
   Watermark(s) to remove: 1
-  -> C:\books\volume_nowatermark.pdf
+  -> C:\books\volume_no_watermark.pdf
 ```
 
 **Limits:** this only removes image watermarks that repeat across pages. It

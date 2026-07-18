@@ -39,6 +39,9 @@ def operation_extract_pages() -> None:
 
     total_pages = reader.page_count
     protection = detect_protection(reader)
+    # Carry immutable state into the queue, never the open document (PF-004).
+    ref = capture_source(reader, source)
+    close_doc(reader)
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
     logger.info("Extract: source='%s' pages=%d", source, total_pages)
 
@@ -64,12 +67,12 @@ def operation_extract_pages() -> None:
     )
 
     if len(groups) == 1:
-        _extract_single_file(reader, source, total_pages, groups[0], protection)
+        _extract_single_file(ref, source, total_pages, groups[0], protection)
     else:
-        _extract_multiple_files(reader, source, total_pages, groups, protection)
+        _extract_multiple_files(ref, source, total_pages, groups, protection)
 
 
-def _extract_single_file(reader, source: Path, total_pages: int, group: "PageGroup",
+def _extract_single_file(ref, source: Path, total_pages: int, group: "PageGroup",
                          protection=None) -> None:
     """Write one combined output PDF from a single page group."""
     if group.duplicates_removed:
@@ -101,9 +104,11 @@ def _extract_single_file(reader, source: Path, total_pages: int, group: "PageGro
     pages_zero_based = [p - 1 for p in group.pages]
 
     def _run():
+        doc = None
         try:
+            doc = ref.open()
             written = write_pages_to_pdf(
-                reader,
+                doc,
                 pages_zero_based,
                 out_path,
                 progress=lambda c, t: _print_progress("Extracting", c, t),
@@ -113,6 +118,8 @@ def _extract_single_file(reader, source: Path, total_pages: int, group: "PageGro
             print_error(f"Failed to create the output PDF: {exc}")
             logger.exception("Extraction failed for output '%s'", out_path)
             return
+        finally:
+            close_doc(doc)
         print_success(f"Done. Wrote {written} page(s) to:\n  {out_path}")
         logger.info("Extract complete: output='%s' pages=%d", out_path, written)
 
@@ -122,7 +129,7 @@ def _extract_single_file(reader, source: Path, total_pages: int, group: "PageGro
     )
 
 
-def _extract_multiple_files(reader, source: Path, total_pages: int,
+def _extract_multiple_files(ref, source: Path, total_pages: int,
                             groups: "List[PageGroup]", protection=None) -> None:
     """Write one separate output PDF per page group (split by '|')."""
     if any(g.duplicates_removed for g in groups):
@@ -158,6 +165,18 @@ def _extract_multiple_files(reader, source: Path, total_pages: int,
             logger.error("Failed to create output dir '%s': %s", out_dir, exc)
             return
 
+        try:
+            doc = ref.open()
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(str(exc))
+            logger.error("Extract (multi) could not reopen '%s': %s", source, exc)
+            return
+        try:
+            _write_extract_groups(doc, groups, out_dir, source, protection)
+        finally:
+            close_doc(doc)
+
+    def _write_extract_groups(doc, groups, out_dir, source, protection):
         created_files: List[Path] = []
         total_written = 0
         for index, group in enumerate(groups, start=1):
@@ -169,7 +188,7 @@ def _extract_multiple_files(reader, source: Path, total_pages: int,
             pages_zero_based = [p - 1 for p in group.pages]
             _print_progress("Writing files", index, len(groups))
             try:
-                written = write_pages_to_pdf(reader, pages_zero_based, out_path,
+                written = write_pages_to_pdf(doc, pages_zero_based, out_path,
                                              protection=protection)
             except Exception as exc:  # noqa: BLE001
                 sys.stdout.write("\n")
@@ -220,6 +239,9 @@ def operation_split_chunks() -> None:
 
     total_pages = reader.page_count
     protection = detect_protection(reader)
+    # Immutable state only: the queue must not hold an open document (PF-004).
+    ref = capture_source(reader, source)
+    close_doc(reader)
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
     logger.info("Split: source='%s' pages=%d", source, total_pages)
 
@@ -340,6 +362,18 @@ def operation_split_chunks() -> None:
             logger.error("Failed to create output dir '%s': %s", out_dir, exc)
             return
 
+        try:
+            doc = ref.open()
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(str(exc))
+            logger.error("Split could not reopen '%s': %s", source, exc)
+            return
+        try:
+            _write_chunks(doc)
+        finally:
+            close_doc(doc)
+
+    def _write_chunks(doc):
         created_files: List[Path] = []
         total_written = 0
         for index, (start, end) in enumerate(chunks, start=1):
@@ -436,6 +470,8 @@ def operation_delete_pages_single() -> None:
 
     total_pages = reader.page_count
     protection = detect_protection(reader)
+    ref = capture_source(reader, source)
+    close_doc(reader)
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
 
     # Ask for the pages, rejecting any that do not exist in this document.
@@ -486,9 +522,11 @@ def operation_delete_pages_single() -> None:
             "Delete-pages start: source='%s' delete=%s keep=%d output='%s'",
             source, selection_text, len(kept), out_path,
         )
+        doc = None
         try:
+            doc = ref.open()
             written = write_pages_to_pdf(
-                reader, kept, out_path,
+                doc, kept, out_path,
                 progress=lambda c, t: _print_progress("Writing pages", c, t),
                 protection=protection,
             )
@@ -496,6 +534,8 @@ def operation_delete_pages_single() -> None:
             print_error(f"Failed to create the output PDF: {exc}")
             logger.exception("Delete-pages failed for output '%s'", out_path)
             return
+        finally:
+            close_doc(doc)
         print_success(
             f"Done. Deleted {len(present)} page(s); kept {written}:\n  {out_path}"
         )
@@ -561,61 +601,81 @@ def operation_delete_pages_batch() -> None:
                 failed += 1
                 continue
 
-            total = reader.page_count
-            present, missing, kept = compute_deletion(total, requested)
-
-            if not present:
-                print_note(
-                    f"  Note: none of the requested pages exist here "
-                    f"(has {total} page(s)); skipped."
-                )
-                logger.info(
-                    "Delete-pages batch: '%s' has no requested pages; skipped.", src
-                )
-                skipped += 1
-                continue
-            if not kept:
-                print_note(
-                    f"  Note: the request covers all {total} page(s); skipped to keep "
-                    "a valid PDF."
-                )
-                logger.info("Delete-pages batch: '%s' would be emptied; skipped.", src)
-                skipped += 1
-                continue
-
-            out_name = build_delete_output_name(src.stem, summarize_ranges(present))
-            out_path = unique_file_path(src.parent / out_name)
-            if resolves_to_same_file(out_path, src):
-                out_path = unique_file_path(src.parent / f"{src.stem}_pages_deleted.pdf")
-            # Per-file policy, applied without prompting mid-batch: a
-            # password-protected source keeps its password; an owner-restricted
-            # one cannot be reproduced, so its output is written unprotected and
-            # the file is reported below.
-            file_policy = detect_protection(reader)
-            if file_policy.kind == "restricted":
-                file_policy = None
-                unprotected_notes.append(src.name)
+            # Every path below - skip, error, write failure, success, or a
+            # failure while reporting - must release this handle exactly once,
+            # so the source stays renameable/deletable straight afterwards.
             try:
-                written = write_pages_to_pdf(reader, kept, out_path,
-                                             protection=file_policy)
-            except Exception as exc:  # noqa: BLE001 - keep the batch going
-                print_error(f"  Failed: {exc}")
-                logger.exception("Delete-pages batch write failed for '%s'", src)
-                failed += 1
-                continue
+                outcome = _delete_one(src, reader)
+            finally:
+                close_doc(reader)
+            processed += outcome["processed"]
+            skipped += outcome["skipped"]
+            failed += outcome["failed"]
+            total_deleted += outcome["deleted"]
+            if outcome["unprotected"]:
+                unprotected_notes.append(src.name)
+            continue
 
-            total_deleted += len(present)
-            processed += 1
-            print_success(
-                f"  -> deleted {len(present)} page(s) [{summarize_ranges(present)}]; "
-                f"kept {written} -> {out_path.name}"
+        _report_batch(processed, skipped, failed, total_deleted, unprotected_notes)
+
+    def _delete_one(src, reader) -> dict:
+        """Handle one already-opened batch file. Never closes the document."""
+        result = {"processed": 0, "skipped": 0, "failed": 0, "deleted": 0,
+                  "unprotected": False}
+        total = reader.page_count
+        present, missing, kept = compute_deletion(total, requested)
+
+        if not present:
+            print_note(
+                f"  Note: none of the requested pages exist here "
+                f"(has {total} page(s)); skipped."
             )
-            if missing:
-                print_note(
-                    f"  Note: pages not in this file were skipped: "
-                    f"{summarize_ranges(missing)} (has {total} page(s))."
-                )
+            logger.info(
+                "Delete-pages batch: '%s' has no requested pages; skipped.", src
+            )
+            result["skipped"] = 1
+            return result
+        if not kept:
+            print_note(
+                f"  Note: the request covers all {total} page(s); skipped to keep "
+                "a valid PDF."
+            )
+            logger.info("Delete-pages batch: '%s' would be emptied; skipped.", src)
+            result["skipped"] = 1
+            return result
 
+        out_name = build_delete_output_name(src.stem, summarize_ranges(present))
+        out_path = unique_file_path(src.parent / out_name)
+        if resolves_to_same_file(out_path, src):
+            out_path = unique_file_path(src.parent / f"{src.stem}_pages_deleted.pdf")
+        # Per-file policy decided by the batch preflight, never prompted here.
+        file_policy = detect_protection(reader)
+        if file_policy.kind == "restricted":
+            file_policy = None
+            result["unprotected"] = True
+        try:
+            written = write_pages_to_pdf(reader, kept, out_path,
+                                         protection=file_policy)
+        except Exception as exc:  # noqa: BLE001 - keep the batch going
+            print_error(f"  Failed: {exc}")
+            logger.exception("Delete-pages batch write failed for '%s'", src)
+            result["failed"] = 1
+            return result
+
+        result["deleted"] = len(present)
+        result["processed"] = 1
+        print_success(
+            f"  -> deleted {len(present)} page(s) [{summarize_ranges(present)}]; "
+            f"kept {written} -> {out_path.name}"
+        )
+        if missing:
+            print_note(
+                f"  Note: pages not in this file were skipped: "
+                f"{summarize_ranges(missing)} (has {total} page(s))."
+            )
+        return result
+
+    def _report_batch(processed, skipped, failed, total_deleted, unprotected_notes):
         print_success(
             f"Done. Processed {processed} file(s), skipped {skipped}, failed {failed}; "
             f"{total_deleted} page(s) deleted in total."

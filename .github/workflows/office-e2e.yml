@@ -1,0 +1,106 @@
+name: Office conversion E2E (Windows)
+
+# Real end-to-end coverage for main-menu item 11: this job provisions the pinned
+# project-local LibreOffice runtime with the *production* code, starts the real
+# headless conversion server, and converts real fixtures.
+#
+# It is deliberately separate from the fast unit/regression matrix because it
+# downloads ~360 MB and runs a native process; it is required for release
+# branches and runs on demand plus on a schedule so regressions surface.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1'        # Mondays 03:00 UTC
+  push:
+    branches: [main, 'fix/**']
+    paths:
+      - 'pdf_forge/office*.py'
+      - 'pdf_forge/ops_office.py'
+      - 'office_runtime_meta.json'
+      - 'tests/test_office_e2e.py'
+      - '.github/workflows/office-e2e.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: office-e2e-${{ github.ref }}
+  # Never cancel a run in flight: this job provisions a ~360 MB runtime and takes
+  # minutes, so a later push would otherwise destroy the only real evidence of
+  # whether conversion works. Queue behind the running one instead.
+  cancel-in-progress: false
+
+jobs:
+  convert:
+    name: Real LibreOffice conversion (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Cache the project-local LibreOffice runtime
+        id: lo-cache
+        uses: actions/cache@v4
+        with:
+          path: .tools/libreoffice
+          # The pinned version lives in tracked metadata, so the cache key
+          # changes exactly when the pin changes.
+          key: libreoffice-${{ runner.os }}-${{ hashFiles('office_runtime_meta.json') }}
+
+      - name: Provision the runtime with production code
+        if: steps.lo-cache.outputs.cache-hit != 'true'
+        run: python -m pdf_forge --setup-office
+
+      - name: Diagnostics (which runtime is actually used)
+        run: python -m pdf_forge --diagnose
+
+      - name: Runtime must report ready
+        shell: pwsh
+        run: |
+          $status = python -c "import json, pdf_forge.office_runtime as o; print(json.dumps(o.runtime_status()))"
+          Write-Host $status
+          if (-not ($status | ConvertFrom-Json).ready) {
+            throw 'The conversion runtime does not report ready.'
+          }
+
+      - name: Real conversion end-to-end tests
+        env:
+          PDF_FORGE_E2E: '1'
+        run: python -m pytest tests/test_office_e2e.py -v
+
+      - name: No task-owned process or profile may survive
+        shell: pwsh
+        run: |
+          $soffice = Get-Process soffice, soffice.bin -ErrorAction SilentlyContinue
+          if ($soffice) {
+            $soffice | Format-Table -AutoSize
+            throw "$($soffice.Count) LibreOffice process(es) survived the run."
+          }
+          $profiles = Get-ChildItem $env:TEMP -Filter 'pdfforge_loprofile_*' -ErrorAction SilentlyContinue
+          if ($profiles) {
+            $profiles | Format-Table -AutoSize
+            throw "$($profiles.Count) temporary LibreOffice profile(s) leaked."
+          }
+          Write-Host 'No stray processes or profiles.'
+
+      - name: Repository must be clean
+        shell: bash
+        run: |
+          if [ -n "$(git status --porcelain -- . ':!.tools')" ]; then
+            echo "::error::The E2E run modified the checkout:"
+            git status --porcelain -- . ':!.tools'
+            exit 1
+          fi
