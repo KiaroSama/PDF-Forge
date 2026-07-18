@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.0.1] - 2026-07-19
 
 ### Fixed
+- **Provisioning works on a machine with an idle installer service.**
+  msiserver is demand-start, so "stopped" is its normal state and Windows
+  starts it for msiexec; only a *disabled* service is now reported as a
+  blocker. PDF Forge still never changes service state.
 - **Piped input is read as UTF-8**, so a path containing non-Latin
   characters is no longer mangled by the Windows ANSI code page and
   reported as missing.

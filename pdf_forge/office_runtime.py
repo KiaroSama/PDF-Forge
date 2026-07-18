@@ -1062,26 +1062,29 @@ def _download(url: str, dest: Path, download=None) -> None:
 
 
 def _ensure_installer_service() -> None:
-    """Check the Windows Installer service WITHOUT changing its state.
+    """Refuse to run msiexec only when the installer service is DISABLED.
 
-    Provisioning documents that it makes no system changes, so it must not start
-    a stopped service behind the user's back (PF-017): that alters machine state
-    outside the project folder and may be blocked by policy. A stopped service
-    stops provisioning with an actionable message instead - and never silently
-    hangs, which is what msiexec would do on its own.
+    PDF Forge never changes Windows service state (PF-017). It does not need to:
+    msiserver ships as a *demand-start* service, so being stopped is its normal
+    idle state and the Service Control Manager starts it on demand when msiexec
+    runs. Treating "stopped" as a blocker would reject the common case.
+
+    A service configured as DISABLED is different: the SCM will not start it, so
+    msiexec fails with an obscure error. Report that up front instead, and leave
+    the fix to the user.
     """
     try:
-        query = subprocess.run(["sc", "query", "msiserver"], capture_output=True,
-                               text=True, timeout=30)
+        config = subprocess.run(["sc", "qc", "msiserver"], capture_output=True,
+                                text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return  # Cannot query; let msiexec try (bounded by its own timeout).
-    state = query.stdout.upper()
-    if "RUNNING" in state or "STATE" not in state:
+    if "DISABLED" not in config.stdout.upper():
         return
     raise OfficeRuntimeError(
-        "The Windows Installer service (msiserver) is stopped, and PDF Forge "
-        "does not change Windows service state. Start it yourself and run "
-        "--setup-office again:  net start msiserver  (elevated). "
+        "The Windows Installer service (msiserver) is disabled, so Windows "
+        "cannot run the extraction. PDF Forge does not change Windows service "
+        "state; re-enable it yourself and run --setup-office again:\n"
+        "    sc config msiserver start= demand        (elevated)\n"
         "Nothing was downloaded or installed."
     )
 

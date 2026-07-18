@@ -207,38 +207,54 @@ def test_provisioning_never_starts_a_service():
     )
 
 
-def test_stopped_service_is_reported_not_started(monkeypatch):
+def _fake_sc(monkeypatch, stdout):
+    """Stand in for ``sc`` and record any attempt to change service state."""
     import subprocess as sp
 
     class Result:
-        stdout = "SERVICE_NAME: msiserver\n        STATE : 1  STOPPED"
-        stderr = ""
-        returncode = 0
+        pass
 
-    started = {"called": False}
+    Result.stdout, Result.stderr, Result.returncode = stdout, "", 0
+    touched = {"state": False}
 
     def fake_run(cmd, *a, **k):
-        if cmd[:1] == ["net"]:
-            started["called"] = True
+        if cmd[:1] == ["net"] or (len(cmd) > 1 and cmd[1] in {"start", "config"}):
+            touched["state"] = True
         return Result()
 
     monkeypatch.setattr(sp, "run", fake_run)
-    with pytest.raises(ort.OfficeRuntimeError) as excinfo:
-        ort._ensure_installer_service()
-    assert "does not change Windows service state" in str(excinfo.value)
-    assert started["called"] is False, "the service must not be started"
+    return touched
+
+
+def test_a_stopped_demand_start_service_is_not_a_blocker(monkeypatch):
+    """msiserver is demand-start: stopped is its normal idle state.
+
+    Regression - treating "stopped" as fatal rejected the common case and broke
+    provisioning on a clean machine, where the SCM starts the service for
+    msiexec on demand.
+    """
+    touched = _fake_sc(monkeypatch, (
+        "SERVICE_NAME: msiserver\n"
+        "        START_TYPE  : 3   DEMAND_START\n"
+        "        STATE       : 1   STOPPED"
+    ))
+    ort._ensure_installer_service()   # must not raise
+    assert touched["state"] is False, "the service must not be started"
 
 
 def test_running_service_passes(monkeypatch):
-    import subprocess as sp
-
-    class Result:
-        stdout = "SERVICE_NAME: msiserver\n        STATE : 4  RUNNING"
-        stderr = ""
-        returncode = 0
-
-    monkeypatch.setattr(sp, "run", lambda *a, **k: Result())
+    _fake_sc(monkeypatch, "SERVICE_NAME: msiserver\n        STATE : 4  RUNNING")
     ort._ensure_installer_service()   # must not raise
+
+
+def test_disabled_service_is_reported_not_enabled(monkeypatch):
+    touched = _fake_sc(monkeypatch, (
+        "SERVICE_NAME: msiserver\n        START_TYPE  : 4   DISABLED"
+    ))
+    with pytest.raises(ort.OfficeRuntimeError) as excinfo:
+        ort._ensure_installer_service()
+    assert "does not change Windows service state" in str(excinfo.value)
+    assert touched["state"] is False, "the service must not be re-enabled"
 
 
 # --------------------------------------------------------------------------- #
