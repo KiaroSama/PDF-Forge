@@ -41,7 +41,7 @@ __all__ = [
     'runtime_status', 'random_localhost_port',
     'ConversionServer', 'convert_to_pdf', 'provision_runtime', 'clean_runtime',
     'start_conversion_server', 'is_bridge_lost',
-    'PASSWORD_SENTINEL', 'BRIDGE_LOST_SENTINEL', 'warm_up',
+    'PASSWORD_SENTINEL', 'BRIDGE_LOST_SENTINEL', 'warm_up', 'save_with_password',
 ]
 
 
@@ -272,6 +272,79 @@ def _profile_argument(profile_dir: Path) -> str:
     return str(profile_dir.resolve())
 
 
+def _xcu_prop(path: str, name: str, value_type: str, value: str) -> str:
+    return (
+        f'  <item oor:path="{path}">'
+        f'<prop oor:name="{name}" oor:op="fuse" oor:type="xs:{value_type}">'
+        f"<value>{value}</value></prop></item>\n"
+    )
+
+
+def _harden_profile(profile_dir: Path) -> Path:
+    """Write a locked-down LibreOffice profile before the server starts.
+
+    Enforced in the profile itself rather than only claimed in documentation
+    (PF-023), because the converter API does not expose per-load properties:
+
+      * ``MacroSecurityLevel = 3`` (very high) and macro execution disabled, so
+        a macro inside a converted document is never run;
+      * link/update modes set to 0, so a document cannot refresh external links,
+        DDE, or data sources - i.e. cannot reach the network - while converting;
+      * document recovery and the first-start wizard disabled, so conversion
+        never blocks on a dialog.
+
+    The profile is created fresh per run and removed on teardown, so these
+    settings can never leak into a user's own LibreOffice configuration.
+    """
+    registry = profile_dir / "user"
+    registry.mkdir(parents=True, exist_ok=True)
+    (registry / "registrymodifications.xcu").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<oor:items xmlns:oor="http://openoffice.org/2001/registry" '
+        'xmlns:xs="http://www.w3.org/2001/XMLSchema">\n'
+        + _xcu_prop("/org.openoffice.Office.Common/Security/Scripting",
+                    "MacroSecurityLevel", "int", "3")
+        + _xcu_prop("/org.openoffice.Office.Common/Security/Scripting",
+                    "DisableMacrosExecution", "boolean", "true")
+        + _xcu_prop("/org.openoffice.Office.Writer/Content/Update",
+                    "Link", "int", "0")
+        + _xcu_prop("/org.openoffice.Office.Calc/Content/Update",
+                    "Link", "int", "0")
+        + _xcu_prop("/org.openoffice.Office.Common/Save/Document",
+                    "CreateBackup", "boolean", "false")
+        + _xcu_prop("/org.openoffice.Office.Recovery/RecoveryInfo",
+                    "Enabled", "boolean", "false")
+        + _xcu_prop("/org.openoffice.Setup/Office",
+                    "FirstStartWizardCompleted", "boolean", "true")
+        + "</oor:items>\n",
+        encoding="utf-8",
+    )
+    return profile_dir
+
+
+def save_with_password(server, src: Path, out: Path, password: str) -> bool:
+    """Save ``src`` as a password-protected copy using LibreOffice itself.
+
+    Used to build encrypted fixtures for the end-to-end tests without needing
+    Microsoft Office. Returns ``False`` when this build cannot do it, so callers
+    skip rather than fail. The password is passed in memory only.
+    """
+    from unoserver.client import UnoClient
+
+    try:
+        client = UnoClient(server="127.0.0.1", port=str(server.port))
+        client.convert(
+            inpath=str(src),
+            outpath=str(out),
+            convert_to="docx",
+            filter_options=[f"EncryptFile={password}"],
+        )
+        return Path(out).exists() and Path(out).stat().st_size > 0
+    except Exception as exc:  # noqa: BLE001 - fixture creation is best effort
+        logger.info("Could not create an encrypted fixture: %s", exc)
+        return False
+
+
 def _terminate(process: subprocess.Popen) -> None:
     """Terminate a task-owned process **and its children**, nothing else.
 
@@ -329,6 +402,7 @@ def start_conversion_server(
     port = random_localhost_port()
     uno_port = random_localhost_port()
     profile_dir = Path(tempfile.mkdtemp(prefix="pdfforge_loprofile_"))
+    _harden_profile(profile_dir)
 
     env = dict(os.environ)
     # Let LibreOffice's bundled Python import the venv-installed unoserver.

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .constants import *  # noqa: F401,F403
+from .safeio import promote_atomically
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
@@ -91,8 +92,7 @@ def save_encrypted_pdf(doc, out_path: Path, user_pw: Optional[str] = None,
     try:
         doc.save(str(tmp_path), **save_kwargs)
         _validate_encrypted(tmp_path, total, user_pw or owner_pw)
-        os.replace(tmp_path, out_path)
-        record_generated_output(out_path)
+        out_path = promote_atomically(tmp_path, out_path)
     except Exception:
         try:
             if tmp_path.exists():

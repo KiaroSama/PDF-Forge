@@ -84,13 +84,16 @@ def label_of(prompt: str) -> str:
     return match.group(1) if match else ""
 
 
-def zip_ooxml(path: Path, inner="word/document.xml") -> Path:
-    import zipfile
+def zip_ooxml(path: Path, family="word") -> Path:
+    """A structurally valid OOXML package (real content types + main part).
 
-    with zipfile.ZipFile(path, "w") as zf:
-        zf.writestr("[Content_Types].xml", "<Types/>")
-        zf.writestr(inner, "<document/>")
-    return path
+    The previous helper wrote a ZIP holding only a stub ``[Content_Types].xml``,
+    which the hardened validator correctly rejects; tests must exercise real
+    packages so they cannot pass against a weak implementation.
+    """
+    from test_office_validation import make_ooxml
+
+    return make_ooxml(path, family)
 
 
 # --------------------------------------------------------------------------- #
@@ -802,6 +805,19 @@ def test_office_family_classification():
 def test_ooxml_validation_and_renamed_binaries(tmp_path):
     assert app.validate_office_file(zip_ooxml(tmp_path / "good.docx"))[0]
 
+    # A ZIP carrying only [Content_Types].xml is not a real package.
+    import zipfile
+
+    stub = tmp_path / "stub.docx"
+    with zipfile.ZipFile(stub, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+    assert not app.validate_office_file(stub)[0]
+
+    # A spreadsheet renamed to .docx must be rejected as the wrong family.
+    wrong_family = zip_ooxml(tmp_path / "sheet.docx", family="excel")
+    ok, reason = app.validate_office_file(wrong_family)
+    assert not ok and "excel" in reason.lower()
+
     fake = tmp_path / "fake.docx"
     fake.write_bytes(b"not a zip at all")
     ok, reason = app.validate_office_file(fake)
@@ -1112,13 +1128,25 @@ def test_recording_is_idempotent(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_encrypted_office_detection_ooxml(tmp_path):
-    """A password-to-open OOXML file is an OLE2 container, not a ZIP."""
-    encrypted = tmp_path / "locked.docx"
-    encrypted.write_bytes(
+    """A password-to-open OOXML file is an OLE2 container, not a ZIP.
+
+    Detection parses the OLE directory, so a real container is required: loose
+    marker bytes must NOT be enough (that was a false-positive source).
+    """
+    from test_office_validation import make_encrypted_ooxml
+
+    encrypted = make_encrypted_ooxml(tmp_path / "locked.docx")
+    assert app.is_encrypted_office_file(encrypted)
+    # Validation accepts it so the flow can ask for the password (PF-002).
+    assert app.validate_office_file(encrypted)[0]
+
+    # Marker bytes alone are not an encrypted package.
+    bogus = tmp_path / "bogus.docx"
+    bogus.write_bytes(
         b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64
         + "EncryptedPackage".encode("utf-16-le") + b"\x00" * 64
     )
-    assert app.is_encrypted_office_file(encrypted)
+    assert not app.is_encrypted_office_file(bogus)
 
 
 def test_encrypted_office_detection_odf(tmp_path):

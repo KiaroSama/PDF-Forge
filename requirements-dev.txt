@@ -1,8 +1,17 @@
 # PDF Forge development dependencies.
 # Install with: .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+#
+# Pinned exactly so CI and local development resolve identical versions
+# (an unpinned test runner silently changes behaviour between machines).
 -r requirements.txt
-pytest
+
+pytest==8.4.2
+pytest-cov==7.1.0
 
 # Test-only: an independent PDF reader used to cross-verify PyMuPDF output
 # (page counts, encryption, extracted text). Not a runtime dependency.
 pypdf==6.14.2
+
+# Static analysis gates.
+ruff==0.15.22
+mypy==2.3.0

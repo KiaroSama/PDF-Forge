@@ -7,7 +7,7 @@ from typing import Optional
 
 from .constants import *  # noqa: F401,F403
 
-__all__ = ['Color', 'enable_ansi_colors', 'colorize', 'print_success', 'print_warning', 'print_error', 'print_heading', 'print_info', 'print_note', 'print_kv', 'back_text', 'reset_questions', 'set_operation_prompt', 'question_prompt', 'guidance_text', 'print_banner', '_print_progress']
+__all__ = ['Color', 'enable_ansi_colors', 'colorize', 'print_success', 'print_warning', 'print_error', 'print_heading', 'print_info', 'print_note', 'print_kv', 'back_text', 'reset_questions', 'set_operation_prompt', 'question_prompt', 'Prompt', 'guidance_text', 'print_banner', '_print_progress']
 
 class Color:
     """ANSI color codes used for readable terminal output.
@@ -210,12 +210,40 @@ def _next_question_label() -> str:
     return str(_question_no)
 
 
+class Prompt(str):
+    """A prompt whose visible number is refreshed every time it is displayed.
+
+    Operations build a prompt once and then re-use it inside a retry loop. With
+    a plain string the label is frozen at construction, so after a *nested*
+    prompt (custom DPI, a yes/no confirmation, ...) advanced the counter, the
+    outer prompt would redisplay a stale, already-used number - the visible
+    sequence then repeats or moves backward.
+
+    This behaves exactly like the string it renders to (so existing callers and
+    assertions are unaffected), but :meth:`render` - used by the single input
+    helper - allocates a fresh number on every display after the first.
+    """
+
+    def __new__(cls, build):
+        obj = super().__new__(cls, build(_next_question_label()))
+        obj._build = build
+        obj._first_display = True
+        return obj
+
+    def render(self) -> str:
+        """Return the text to display now, numbering it at display time."""
+        if self._first_display:
+            self._first_display = False
+            return str(self)
+        return self._build(_next_question_label())
+
+
 def question_prompt(
     title: str,
     details: Optional[str] = None,
     default: Optional[str] = None,
     back: str = "back=0, quit=exit",
-) -> str:
+) -> "Prompt":
     """Build a numbered prompt string ending with ': '.
 
     Format: '\\n{prefix}-{n}. {title} ({details}) [{default}] {back}: '
@@ -229,20 +257,22 @@ def question_prompt(
     Path prompts pass their guidance through :func:`guidance_text`, which picks
     out the typeable keywords inside this hint-coloured detail string.
     """
-    label = _next_question_label()
-    text = "\n" + colorize(f"{label}. {title}", Color.BOLD)
-    if details:
-        text += (
-            " "
-            + colorize("(", Color.WHITE)
-            + colorize(details, Color.HINT_YELLOW)
-            + colorize(")", Color.WHITE)
-        )
-    if default is not None:
-        text += " " + colorize(f"[{default}]", Color.GREEN)
-    if back:
-        text += " " + back_text(back)
-    return text + colorize(": ", Color.WHITE)
+    def _build(label: str) -> str:
+        text = "\n" + colorize(f"{label}. {title}", Color.BOLD)
+        if details:
+            text += (
+                " "
+                + colorize("(", Color.WHITE)
+                + colorize(details, Color.HINT_YELLOW)
+                + colorize(")", Color.WHITE)
+            )
+        if default is not None:
+            text += " " + colorize(f"[{default}]", Color.GREEN)
+        if back:
+            text += " " + back_text(back)
+        return text + colorize(": ", Color.WHITE)
+
+    return Prompt(_build)
 
 
 def print_banner(text: str) -> None:

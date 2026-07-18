@@ -9,7 +9,6 @@ generated small PDFs only; they never touch real user files.
 """
 
 import hashlib
-import os
 import sys
 from pathlib import Path
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from .constants import *  # noqa: F401,F403
+from .safeio import promote_atomically
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
@@ -85,8 +86,7 @@ def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
                      **protect_kwargs)
             _validate_written_pdf(tmp_path, expected_pages=page_count,
                                   password=policy.password if protect_kwargs else None)
-            os.replace(tmp_path, out_path)
-            record_generated_output(out_path)
+            out_path = promote_atomically(tmp_path, out_path)
         except Exception:
             try:
                 if tmp_path.exists():

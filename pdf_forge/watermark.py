@@ -5,11 +5,12 @@ import re
 import tempfile
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set
 
 from .constants import *  # noqa: F401,F403
+from .safeio import promote_atomically
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
@@ -299,8 +300,7 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
                  **protect_kwargs)
         _validate_written_pdf(tmp_path, expected_pages=total,
                               password=policy.password if protect_kwargs else None)
-        os.replace(tmp_path, out_path)
-        record_generated_output(out_path)
+        out_path = promote_atomically(tmp_path, out_path)
     except Exception:
         try:
             if tmp_path.exists():

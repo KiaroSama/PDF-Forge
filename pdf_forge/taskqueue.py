@@ -61,22 +61,28 @@ def _run_task_queue() -> None:
     count = len(_task_queue)
     print_heading(f"\nRunning {count} queued task(s)...")
     logger.info("Running task queue: %d task(s).", count)
-    for index, task in enumerate(_task_queue, start=1):
-        print(colorize(
-            f"\n=== Task {index}/{count}: {task.summary} ===",
-            Color.BOLD + Color.LIGHT_BLUE,
-        ))
-        try:
-            task.run()
-        except KeyboardInterrupt:
-            print_warning("\nTask interrupted; continuing with the next one.")
-            logger.warning("Queued task %d interrupted.", index)
-        except Exception as exc:  # noqa: BLE001 - one task must not sink the batch
-            print_error(f"Task {index} failed: {exc}")
-            logger.exception("Queued task %d failed.", index)
-    print_success(f"\nAll {count} queued task(s) processed.")
-    logger.info("Task queue finished: %d task(s).", count)
-    _discard_queue()
+    # Cleanup lives in an outer `finally` so the queue and its path reservations
+    # are always released - including on SystemExit, GeneratorExit, or any other
+    # BaseException that is not caught per task. The original exception keeps
+    # propagating; cleanup never swallows or replaces it.
+    try:
+        for index, task in enumerate(_task_queue, start=1):
+            print(colorize(
+                f"\n=== Task {index}/{count}: {task.summary} ===",
+                Color.BOLD + Color.LIGHT_BLUE,
+            ))
+            try:
+                task.run()
+            except KeyboardInterrupt:
+                print_warning("\nTask interrupted; continuing with the next one.")
+                logger.warning("Queued task %d interrupted.", index)
+            except Exception as exc:  # noqa: BLE001 - one task must not sink the batch
+                print_error(f"Task {index} failed: {exc}")
+                logger.exception("Queued task %d failed.", index)
+        print_success(f"\nAll {count} queued task(s) processed.")
+        logger.info("Task queue finished: %d task(s).", count)
+    finally:
+        _discard_queue()
 
 
 def finalize_queue() -> bool:
@@ -95,19 +101,23 @@ def finalize_queue() -> bool:
         print_kv(f"Task {index}", task.summary, Color.AQUA)
 
     try:
-        start = ask_yes_no("\nStart now?", default_yes=True)
-    except _ExitRequested:
-        print_warning("Exiting; the queued task(s) were discarded.")
-        logger.info("Queue discarded via exit/quit at the Start confirmation.")
-        _discard_queue()
-        return True
+        try:
+            start = ask_yes_no("\nStart now?", default_yes=True)
+        except _ExitRequested:
+            print_warning("Exiting; the queued task(s) were discarded.")
+            logger.info("Queue discarded via exit/quit at the Start confirmation.")
+            return True
 
-    if start:
-        _run_task_queue()
-    else:
-        print_warning("Cancelled. Discarded the queued task(s).")
-        logger.info(
-            "Queue discarded at start confirmation (%d task(s)).", len(_task_queue)
-        )
+        if start:
+            _run_task_queue()
+        else:
+            print_warning("Cancelled. Discarded the queued task(s).")
+            logger.info(
+                "Queue discarded at start confirmation (%d task(s)).",
+                len(_task_queue),
+            )
+        return False
+    finally:
+        # Whatever happened - ran, cancelled, exited, or an unexpected
+        # BaseException - the queue and its reservations are released here.
         _discard_queue()
-    return False

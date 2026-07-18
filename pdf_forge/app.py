@@ -143,6 +143,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logger.critical("PDF backend import failed: %s", exc)
         return 2
 
+    # Bound before the protected block: a BaseException raised before the
+    # assignment (SystemExit, GeneratorExit, ...) would otherwise make the
+    # `finally` fail with UnboundLocalError and mask the real cause.
+    exit_code = 1
     try:
         exit_code = main_menu()
     except KeyboardInterrupt:
@@ -154,7 +158,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logger.exception("Unhandled top-level exception.")
         exit_code = 1
     finally:
-        logger.info("=== %s shutting down (exit code %s) ===", APP_NAME, exit_code)
-        logging.shutdown()
+        # Shutdown logging must never replace the primary exception, so every
+        # step here is individually guarded.
+        try:
+            logger.info(
+                "=== %s shutting down (exit code %s) ===", APP_NAME, exit_code
+            )
+        except Exception:  # noqa: BLE001 - logging must not mask the outcome
+            pass
+        try:
+            logging.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
 
     return exit_code

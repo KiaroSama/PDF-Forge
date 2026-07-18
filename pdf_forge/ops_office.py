@@ -8,9 +8,9 @@ in-memory UNO password API with unlimited retries.
 """
 from __future__ import annotations
 
-import os
 import shutil
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
@@ -232,29 +232,64 @@ def _validate_pdf_output(path: Path) -> None:
         check.close()
 
 
-def _build_jobs(files):
+@dataclass
+class JobPlan:
+    """Result of configuring a conversion batch.
+
+    ``accepted`` are runnable jobs; ``skipped`` are ``(path, reason)`` pairs
+    shown to the user *before* anything is queued.
+    """
+
+    accepted: List[dict] = field(default_factory=list)
+    skipped: List[tuple] = field(default_factory=list)
+
+    def __iter__(self):
+        # Iterating a plan yields its runnable jobs, so callers that just want
+        # the work list stay simple.
+        return iter(self.accepted)
+
+    def __len__(self) -> int:
+        return len(self.accepted)
+
+
+def _build_jobs(files) -> JobPlan:
     """Configure per-file conversion jobs: validate, sniff CSV, reserve output.
 
-    Returns a list of dicts ``{src, family, out, csv_filter}`` (output paths are
-    reserved through the central queue reservation system so nothing collides).
+    This is the single validation authority for **both** the manual picker and
+    folder discovery (PF-020), so the two flows can never disagree about which
+    files are convertible. A file that fails structural validation is skipped
+    with an exact reason instead of being handed to LibreOffice.
+
+    Output paths are reserved through the central queue reservation system so
+    nothing collides.
     """
-    jobs = []
+    plan = JobPlan()
     for src in files:
         fam = classify_office_file(src)
+        if fam is None:
+            plan.skipped.append((src, f"unsupported type '{src.suffix}'"))
+            continue
+
+        ok, reason = validate_office_file(src)
+        if not ok:
+            plan.skipped.append((src, reason))
+            continue
+
         csv_dialect = None
         if fam == "csv":
             try:
                 dialect = detect_csv_dialect(src)
             except OSError as exc:
-                print_error(f"Skipped '{src.name}': cannot read CSV ({exc}).")
+                plan.skipped.append((src, f"cannot read CSV ({exc})"))
                 continue
             if dialect.confidence == "low":
                 dialect = _prompt_csv_correction(src, dialect)
             csv_dialect = dialect
+
         out = reserve_unique_file(src.with_suffix(".pdf"))
-        jobs.append({"src": src, "family": fam, "out": out,
-                     "csv_dialect": csv_dialect})
-    return jobs
+        plan.accepted.append({"src": src, "family": fam, "out": out,
+                              "csv_dialect": csv_dialect})
+    return plan
 
 
 def _prompt_convert_password(filename: str, previous_failed: bool) -> Optional[str]:
@@ -323,7 +358,7 @@ def _apply_output_protection(out_path: Path, mode: str, password: str) -> None:
                            permissions=all_permissions())
     finally:
         close_doc(doc)
-    os.replace(tmp, out_path)
+    promote_atomically(tmp, out_path)
     # Deliberately NOT recorded in the generated-output manifest: that manifest
     # stops a PDF folder tool from re-processing its *own* PDF output. A PDF
     # converted from a document is a brand-new source the user will usually want
@@ -391,6 +426,9 @@ def _run_conversion(jobs, source_families) -> None:
 
 
 def _convert_with_restart(server, job, attempts: int = 3):
+    # `attempts` counts total tries; `restarts` counts how many times the
+    # LibreOffice runtime had to be replaced. They are reported separately so a
+    # message can never overstate what actually happened (PF-039).
     """Convert one job, restarting the runtime if LibreOffice dies.
 
     A crashed LibreOffice leaves a suspect user profile, so the server is
@@ -398,6 +436,7 @@ def _convert_with_restart(server, job, attempts: int = 3):
     reused. Returns ``(result, server)``; ``server`` is ``None`` when the
     runtime could not be restarted.
     """
+    restarts = 0
     for attempt in range(attempts):
         try:
             return _convert_one(server, job), server
@@ -405,7 +444,8 @@ def _convert_with_restart(server, job, attempts: int = 3):
             if not ort.is_bridge_lost(exc) or attempt == attempts - 1:
                 message = (
                     "LibreOffice stopped responding while converting this file "
-                    f"(retried {attempts} times with a fresh runtime)."
+                    f"(attempt {attempt + 1} of {attempts}; "
+                    f"{restarts} runtime restart(s))."
                     if ort.is_bridge_lost(exc) else str(exc)
                 )
                 print_error(f"  Failed: {message}")
@@ -415,8 +455,11 @@ def _convert_with_restart(server, job, attempts: int = 3):
                 "  The LibreOffice runtime stopped responding; restarting it "
                 "with a fresh profile and retrying this file..."
             )
-            logger.warning("Conversion runtime lost; restarting (attempt %d).",
-                           attempt + 1)
+            restarts += 1
+            logger.warning(
+                "Conversion runtime lost; restarting (restart %d, attempt %d/%d).",
+                restarts, attempt + 1, attempts,
+            )
             try:
                 server.stop()
             except Exception:  # noqa: BLE001
@@ -431,86 +474,96 @@ def _convert_with_restart(server, job, attempts: int = 3):
 
 
 def _convert_one(server, job) -> str:
-    """Convert a single job (with password + protection flow). Returns
-    'ok' | 'fail' | 'skip'."""
+    """Convert a single job (with password + protection flow).
+
+    Returns ``'ok'`` | ``'fail'`` | ``'skip'``. The temporary directory holding
+    a normalized CSV copy is owned by exactly one ``try/finally`` here, so it is
+    removed on success, password cancel, bridge loss, runtime error, output
+    validation failure, timeout, exit, and KeyboardInterrupt alike.
+    """
+    src = job["src"]
+    csv_dir = None
+    try:
+        source_for_convert = src
+        if job.get("csv_dialect") is not None:
+            # Apply the sniffed CSV dialect by converting a canonical copy (the
+            # converter API cannot take import-filter options). Source untouched.
+            try:
+                csv_dir = Path(tempfile.mkdtemp(prefix="pdfforge_csv_"))
+                source_for_convert = normalize_csv_for_import(
+                    src, job["csv_dialect"], csv_dir / src.name
+                )
+            except (OSError, UnicodeError, ValueError) as exc:
+                logger.warning("CSV normalization failed for '%s': %s", src, exc)
+                source_for_convert = src
+        return _convert_one_body(server, job, source_for_convert)
+    finally:
+        if csv_dir is not None:
+            shutil.rmtree(csv_dir, ignore_errors=True)
+
+
+def _convert_one_body(server, job, source_for_convert) -> str:
+    """Password + conversion + finalization for one already-prepared source."""
     src, out = job["src"], job["out"]
     password: Optional[str] = None
     attempted = False
+    try:
+        # Ask for the password *before* converting when the container is visibly
+        # encrypted, rather than relying on the converter's error path.
+        if is_encrypted_office_file(src):
+            password = _prompt_convert_password(src.name, False)
+            if password is None:
+                print_note(f"  Skipped (password not provided): {src.name}")
+                return "skip"
+            attempted = True
 
-    # Ask for the password *before* converting when the container is visibly
-    # encrypted, rather than relying on the converter's error path.
-    if is_encrypted_office_file(src):
-        password = _prompt_convert_password(src.name, False)
-        if password is None:
-            print_note(f"  Skipped (password not provided): {src.name}")
-            return "skip"
-        attempted = True
+        while True:
+            tmp = out.with_suffix(".convert.tmp")
+            try:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                ort.convert_to_pdf(server, source_for_convert, tmp, password=password)
+                _validate_pdf_output(tmp)
+            except ort.OfficeRuntimeError as exc:
+                _safe_unlink(tmp)
+                if str(exc) == ort.PASSWORD_SENTINEL:
+                    # Encrypted / wrong password: prompt (unlimited retries).
+                    pw = _prompt_convert_password(src.name, attempted)
+                    if pw is None:
+                        print_note(f"  Skipped (password not provided): {src.name}")
+                        return "skip"
+                    password = pw
+                    attempted = True
+                    continue
+                if ort.is_bridge_lost(exc):
+                    # The runtime died: the caller restarts it and retries.
+                    raise
+                print_error(f"  Failed: {exc}")
+                logger.error("Convert failed for '%s': %s", src, exc)
+                return "fail"
+            except PdfOpenError as exc:
+                _safe_unlink(tmp)
+                print_error(f"  Failed output validation: {exc}")
+                logger.error("Convert output invalid for '%s': %s", src, exc)
+                return "fail"
 
-    # Apply the sniffed CSV dialect by converting a canonical copy (the
-    # converter API cannot take import-filter options). The source is untouched.
-    source_for_convert = src
-    csv_copy = None
-    if job.get("csv_dialect") is not None:
-        try:
-            csv_copy = Path(tempfile.mkdtemp(prefix="pdfforge_csv_")) / src.name
-            source_for_convert = normalize_csv_for_import(
-                src, job["csv_dialect"], csv_copy
-            )
-        except (OSError, UnicodeError, ValueError) as exc:
-            logger.warning("CSV normalization failed for '%s': %s", src, exc)
-            source_for_convert = src
-
-    while True:
-        tmp = out.with_suffix(".convert.tmp")
-        try:
-            out.parent.mkdir(parents=True, exist_ok=True)
-            ort.convert_to_pdf(server, source_for_convert, tmp, password=password)
-            _validate_pdf_output(tmp)
-        except ort.OfficeRuntimeError as exc:
-            _safe_unlink(tmp)
-            if str(exc) == ort.PASSWORD_SENTINEL:
-                # Encrypted / wrong password: prompt (unlimited retries).
-                pw = _prompt_convert_password(src.name, attempted)
-                if pw is None:
-                    print_note(f"  Skipped (password not provided): {src.name}")
-                    return "skip"
-                password = pw
-                attempted = True
-                continue
-            if ort.is_bridge_lost(exc):
-                # The runtime died: the caller restarts it and retries this file.
-                if csv_copy is not None:
-                    shutil.rmtree(csv_copy.parent, ignore_errors=True)
-                raise
-            print_error(f"  Failed: {exc}")
-            logger.error("Convert failed for '%s': %s", src, exc)
-            return "fail"
-        except PdfOpenError as exc:
-            _safe_unlink(tmp)
-            print_error(f"  Failed output validation: {exc}")
-            logger.error("Convert output invalid for '%s': %s", src, exc)
-            return "fail"
-
-        # Success: optional output protection for encrypted sources.
-        try:
-            if password:
-                choice = _prompt_output_protection(src.name)
-                if choice and choice[0] != "none":
-                    mode, new_pw = choice
-                    _apply_output_protection(
-                        tmp, mode, password if mode == "same" else new_pw
-                    )
-            os.replace(tmp, out)
-        except Exception as exc:  # noqa: BLE001
-            _safe_unlink(tmp)
-            print_error(f"  Failed finalizing output: {exc}")
-            logger.exception("Convert finalize failed for '%s'", src)
-            return "fail"
-        finally:
-            password = None  # clear the source password after this file.
-            if csv_copy is not None:
-                shutil.rmtree(csv_copy.parent, ignore_errors=True)
-        return "ok"
+            # Success: optional output protection for encrypted sources.
+            try:
+                if password:
+                    choice = _prompt_output_protection(src.name)
+                    if choice and choice[0] != "none":
+                        mode, new_pw = choice
+                        _apply_output_protection(
+                            tmp, mode, password if mode == "same" else new_pw
+                        )
+                promote_atomically(tmp, out)
+            except Exception as exc:  # noqa: BLE001
+                _safe_unlink(tmp)
+                print_error(f"  Failed finalizing output: {exc}")
+                logger.exception("Convert finalize failed for '%s'", src)
+                return "fail"
+            return "ok"
+    finally:
+        password = None  # drop the source password as soon as this file ends
 
 
 def _safe_unlink(path: Path) -> None:
@@ -588,9 +641,18 @@ def _configure_and_queue(files, mode: str) -> None:
         print_warning("Returning to menu.")
         return
 
-    jobs = _build_jobs(files)
+    plan = _build_jobs(files)
+    if plan.skipped:
+        # Report exactly why each file was rejected, before anything is queued.
+        print_warning(f"{len(plan.skipped)} file(s) will be skipped:")
+        for path, reason in plan.skipped:
+            print(colorize(f"    - {path.name}: {reason}", Color.YELLOW))
+    jobs = plan.accepted
     if not jobs:
-        print_warning("No convertible files remained. Returning to menu.")
+        print_warning(
+            "No convertible files remained; nothing was queued and LibreOffice "
+            "was not started. Returning to menu."
+        )
         return
 
     print_heading("\nSummary")

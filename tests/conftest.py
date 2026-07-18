@@ -19,8 +19,10 @@ import pdf_forge as app  # noqa: E402
 @pytest.fixture(autouse=True)
 def isolate_global_state(tmp_path_factory, monkeypatch):
     """Redirect the output manifest to a temp file and clear reservations."""
-    manifest = tmp_path_factory.mktemp("pdfforge_state") / "outputs.json"
-    monkeypatch.setattr(app.core, "_manifest_path", lambda: manifest)
+    # The state store lives in per-user app data; point it at a temp dir so the
+    # suite never touches real machine state (and never the checkout).
+    state = tmp_path_factory.mktemp("pdfforge_state")
+    monkeypatch.setenv("PDF_FORGE_STATE_DIR", str(state))
     app.clear_reservations()
     app.taskqueue._task_queue.clear()
     app.set_operation_prompt(None)

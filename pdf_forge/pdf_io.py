@@ -3,17 +3,19 @@ from __future__ import annotations
 import os
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
 from .constants import *  # noqa: F401,F403
+from .safeio import promote_atomically
 from .core import *  # noqa: F401,F403
 
 __all__ = ['_import_pymupdf', 'PdfOpenError', 'PdfPasswordCancelled',
            'open_source_pdf', 'source_password',
            'close_doc', '_authenticate_doc',
            'ProtectionPolicy', 'detect_protection',
+           'SourceRef', 'SourceChangedError', 'capture_source', 'source_fingerprint',
            'write_pages_to_pdf', '_validate_written_pdf', '_validate_merged_pdf',
            'write_merged_pdfs_to_pdf', 'resolves_to_same_file',
            'scan_image_dpi_stats', 'has_meaningful_text',
@@ -170,6 +172,86 @@ def open_source_pdf(path: Path, password_prompt=None, password=None):
     return doc
 
 
+def source_fingerprint(path: Path) -> dict:
+    """Identity of a source file at configuration time.
+
+    Size plus nanosecond mtime plus the OS file id where available. Cheap to
+    take, and strong enough to notice a file that was replaced or edited between
+    configuring an operation and running it.
+    """
+    st = os.stat(str(path))
+    fingerprint = {"size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
+    file_id = getattr(st, "st_ino", 0)
+    if file_id:
+        fingerprint["file_id"] = int(file_id)
+        fingerprint["volume"] = int(getattr(st, "st_dev", 0))
+    return fingerprint
+
+
+class SourceChangedError(PdfOpenError):
+    """Raised when a source changed between configuration and execution."""
+
+
+@dataclass
+class SourceRef:
+    """Immutable description of a configured source PDF.
+
+    Queued tasks carry one of these instead of a live ``Document``: a path, the
+    captured password, the expected page count, and a fingerprint. Nothing is
+    held open, so a queued (or discarded) task never keeps a file handle, and
+    the runner can prove it is still operating on the same file.
+    """
+
+    path: Path
+    password: str = ""
+    page_count: int = 0
+    fingerprint: dict = field(default_factory=dict)
+
+    def verify_unchanged(self) -> None:
+        """Raise :class:`SourceChangedError` when the file is not what we configured."""
+        try:
+            current = source_fingerprint(self.path)
+        except OSError as exc:
+            raise SourceChangedError(
+                f"'{self.path.name}' is no longer available: {exc}"
+            ) from exc
+        if not self.fingerprint:
+            return
+        for key in ("size", "mtime_ns", "file_id"):
+            if key in self.fingerprint and key in current:
+                if self.fingerprint[key] != current[key]:
+                    raise SourceChangedError(
+                        f"'{self.path.name}' changed after this task was "
+                        "configured; nothing was written. Re-run the operation."
+                    )
+
+    def open(self):
+        """Reopen the source for a runner: verify, authenticate silently, check pages."""
+        self.verify_unchanged()
+        doc = open_source_pdf(self.path, password=self.password)
+        if self.page_count and doc.page_count != self.page_count:
+            actual = doc.page_count
+            close_doc(doc)
+            raise SourceChangedError(
+                f"'{self.path.name}' now has {actual} page(s) instead of "
+                f"{self.page_count}; nothing was written."
+            )
+        return doc
+
+    def __repr__(self) -> str:  # never leak the password
+        return f"SourceRef({self.path.name!r}, pages={self.page_count})"
+
+
+def capture_source(doc, path: Path) -> SourceRef:
+    """Build a :class:`SourceRef` from an open, authenticated configuration doc."""
+    return SourceRef(
+        path=Path(path),
+        password=source_password(doc),
+        page_count=doc.page_count,
+        fingerprint=source_fingerprint(path),
+    )
+
+
 @dataclass
 class ProtectionPolicy:
     """How a produced PDF should be protected (see README "Protection policy").
@@ -297,9 +379,8 @@ def _save_doc_to_path_safely(out_doc, out_path: Path, expected_pages: int,
                  password=(protection.password if extra else None))
         logger.debug("Validated temporary output (%d page(s)).", expected_pages)
         # Atomic promotion. The final path is guaranteed unique by the caller.
-        os.replace(tmp_path, out_path)
+        out_path = promote_atomically(tmp_path, out_path)
         # Remember it so a later folder run never reprocesses our own output.
-        record_generated_output(out_path)
     except Exception:
         try:
             if tmp_path.exists():

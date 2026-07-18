@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Sequence
 
 from .constants import *  # noqa: F401,F403
+from .safeio import promote_atomically
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
@@ -85,7 +86,7 @@ def render_pages_to_pngs(doc, pages_zero_based: Sequence[int], out_dir: Path,
         try:
             pixmap.save(str(tmp_path), output="png")
             _validate_image_file(tmp_path)
-            os.replace(tmp_path, final_path)
+            final_path = promote_atomically(tmp_path, final_path, record=False)
         except Exception:
             try:
                 if tmp_path.exists():
@@ -155,7 +156,7 @@ def render_pdf_to_image_pdf(doc, page_count: int, out_path: Path, dpi: int,
                 tmp_path, expected_pages=page_count,
                 password=protection.password if protect_kwargs else None,
             )
-            os.replace(tmp_path, out_path)
+            out_path = promote_atomically(tmp_path, out_path)
         except Exception:
             try:
                 if tmp_path.exists():
@@ -285,7 +286,7 @@ def _atomic_pixmap_save(pixmap, out_dir: Path, final_path: Path, fmt: str,
         else:
             pixmap.save(str(tmp_path), output=fmt, jpg_quality=jpg_quality)
         _validate_image_file(tmp_path)
-        os.replace(tmp_path, final_path)
+        final_path = promote_atomically(tmp_path, final_path, record=False)
     except Exception:
         try:
             if tmp_path.exists():
@@ -355,7 +356,7 @@ def extract_embedded_images(doc, out_dir: Path, jpeg_quality=None,
                     handle.write(data)
                 if tmp_path.stat().st_size <= 0:
                     raise PdfOpenError("Extracted image is empty.")
-                os.replace(tmp_path, final_path)
+                final_path = promote_atomically(tmp_path, final_path, record=False)
             except Exception:
                 try:
                     if tmp_path.exists():
@@ -388,7 +389,7 @@ def extract_embedded_images(doc, out_dir: Path, jpeg_quality=None,
             try:
                 pixmap.save(str(tmp_path), output="jpg", jpg_quality=jpeg_quality)
                 _validate_image_file(tmp_path)
-                os.replace(tmp_path, final_path)
+                final_path = promote_atomically(tmp_path, final_path, record=False)
             except Exception:
                 try:
                     if tmp_path.exists():

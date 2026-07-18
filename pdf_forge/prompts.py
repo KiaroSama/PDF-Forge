@@ -11,10 +11,16 @@ from .pdf_io import *  # noqa: F401,F403
 __all__ = ['_input', 'ask_yes_no', 'prompt_password', 'prompt_new_password',
            'resolve_protection', 'resolve_merge_protection', 'prompt_source_pdf', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
 
-def _input(prompt: str) -> str:
-    """Read a line of input, treating EOF as a request to exit."""
+def _input(prompt) -> str:
+    """Read a line of input, treating EOF as a request to exit.
+
+    This is the single place a prompt is displayed, so it is where a
+    :class:`~pdf_forge.ui.Prompt` allocates its visible number - a retry or a
+    redisplay after a nested prompt therefore gets a fresh, monotonic label.
+    """
+    text = prompt.render() if hasattr(prompt, "render") else prompt
     try:
-        return input(prompt)
+        return input(text)
     except EOFError:
         # No interactive input available; behave like the exit command.
         return "exit"
