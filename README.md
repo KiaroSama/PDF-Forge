@@ -164,6 +164,39 @@ highlighted inside the guidance:
 - **`done`** finishes the list (a blank Enter does the same).
 - **`b`** removes the file you added last and asks for it again.
 
+### Safety guarantees
+
+These are enforced in code and covered by regression tests:
+
+- **Outputs never overwrite anything.** A final name is claimed atomically
+  (`O_CREAT|O_EXCL`); if the destination appeared after you configured the task -
+  even from another program or a second PDF Forge instance - the output is
+  written to the next free `_2`/`_3` name instead. Two concurrent PDF Forge
+  processes cannot select the same final path.
+- **Queued tasks hold no file handles.** An operation carries the source path,
+  page selection, captured password and a fingerprint - never an open document -
+  so a queued or discarded task never locks your file.
+- **A source that changed after configuration is refused.** If the file is
+  replaced or edited between configuring and running a task, the task fails with
+  a clear message and writes nothing.
+- **Generated-output tracking lives outside the checkout**, in your per-user
+  application-data directory, written atomically under a cross-process lock. If
+  it cannot be written, PDF Forge says so rather than silently pretending folder
+  tools will skip their own output.
+
+### Office validation and safety
+
+- A **password-protected** `.docx`/`.xlsx`/`.pptx` is an OLE2 container, not a
+  ZIP. PDF Forge recognises it (by parsing the OLE directory, not by scanning
+  bytes) and asks for the password instead of rejecting the file.
+- Packages are validated **per family**: a spreadsheet renamed `.docx`, a ZIP
+  containing only `[Content_Types].xml`, a traversal entry, or a ZIP bomb is
+  rejected with the exact reason, in both the manual and folder flows.
+- Conversion runs in a **fresh, hardened LibreOffice profile**: macro execution
+  is disabled and external link/DDE updates are turned off, so a converted
+  document cannot run code or reach the network. The profile is deleted
+  afterwards and never touches your own LibreOffice settings.
+
 ### Batch queue (run several tasks together)
 
 PDF Forge collects tasks and runs them **together at the end** rather than one at
