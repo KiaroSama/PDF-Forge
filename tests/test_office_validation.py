@@ -338,3 +338,87 @@ def test_folder_with_no_valid_jobs_reports_and_starts_nothing(tmp_path):
     if hasattr(result, "skipped"):
         assert len(result.skipped) == 2
         assert all(reason for _p, reason in result.skipped)
+
+
+# --------------------------------------------------------------------------- #
+# Writer export fallback (found by the real Windows E2E)
+# --------------------------------------------------------------------------- #
+
+def test_bridge_loss_without_password_falls_back_to_the_cli(tmp_path, monkeypatch):
+    """unoserver 3.7 + LibreOffice 25.8 cannot export Writer documents here.
+
+    The export raises inside the UNO bridge and pyuno then fails to marshal its
+    own exception, destroying the real error and disposing the bridge. The same
+    document converts through `soffice --convert-to`, so a bridge loss with no
+    password involved must fall back to the CLI instead of failing the file.
+    """
+    from pdf_forge import office_runtime as ort
+
+    src = make_ooxml(tmp_path / "doc.docx", "word")
+    out = tmp_path / "doc.pdf"
+    calls = {"cli": 0}
+
+    class FakeServer:
+        port = 1
+        soffice = Path("soffice.exe")
+
+    def exploding_client(**_kw):
+        raise RuntimeError("Binary URP bridge already disposed")
+
+    class FakeUnoClient:
+        def __init__(self, **_kw):
+            pass
+
+        def convert(self, **_kw):
+            exploding_client()
+
+    def fake_cli(_soffice, _in_path, out_path, timeout=None):
+        calls["cli"] += 1
+        Path(out_path).write_bytes(b"%PDF-1.7\nfrom cli\n")
+
+    import types
+    fake_module = types.ModuleType("unoserver.client")
+    fake_module.UnoClient = FakeUnoClient
+    monkeypatch.setitem(sys.modules, "unoserver", types.ModuleType("unoserver"))
+    monkeypatch.setitem(sys.modules, "unoserver.client", fake_module)
+    monkeypatch.setattr(ort, "convert_via_soffice_cli", fake_cli)
+
+    ort.convert_to_pdf(FakeServer(), src, out, timeout=30)
+    assert calls["cli"] == 1, "the CLI fallback must run"
+    assert out.read_bytes().startswith(b"%PDF")
+
+
+def test_bridge_loss_with_a_password_does_not_fall_back(tmp_path, monkeypatch):
+    """The CLI cannot carry a password without exposing it on a command line,
+    so an encrypted source must stay on the in-memory path and fail loudly."""
+    from pdf_forge import office_runtime as ort
+
+    src = make_ooxml(tmp_path / "doc.docx", "word")
+
+    class FakeServer:
+        port = 1
+        soffice = Path("soffice.exe")
+
+    class FakeUnoClient:
+        def __init__(self, **_kw):
+            pass
+
+        def convert(self, **_kw):
+            raise RuntimeError("Binary URP bridge already disposed")
+
+    called = {"cli": 0}
+
+    def fake_cli(*_a, **_k):
+        called["cli"] += 1
+
+    import types
+    fake_module = types.ModuleType("unoserver.client")
+    fake_module.UnoClient = FakeUnoClient
+    monkeypatch.setitem(sys.modules, "unoserver", types.ModuleType("unoserver"))
+    monkeypatch.setitem(sys.modules, "unoserver.client", fake_module)
+    monkeypatch.setattr(ort, "convert_via_soffice_cli", fake_cli)
+
+    with pytest.raises(ort.OfficeRuntimeError):
+        ort.convert_to_pdf(FakeServer(), src, tmp_path / "o.pdf",
+                           password="secret", timeout=30)
+    assert called["cli"] == 0, "a password must never reach the command line"

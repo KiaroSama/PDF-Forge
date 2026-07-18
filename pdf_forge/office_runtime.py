@@ -40,7 +40,7 @@ __all__ = [
     'unoserver_installed', 'unoserver_version', 'libreoffice_version',
     'runtime_status', 'random_localhost_port',
     'ConversionServer', 'convert_to_pdf', 'provision_runtime', 'clean_runtime',
-    'start_conversion_server', 'is_bridge_lost',
+    'start_conversion_server', 'is_bridge_lost', 'convert_via_soffice_cli',
     'PASSWORD_SENTINEL', 'BRIDGE_LOST_SENTINEL', 'warm_up', 'save_with_password',
 ]
 
@@ -255,9 +255,25 @@ class ConversionServer:
     port: int
     profile_dir: Path
     soffice: Path
+    log_handle: object = None
+    log_path: Optional[Path] = None
+
+    def read_log(self, limit: int = 8000) -> str:
+        """Tail of the child's diagnostics (empty when unavailable)."""
+        try:
+            data = Path(self.log_path).read_bytes()[-limit:]
+            return data.decode("utf-8", errors="replace")
+        except (OSError, TypeError):
+            return ""
 
     def stop(self) -> None:
         _terminate(self.process)
+        # Close our end of the log before the profile (which holds it) is removed.
+        try:
+            if self.log_handle is not None:
+                self.log_handle.close()
+        except Exception:  # noqa: BLE001 - teardown must never raise
+            pass
         shutil.rmtree(self.profile_dir, ignore_errors=True)
 
 
@@ -421,6 +437,12 @@ def start_conversion_server(
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
     )
 
+    # The child's diagnostics go to a file inside its own profile directory, not
+    # to an OS pipe. An undrained PIPE can fill its buffer and block the child
+    # mid-conversion (PF-014); a file also means a crash leaves readable evidence
+    # instead of output nobody ever consumed. The file dies with the profile, so
+    # it cannot grow without bound across runs.
+    log_path = profile_dir / "unoserver.log"
     cmd = [
         str(lo_python), "-m", "unoserver.server",
         "--executable", str(soffice),
@@ -428,21 +450,29 @@ def start_conversion_server(
         "--interface", "127.0.0.1",
         "--port", str(port),
         "--uno-port", str(uno_port),
+        "--conversion-timeout", str(CONVERT_TIMEOUT),
     ]
     logger.info("Starting conversion server on 127.0.0.1:%d (uno %d).", port, uno_port)
     creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
+        log_handle = open(log_path, "wb")
+    except OSError as exc:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        raise OfficeRuntimeError(f"Could not open the server log: {exc}") from exc
+    try:
         process = subprocess.Popen(
-            cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cmd, env=env, stdout=log_handle, stderr=subprocess.STDOUT,
             creationflags=creationflags,
         )
     except OSError as exc:
+        log_handle.close()
         shutil.rmtree(profile_dir, ignore_errors=True)
         raise OfficeRuntimeError(f"Could not start the conversion server: {exc}") from exc
 
-    server = ConversionServer(process, port, profile_dir, soffice)
+    server = ConversionServer(process, port, profile_dir, soffice, log_handle,
+                              log_path)
     try:
         _wait_until_ready(server, start_timeout)
     except Exception:
@@ -545,8 +575,23 @@ def convert_to_pdf(
         raise OfficeRuntimeError(BRIDGE_LOST_SENTINEL)
     error = outcome.get("error")
     if error is not None:
+        classified = _classify_convert_error(error)
+        # A lost bridge with no password involved is recoverable: the same
+        # document converts through the command line with the same runtime.
+        if classified == BRIDGE_LOST_SENTINEL and password is None:
+            logger.info(
+                "unoserver could not export '%s'; retrying via the soffice CLI.",
+                Path(in_path).name,
+            )
+            try:
+                convert_via_soffice_cli(server.soffice, in_path, out_path,
+                                        timeout=timeout)
+                return
+            except OfficeRuntimeError as cli_exc:
+                logger.error("CLI fallback also failed: %s", cli_exc)
+                raise
         # Never include the password in the message.
-        raise OfficeRuntimeError(_classify_convert_error(error)) from error
+        raise OfficeRuntimeError(classified) from error
 
 
 #: Sentinel returned when the source needs a password.
@@ -590,6 +635,54 @@ def warm_up(server: "ConversionServer") -> "ConversionServer":
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
     return server
+
+
+
+def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
+                            timeout: int = CONVERT_TIMEOUT) -> None:
+    """Convert to PDF by driving ``soffice --convert-to`` directly.
+
+    Fallback for documents the unoserver bridge cannot export. unoserver 3.7 on
+    LibreOffice 25.8 fails on **Writer** documents here: the export raises inside
+    the UNO bridge and pyuno then cannot marshal its own exception
+    ("'traceback' object has no attribute 'getTypes'"), which destroys the real
+    error and disposes the bridge. Calc documents are unaffected. The same
+    document converts correctly through the command-line interface, so this path
+    keeps the feature working with the *same* project-local runtime - still
+    local, still headless, still no GUI.
+
+    It cannot carry a password (that would put the secret on a command line), so
+    encrypted sources stay on the unoserver in-memory path.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    profile = Path(tempfile.mkdtemp(prefix="pdfforge_cliprof_"))
+    outdir = Path(tempfile.mkdtemp(prefix="pdfforge_cliout_"))
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    cmd = [
+        str(soffice), "--headless", "--invisible", "--nologo", "--nofirststartwizard",
+        "--norestore", "--nodefault", "--nocrashreport",
+        f"-env:UserInstallation={profile.resolve().as_uri()}",
+        "--convert-to", "pdf", "--outdir", str(outdir), str(in_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=timeout, creationflags=creationflags)
+        produced = list(outdir.glob("*.pdf"))
+        if not produced:
+            detail = (result.stderr or result.stdout or "").strip()[:300]
+            raise OfficeRuntimeError(
+                "LibreOffice produced no PDF for this document"
+                + (f": {detail}" if detail else ".")
+            )
+        shutil.move(str(produced[0]), str(out_path))
+    except subprocess.TimeoutExpired as exc:
+        raise OfficeRuntimeError(
+            f"LibreOffice timed out converting this document after {timeout}s."
+        ) from exc
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+        shutil.rmtree(outdir, ignore_errors=True)
 
 
 def _classify_convert_error(exc: Exception) -> str:
