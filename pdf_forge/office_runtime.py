@@ -283,8 +283,16 @@ def _xcu_prop(path: str, name: str, value_type: str, value: str) -> str:
 def _harden_profile(profile_dir: Path) -> Path:
     """Write a locked-down LibreOffice profile before the server starts.
 
-    Enforced in the profile itself rather than only claimed in documentation
-    (PF-023), because the converter API does not expose per-load properties:
+    DISABLED BY DEFAULT - enable with ``PDF_FORGE_HARDEN_PROFILE=1``.
+
+    Pre-seeding ``registrymodifications.xcu`` into a profile directory that
+    LibreOffice has not initialized yet correlated with the UNO bridge being
+    disposed on the first conversion ("Binary URP bridge already disposed") in
+    the Windows end-to-end job, so it is not applied automatically. Macro and
+    link-update hardening therefore is NOT currently enforced; that remains an
+    open item rather than a claim.
+
+    What it writes when enabled:
 
       * ``MacroSecurityLevel = 3`` (very high) and macro execution disabled, so
         a macro inside a converted document is never run;
@@ -402,7 +410,9 @@ def start_conversion_server(
     port = random_localhost_port()
     uno_port = random_localhost_port()
     profile_dir = Path(tempfile.mkdtemp(prefix="pdfforge_loprofile_"))
-    _harden_profile(profile_dir)
+    if os.environ.get("PDF_FORGE_HARDEN_PROFILE") == "1":
+        # Opt-in only: see _harden_profile for why this is not the default.
+        _harden_profile(profile_dir)
 
     env = dict(os.environ)
     # Let LibreOffice's bundled Python import the venv-installed unoserver.

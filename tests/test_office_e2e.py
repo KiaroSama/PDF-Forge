@@ -26,9 +26,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def server():
-    """One task-owned, warmed conversion server for the whole module."""
+    """A task-owned, warmed conversion server per test.
+
+    Deliberately function-scoped: a disposed UNO bridge is sticky, so a shared
+    server turns one real failure into a cascade of misleading BRIDGE_LOST
+    errors in every later test.
+    """
     srv = app.office_runtime.start_conversion_server()
     srv = app.office_runtime.warm_up(srv)
     try:
