@@ -192,13 +192,15 @@ These are enforced in code and covered by regression tests:
 - Packages are validated **per family**: a spreadsheet renamed `.docx`, a ZIP
   containing only `[Content_Types].xml`, a traversal entry, or a ZIP bomb is
   rejected with the exact reason, in both the manual and folder flows.
-- Conversion runs in a **fresh, isolated LibreOffice profile** that is deleted
-  afterwards and never touches your own LibreOffice settings. The profile is
-  also started headless with no first-run wizard and no document recovery.
-  **Macro and external-link hardening is not yet enforced** - an experimental
-  profile lockdown exists behind `PDF_FORGE_HARDEN_PROFILE=1` but is off by
-  default because it destabilised the UNO bridge in end-to-end testing. Treat
-  untrusted documents accordingly until that is resolved.
+- Conversion runs in a **fresh, hardened, isolated LibreOffice profile**:
+  macro execution is disabled, and external link/DDE/data updates are turned
+  off, so a converted document cannot run code or reach the network. The
+  profile is created per run, deleted afterwards, and never touches your own
+  LibreOffice settings. (Set `PDF_FORGE_HARDEN_PROFILE=0` only for debugging.)
+- **Inline images cannot be extracted.** An image drawn directly inside a page's
+  content stream has no separate image object, so "Extract images" reports how
+  many it skipped rather than quietly producing fewer files. Use **PDF to
+  images (PNG)** to capture those pages.
 
 ### Batch queue (run several tasks together)
 

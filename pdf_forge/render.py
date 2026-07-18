@@ -13,7 +13,7 @@ from .pdf_io import *  # noqa: F401,F403
 
 __all__ = ['_import_pillow', 'open_render_document', '_validate_image_file',
            'render_pages_to_pngs', 'render_pdf_to_image_pdf',
-           'count_embedded_images', 'extract_embedded_images']
+           'count_embedded_images', 'count_inline_images', 'extract_embedded_images']
 
 # Embedded images smaller than this (either side, in pixels) are treated as
 # placeholders/artifacts and skipped by the extraction tool.
@@ -214,7 +214,12 @@ def _iter_unique_images(doc):
             if width < _MIN_EXTRACT_SIDE or height < _MIN_EXTRACT_SIDE:
                 continue
             if not xref:
-                continue  # inline image: no extractable object
+                # Inline image (drawn with BI ... ID ... EI inside the content
+                # stream). It has no XObject to extract, and pulling one out
+                # would mean parsing content streams - the parsing risk this
+                # code deliberately avoids. It is counted and reported instead
+                # of being silently dropped (PF-026).
+                continue
             counter += 1
             key = _image_content_key(item)
             if key in seen:
@@ -297,8 +302,31 @@ def _atomic_pixmap_save(pixmap, out_dir: Path, final_path: Path, fmt: str,
 
 
 def count_embedded_images(doc) -> int:
-    """Number of distinct extractable images in the document."""
+    """Number of distinct extractable (XObject) images in the document."""
     return sum(1 for _ in _iter_unique_images(doc))
+
+
+def count_inline_images(doc) -> int:
+    """Number of painted inline images, which extraction cannot produce.
+
+    Inline images live inside the content stream (``BI ... ID ... EI``) and have
+    no image object to extract. They are reported so the tool never implies it
+    exported everything on the page (PF-026).
+    """
+    total = 0
+    for page_index in range(doc.page_count):
+        try:
+            infos = doc[page_index].get_image_info(hashes=True, xrefs=True)
+        except Exception:  # noqa: BLE001
+            continue
+        for item in infos:
+            if int(item.get("xref", 0) or 0):
+                continue
+            if (item.get("width", 0) < _MIN_EXTRACT_SIDE
+                    or item.get("height", 0) < _MIN_EXTRACT_SIDE):
+                continue
+            total += 1
+    return total
 
 
 def extract_embedded_images(doc, out_dir: Path, jpeg_quality=None,

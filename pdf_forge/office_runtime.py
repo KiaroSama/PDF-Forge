@@ -438,16 +438,13 @@ def _xcu_prop(path: str, name: str, value_type: str, value: str) -> str:
 def _harden_profile(profile_dir: Path) -> Path:
     """Write a locked-down LibreOffice profile before the server starts.
 
-    DISABLED BY DEFAULT - enable with ``PDF_FORGE_HARDEN_PROFILE=1``.
+    Applied to every conversion profile (set ``PDF_FORGE_HARDEN_PROFILE=0`` only
+    to debug). An earlier revision made this opt-in on the assumption that it
+    destabilised the UNO bridge; measuring it disproved that - with the
+    lockdown applied, Writer documents that otherwise crash the bridge convert
+    natively, because link and index updating is exactly what fails.
 
-    Pre-seeding ``registrymodifications.xcu`` into a profile directory that
-    LibreOffice has not initialized yet correlated with the UNO bridge being
-    disposed on the first conversion ("Binary URP bridge already disposed") in
-    the Windows end-to-end job, so it is not applied automatically. Macro and
-    link-update hardening therefore is NOT currently enforced; that remains an
-    open item rather than a claim.
-
-    What it writes when enabled:
+    What it writes:
 
       * ``MacroSecurityLevel = 3`` (very high) and macro execution disabled, so
         a macro inside a converted document is never run;
@@ -565,8 +562,10 @@ def start_conversion_server(
     port = random_localhost_port()
     uno_port = random_localhost_port()
     profile_dir = Path(tempfile.mkdtemp(prefix="pdfforge_loprofile_"))
-    if os.environ.get("PDF_FORGE_HARDEN_PROFILE") == "1":
-        # Opt-in only: see _harden_profile for why this is not the default.
+    # Always hardened unless explicitly disabled for debugging. Beyond the
+    # safety it enforces, disabling link/index updates is what keeps Writer
+    # exports from crashing the UNO bridge in this runtime (measured).
+    if os.environ.get("PDF_FORGE_HARDEN_PROFILE") != "0":
         _harden_profile(profile_dir)
 
     env = dict(os.environ)

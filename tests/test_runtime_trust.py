@@ -239,3 +239,43 @@ def test_running_service_passes(monkeypatch):
 
     monkeypatch.setattr(sp, "run", lambda *a, **k: Result())
     ort._ensure_installer_service()   # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# PF-023 - macro and external-update safety is enforced, not just claimed
+# --------------------------------------------------------------------------- #
+
+def test_conversion_profile_is_hardened_by_default(tmp_path, monkeypatch):
+    """Every conversion profile must carry the lockdown unless explicitly off."""
+    monkeypatch.delenv("PDF_FORGE_HARDEN_PROFILE", raising=False)
+    profile = tmp_path / "prof"
+    profile.mkdir()
+    ort._harden_profile(profile)
+    xcu = (profile / "user" / "registrymodifications.xcu").read_text(encoding="utf-8")
+
+    # Macros must not run.
+    assert "MacroSecurityLevel" in xcu
+    assert "DisableMacrosExecution" in xcu
+    # External links / data updates must not fire during conversion.
+    assert xcu.count("/Content/Update") >= 2, "Writer and Calc link updates"
+    # No dialog may block a headless conversion.
+    assert "FirstStartWizardCompleted" in xcu
+    assert "RecoveryInfo" in xcu
+
+
+def test_hardening_is_applied_unless_explicitly_disabled():
+    source = Path(ort.__file__).read_text(encoding="utf-8")
+    assert 'PDF_FORGE_HARDEN_PROFILE") != "0"' in source, (
+        "hardening must be the default, not opt-in"
+    )
+
+
+def test_hardened_profile_is_isolated_and_removed(tmp_path, monkeypatch):
+    """The lockdown must never touch the user's own LibreOffice configuration."""
+    profile = tmp_path / "prof"
+    profile.mkdir()
+    ort._harden_profile(profile)
+    written = list(profile.rglob("registrymodifications.xcu"))
+    assert len(written) == 1
+    # It lives inside the per-run profile, which teardown deletes.
+    assert profile in written[0].parents
