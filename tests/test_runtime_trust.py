@@ -164,6 +164,8 @@ def test_marker_alone_does_not_make_a_runtime_complete(tmp_path):
     assert "version" in result.reason
 
 
+@pytest.mark.skipif(os.name != "nt",
+                    reason="Windows-only administrative-extraction path")
 def test_provisioning_rebuilds_an_incomplete_runtime(tmp_path, monkeypatch):
     """An existing-but-broken runtime must be rebuilt, not reported as present."""
     broken = fake_runtime(tmp_path / "rt", with_python=False)
@@ -173,8 +175,6 @@ def test_provisioning_rebuilds_an_incomplete_runtime(tmp_path, monkeypatch):
         "version": "25.8.7",
         "windows": {"url": "https://example.invalid/x.msi", "sha256": "00"},
     })
-    monkeypatch.setattr(os, "name", "nt", raising=False)
-
     calls = {"download": 0}
 
     def fake_download(_url, dest):
