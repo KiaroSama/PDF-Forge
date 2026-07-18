@@ -422,3 +422,26 @@ def test_bridge_loss_with_a_password_does_not_fall_back(tmp_path, monkeypatch):
         ort.convert_to_pdf(FakeServer(), src, tmp_path / "o.pdf",
                            password="secret", timeout=30)
     assert called["cli"] == 0, "a password must never reach the command line"
+
+
+def test_conversion_timeout_scales_with_input_size(tmp_path):
+    """A fixed 180s silently failed a real 120 MB presentation.
+
+    The allowance must grow with the input, stay at least the base value for
+    small files, and remain bounded so a pathological input cannot block a
+    queue forever.
+    """
+    from pdf_forge import office_runtime as ort
+
+    small = tmp_path / "small.pptx"
+    small.write_bytes(b"x" * 1024)
+    assert ort.conversion_timeout_for(small) == ort.CONVERT_TIMEOUT
+
+    big = tmp_path / "big.pptx"
+    big.write_bytes(b"x" * (40 * 1024 * 1024))
+    allowance = ort.conversion_timeout_for(big)
+    assert allowance > ort.CONVERT_TIMEOUT, "a large input must get more time"
+    assert allowance <= ort.CONVERT_TIMEOUT_MAX, "the allowance must stay bounded"
+
+    missing = tmp_path / "gone.pptx"
+    assert ort.conversion_timeout_for(missing) == ort.CONVERT_TIMEOUT

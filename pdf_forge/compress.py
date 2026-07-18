@@ -16,7 +16,7 @@ __all__ = ['compress_pdf']
 
 def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
                  dpi_target: Optional[int], password_prompt=None,
-                 password=None) -> dict:
+                 password=None, protection=None) -> dict:
     """Compress a PDF into a new file; the source is never modified.
 
     Always applied (lossless, zero quality change):
@@ -40,10 +40,11 @@ def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
     doc = open_source_pdf(path, password_prompt=password_prompt, password=password)
     try:
         page_count = doc.page_count
-        # Preserve an open-password source's protection on the compressed copy;
-        # an owner-restricted source cannot be reproduced (no owner password),
-        # so it is written unprotected - the caller warns about that up front.
-        policy = detect_protection(doc)
+        # The protection policy is decided during configuration and passed in,
+        # so this writer can never silently downgrade a protected source
+        # (PF-006). `protection=None` means "caller made no decision": fall back
+        # to preserving what the source carries rather than dropping it.
+        policy = protection if protection is not None else detect_protection(doc)
         protect_kwargs = policy.save_kwargs()
 
         if jpeg_quality is not None:

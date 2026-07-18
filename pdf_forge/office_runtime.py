@@ -42,6 +42,7 @@ __all__ = [
     'ConversionServer', 'convert_to_pdf', 'provision_runtime', 'clean_runtime',
     'start_conversion_server', 'is_bridge_lost', 'convert_via_soffice_cli',
     'PASSWORD_SENTINEL', 'BRIDGE_LOST_SENTINEL', 'warm_up', 'save_with_password',
+    'conversion_timeout_for',
 ]
 
 
@@ -57,7 +58,29 @@ _SOFFICE_ENV = "PDF_FORGE_SOFFICE"
 # Bounded timeouts (seconds). A timeout is a failure signal, never a password
 # attempt limit.
 SERVER_START_TIMEOUT = 90
+# Base allowance for a small document. Real presentations with embedded media
+# run to hundreds of megabytes and legitimately need longer, so the effective
+# timeout scales with the input size (see conversion_timeout_for).
 CONVERT_TIMEOUT = 180
+# Extra seconds granted per megabyte of input.
+CONVERT_SECONDS_PER_MB = 4
+# Ceiling, so a pathological input still cannot block a queue forever.
+CONVERT_TIMEOUT_MAX = 3600
+
+
+def conversion_timeout_for(path) -> int:
+    """Timeout allowance for converting ``path``, scaled by its size.
+
+    A fixed 180s was fine for small documents but silently failed a 120 MB
+    PowerPoint that converts correctly given time. The value is still bounded:
+    a timeout remains a failure signal, never an attempt limit.
+    """
+    try:
+        megabytes = Path(path).stat().st_size / (1024 * 1024)
+    except OSError:
+        return CONVERT_TIMEOUT
+    allowance = CONVERT_TIMEOUT + int(megabytes * CONVERT_SECONDS_PER_MB)
+    return max(CONVERT_TIMEOUT, min(allowance, CONVERT_TIMEOUT_MAX))
 # Provisioning unpacks a ~360 MB package; generous, but never unbounded.
 EXTRACT_TIMEOUT = 1800
 # Abort sooner when Windows Installer writes nothing at all (a silent stall).
@@ -518,7 +541,7 @@ def convert_to_pdf(
     in_path: Path,
     out_path: Path,
     password: Optional[str] = None,
-    timeout: int = CONVERT_TIMEOUT,
+    timeout: Optional[int] = None,
 ) -> None:
     """Convert one source file to PDF through the running server.
 
@@ -528,6 +551,8 @@ def convert_to_pdf(
     """
     from unoserver.client import UnoClient
 
+    if timeout is None:
+        timeout = conversion_timeout_for(in_path)
     client = UnoClient(server="127.0.0.1", port=str(server.port))
     # Deliberately no explicit output filter: LibreOffice picks the right PDF
     # exporter for the loaded document type (writer_pdf_Export /
@@ -639,7 +664,7 @@ def warm_up(server: "ConversionServer") -> "ConversionServer":
 
 
 def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
-                            timeout: int = CONVERT_TIMEOUT) -> None:
+                            timeout: Optional[int] = None) -> None:
     """Convert to PDF by driving ``soffice --convert-to`` directly.
 
     Fallback for documents the unoserver bridge cannot export. unoserver 3.7 on
@@ -655,6 +680,8 @@ def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
     encrypted sources stay on the unoserver in-memory path.
     """
     out_path = Path(out_path)
+    if timeout is None:
+        timeout = conversion_timeout_for(in_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="pdfforge_cliprof_"))
     outdir = Path(tempfile.mkdtemp(prefix="pdfforge_cliout_"))

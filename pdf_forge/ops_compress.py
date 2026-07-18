@@ -130,6 +130,7 @@ def operation_compress_pdf() -> None:
         return
     total_pages = doc.page_count
     dpi_stats = scan_image_dpi_stats(doc)
+    protection = detect_protection(doc)
     # Capture the working password so the queued runner reopens silently (A13).
     pw = source_password(doc)
     close_doc(doc)
@@ -167,6 +168,12 @@ def operation_compress_pdf() -> None:
 
     _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats)
 
+    # Consent BEFORE any output is configured or written (PF-006).
+    protection = resolve_protection(protection, context="compressed PDF")
+    if protection is None:
+        print_warning("Cancelled. Returning to menu.")
+        return
+
     default_path = unique_file_path(source.parent / f"{source.stem}_compressed.pdf")
 
     print_heading("\nSummary")
@@ -193,6 +200,7 @@ def operation_compress_pdf() -> None:
         try:
             stats = compress_pdf(
                 source, out_path, jpeg_quality, dpi_target, password=pw,
+                protection=protection,
             )
         except Exception as exc:  # noqa: BLE001 - clean message, log details
             print_error(f"Failed to compress the PDF: {exc}")

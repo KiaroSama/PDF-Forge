@@ -206,7 +206,7 @@ def _nested_form_xrefs(doc, form_xref: int) -> Set[int]:
 
 
 def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
-                            progress=None) -> int:
+                            progress=None, protection=None) -> int:
     """Remove the chosen repeated images from every page and save a new PDF.
 
     The paint call (``/Name Do``) that draws a matching image is deleted from
@@ -290,8 +290,9 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
     os.close(tmp_fd)
     tmp_path = Path(tmp_name)
     logger.debug("Temporary watermark-removal file: '%s'", tmp_path)
-    # Preserve an open-password source's protection on the cleaned copy.
-    policy = detect_protection(doc)
+    # Decided during configuration and passed in, so this writer can never
+    # silently drop a protected source's policy (PF-007).
+    policy = protection if protection is not None else detect_protection(doc)
     protect_kwargs = policy.save_kwargs()
     try:
         # garbage=4 drops the now-unreferenced watermark object; use_objstms
