@@ -239,6 +239,12 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
             logger.warning("Failed to remove temporary file: %s", tmp_path)
         raise
 
+    # Postcondition: prove the chosen watermark is really gone from the file we
+    # just wrote, rather than trusting the modified count (PF-013/PF-035).
+    validate_watermark_removed(
+        out_path, targets, password=getattr(policy, "password", "") or None
+    )
+
     elapsed = time.perf_counter() - started
     logger.info(
         "Watermark removal: modified=%d page(s), output='%s' in %.2fs.",
