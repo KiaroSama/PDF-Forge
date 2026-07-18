@@ -12,7 +12,7 @@ APP_NAME = "PDF Forge"            # User-facing application name (never change s
 LOG_PREFIX = "PDF Forge"          # Log filename prefix.
 
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 
 
 # Rendering quality levels for image conversion, mapped to a resolution in DPI.

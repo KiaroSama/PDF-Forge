@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-07-19
+
 ### Fixed
+- **Piped input is read as UTF-8**, so a path containing non-Latin
+  characters is no longer mangled by the Windows ANSI code page and
+  reported as missing.
+- The watermark output suffix is `_no_watermark` (was `_nowatermark`,
+  which reads as "now atermark").
 - **Output promotion can no longer overwrite a destination** that appeared
   between configuring a task and running it; a unique name is allocated instead.
   Proven with a multi-process race test.
