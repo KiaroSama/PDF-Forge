@@ -135,7 +135,7 @@ def operation_remove_watermark() -> None:
         for c in chosen:
             affected_pages |= c.pages
 
-        default_path = unique_file_path(source.parent / f"{source.stem}_nowatermark.pdf")
+        default_path = unique_file_path(source.parent / f"{source.stem}_no_watermark.pdf")
         out_path = _choose_output_file(default_path, source)
         if out_path is None:
             print_warning("Returning to menu.")

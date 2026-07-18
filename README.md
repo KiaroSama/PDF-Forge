@@ -445,7 +445,7 @@ How it works:
    the operation finishes, and cleared at startup if anything was left behind.
 4. Choose the candidate(s) to remove (e.g. `1`, or `1,3` for several).
 5. Review the summary and pick the output path (Enter accepts
-   `<source>_nowatermark.pdf` beside the source); the task is added to the queue.
+   `<source>_no_watermark.pdf` beside the source); the task is added to the queue.
 6. When the queue runs, the watermark's paint calls are removed from every page,
    the now-unused watermark image is physically dropped, duplicate objects are
    merged, and a new file is written. The original is never modified.
@@ -461,7 +461,7 @@ Main menu -> 5 (Remove image watermark)
   Watermark candidates:
     [1] 899x674px  on 231/231 pages (100%) - preview: candidate_1.png
   Watermark(s) to remove: 1
-  -> C:\books\volume_nowatermark.pdf
+  -> C:\books\volume_no_watermark.pdf
 ```
 
 **Limits:** this only removes image watermarks that repeat across pages. It
