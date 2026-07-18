@@ -426,7 +426,9 @@ def detect_csv_dialect(path: Path, sample_bytes: int = 65536) -> CsvDialect:
         sniffed = csv.Sniffer().sniff(
             text, delimiters="".join(_CSV_DELIMITERS)
         ).delimiter
-    except csv.Error:
+    except (csv.Error, ValueError):
+        # ValueError: the sniffer can infer a multi-character delimiter on
+        # ragged input, which csv rejects. Either way it simply could not decide.
         notes.append("csv.Sniffer could not decide")
     if sniffed is not None and sniffed != delimiter:
         if confidence == "low":
@@ -438,7 +440,7 @@ def detect_csv_dialect(path: Path, sample_bytes: int = 65536) -> CsvDialect:
             )
     try:
         has_header = csv.Sniffer().has_header(text)
-    except csv.Error:
+    except (csv.Error, ValueError):
         has_header = _guess_header(text, delimiter)
 
     return CsvDialect(
@@ -471,7 +473,7 @@ def _score_delimiter(text: str) -> tuple:
     for delim in _CSV_DELIMITERS:
         try:
             rows = [r for r in csv.reader(io.StringIO(sample), delimiter=delim) if r]
-        except csv.Error:
+        except (csv.Error, ValueError):
             continue
         if not rows:
             continue
@@ -509,7 +511,7 @@ def _guess_header(text: str, delimiter: str) -> bool:
         rows = list(itertools.islice(
             csv.reader(io.StringIO(text), delimiter=delimiter), 2
         ))
-    except csv.Error:
+    except (csv.Error, ValueError):
         return False
     rows = [r for r in rows if r]
     if len(rows) < 2:
