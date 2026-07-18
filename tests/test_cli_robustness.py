@@ -299,3 +299,37 @@ def test_no_module_references_an_unresolvable_name():
     assert not problems, "names that cannot resolve at runtime: " + ", ".join(
         sorted(set(problems))
     )
+
+
+def test_force_utf8_stdio_survives_a_detached_stream(monkeypatch):
+    """Startup must not crash when a stream cannot be reconfigured.
+
+    Regression for the piped-stdin fix: a non-Latin path read through a Windows
+    pipe was decoded with the ANSI code page and reported as missing.
+    """
+    import io
+
+    from pdf_forge.app import _force_utf8_stdio
+
+    class Detached(io.StringIO):
+        def reconfigure(self, **kwargs):
+            raise ValueError("underlying stream is detached")
+
+    monkeypatch.setattr("sys.stdin", Detached())
+    _force_utf8_stdio()  # must not raise
+
+
+def test_force_utf8_stdio_sets_utf8(monkeypatch):
+    calls = {}
+
+    class Stream:
+        def reconfigure(self, **kwargs):
+            calls.update(kwargs)
+
+    monkeypatch.setattr("sys.stdin", Stream())
+    monkeypatch.setattr("sys.stdout", Stream())
+    monkeypatch.setattr("sys.stderr", Stream())
+    from pdf_forge.app import _force_utf8_stdio
+
+    _force_utf8_stdio()
+    assert calls["encoding"] == "utf-8"
