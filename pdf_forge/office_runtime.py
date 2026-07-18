@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -38,7 +39,9 @@ __all__ = [
     'OfficeRuntimeError', 'runtime_root', 'libreoffice_dir', 'load_runtime_meta',
     'find_soffice', 'find_soffice_python', 'venv_site_packages',
     'unoserver_installed', 'unoserver_version', 'libreoffice_version',
-    'runtime_status', 'random_localhost_port',
+    'runtime_status', 'random_localhost_port', 'RuntimeCandidate',
+    'resolve_runtime_candidates', 'select_runtime', 'probe_soffice_version',
+    'marker_version',
     'ConversionServer', 'convert_to_pdf', 'provision_runtime', 'clean_runtime',
     'start_conversion_server', 'is_bridge_lost', 'convert_via_soffice_cli',
     'PASSWORD_SENTINEL', 'BRIDGE_LOST_SENTINEL', 'warm_up', 'save_with_password',
@@ -152,18 +155,11 @@ def find_soffice() -> Optional[Path]:
     via ``PDF_FORGE_SOFFICE``. A system-wide LibreOffice is used only when that
     env var points at it - never auto-registered or modified.
     """
-    local = _search_soffice_under(libreoffice_dir())
-    if local is not None:
-        return local
-    override = os.environ.get(_SOFFICE_ENV)
-    if override:
-        p = Path(override)
-        if p.is_file():
-            return p
-        found = _search_soffice_under(p)
-        if found is not None:
-            return found
-    return None
+    # Version probing is skipped here: this is the cheap path used while a
+    # server is being started, and completeness (soffice + bundled Python) is
+    # what decides whether a candidate can work at all.
+    chosen = select_runtime(verify_version=False)
+    return chosen.soffice if chosen else None
 
 
 def find_soffice_python() -> Optional[Path]:
@@ -231,26 +227,145 @@ def unoserver_version() -> Optional[str]:
         return None
 
 
-def libreoffice_version() -> Optional[str]:
-    """Best-effort LibreOffice version from the provisioning metadata sidecar."""
-    marker = libreoffice_dir() / ".provisioned.json"
+def marker_version(base: Optional[Path] = None) -> Optional[str]:
+    """Version recorded by provisioning. A cache hint only - never authority."""
+    root = base if base is not None else libreoffice_dir()
     try:
-        return json.loads(marker.read_text(encoding="utf-8")).get("version")
+        return json.loads(
+            (root / ".provisioned.json").read_text(encoding="utf-8")
+        ).get("version")
     except (OSError, ValueError):
         return None
 
 
-def runtime_status() -> dict:
-    """Summarize what parts of the conversion runtime are available."""
-    soffice = find_soffice()
+def probe_soffice_version(soffice: Path, timeout: int = 60) -> Optional[str]:
+    """Ask the actual binary for its version, or ``None`` if it cannot answer.
+
+    A provisioning marker can be stale, hand-edited, or left behind by a
+    half-removed runtime, so the binary is the authority (PF-037).
+
+    On Windows the probe must use ``soffice.com``: ``soffice.exe`` is a GUI
+    binary that writes nothing to a captured stdout, so probing it would report
+    "no version" for a perfectly good runtime. (The *server* still launches
+    soffice.exe - the .com shim exits immediately and unoserver would conclude
+    LibreOffice had died.)
+    """
+    probe = soffice
+    if os.name == "nt" and soffice.suffix.lower() == ".exe":
+        console = soffice.with_suffix(".com")
+        if console.exists():
+            probe = console
+    try:
+        result = subprocess.run(
+            [str(probe), "--version"], capture_output=True, text=True,
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if os.name == "nt" else 0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (result.stdout or result.stderr or "").strip()
+    match = re.search(r"(\d+\.\d+(?:\.\d+)*)", text)
+    return match.group(1) if match else None
+
+
+@dataclass
+class RuntimeCandidate:
+    """A complete, self-consistent LibreOffice runtime (or an explained reject).
+
+    Resolution works on *candidates*, not individual paths, so a broken
+    project-local runtime can no longer mask a valid explicit override (PF-016).
+    """
+
+    source: str                       # "project-local" | "PDF_FORGE_SOFFICE"
+    soffice: Optional[Path] = None
+    python: Optional[Path] = None
+    version: Optional[str] = None
+    complete: bool = False
+    reason: str = ""
+
+
+def _describe_candidate(source: str, base: Optional[Path],
+                        soffice: Optional[Path], verify_version: bool) -> RuntimeCandidate:
+    """Build a candidate and say precisely why it is or is not usable."""
+    if soffice is None:
+        return RuntimeCandidate(source=source, reason="no soffice executable found")
+    python = None
+    program = soffice.parent
+    for name in ("python.exe", "python3", "python"):
+        if (program / name).exists():
+            python = program / name
+            break
+    if python is None:
+        return RuntimeCandidate(
+            source=source, soffice=soffice,
+            reason="LibreOffice's bundled Python is missing (incomplete runtime)",
+        )
+    version = probe_soffice_version(soffice) if verify_version else marker_version(base)
+    if verify_version and version is None:
+        return RuntimeCandidate(
+            source=source, soffice=soffice, python=python,
+            reason="the binary did not report a version (corrupt or blocked)",
+        )
+    return RuntimeCandidate(source=source, soffice=soffice, python=python,
+                            version=version, complete=True)
+
+
+def resolve_runtime_candidates(verify_version: bool = True):
+    """Every candidate runtime, best first, each marked complete or rejected."""
+    candidates = []
+    local_root = libreoffice_dir()
+    candidates.append(_describe_candidate(
+        "project-local", local_root, _search_soffice_under(local_root), verify_version
+    ))
+    override = os.environ.get(_SOFFICE_ENV)
+    if override:
+        path = Path(override)
+        found = path if path.is_file() else _search_soffice_under(path)
+        base = path if path.is_dir() else (found.parent.parent if found else None)
+        candidates.append(
+            _describe_candidate(_SOFFICE_ENV, base, found, verify_version)
+        )
+    return candidates
+
+
+def select_runtime(verify_version: bool = True) -> Optional[RuntimeCandidate]:
+    """The first *complete* candidate: project-local preferred, override next."""
+    for candidate in resolve_runtime_candidates(verify_version):
+        if candidate.complete:
+            return candidate
+    return None
+
+
+def libreoffice_version() -> Optional[str]:
+    """Version of the runtime actually in use (probed from the binary)."""
+    candidate = select_runtime()
+    return candidate.version if candidate else None
+
+
+def runtime_status(verify_version: bool = True) -> dict:
+    """Summarize the conversion runtime, based on a complete verified candidate.
+
+    ``ready`` is true only when a candidate is complete *and* its binary
+    answered a version probe, so a forged marker or a half-removed runtime can
+    never report ready (PF-037). Rejected candidates are reported with the
+    reason they were skipped (PF-016).
+    """
+    candidates = resolve_runtime_candidates(verify_version)
+    chosen = next((c for c in candidates if c.complete), None)
     return {
         "unoserver_installed": unoserver_installed(),
         "unoserver_version": unoserver_version(),
-        "soffice": str(soffice) if soffice else None,
-        "soffice_python": str(find_soffice_python() or "") or None,
-        "libreoffice_version": libreoffice_version(),
-        "ready": bool(soffice) and unoserver_installed()
-        and find_soffice_python() is not None,
+        "soffice": str(chosen.soffice) if chosen else None,
+        "soffice_python": str(chosen.python) if chosen else None,
+        "libreoffice_version": chosen.version if chosen else None,
+        "runtime_source": chosen.source if chosen else None,
+        "rejected": [
+            {"source": c.source, "reason": c.reason,
+             "soffice": str(c.soffice) if c.soffice else None}
+            for c in candidates if not c.complete
+        ],
+        "ready": bool(chosen) and unoserver_installed(),
     }
 
 
