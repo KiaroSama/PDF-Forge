@@ -235,3 +235,67 @@ def test_logging_failure_does_not_mask_the_outcome(monkeypatch):
 
     monkeypatch.setattr(_logging, "shutdown", boom)
     assert app.app.main([]) == 0
+
+
+def _arg_names(args) -> set:
+    """Every parameter name a function or lambda binds."""
+    names = {a.arg for a in list(args.args) + list(args.kwonlyargs)
+             + list(args.posonlyargs)}
+    if args.vararg:
+        names.add(args.vararg.arg)
+    if args.kwarg:
+        names.add(args.kwarg.arg)
+    return names
+
+
+def test_no_module_references_an_unresolvable_name():
+    """Guard the star-import layering against runtime NameErrors.
+
+    The package shares names via `from .x import *` with per-module __all__, so a
+    helper that is imported *privately* by one module is not re-exported to the
+    next. A call added without its import then type-checks, imports, and passes
+    unit tests - and only fails when that exact line runs. That is precisely how
+    promote_atomically() slipped into the conversion finalize path.
+    """
+    import ast
+    import builtins
+    import importlib
+
+    builtin_names = set(dir(builtins))
+    problems = []
+    package = Path(app.__file__).parent
+
+    for source in sorted(package.glob("*.py")):
+        if source.name == "__init__.py":
+            continue
+        module = importlib.import_module(f"pdf_forge.{source.stem}")
+        available = set(dir(module)) | builtin_names
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        bound = set()
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                bound.add(node.name)
+                bound |= _arg_names(node.args)
+            elif isinstance(node, ast.Lambda):
+                bound |= _arg_names(node.args)
+            elif isinstance(node, ast.ClassDef):
+                bound.add(node.name)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                bound.add(node.id)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    bound.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                bound.add(node.name)
+            elif isinstance(node, ast.Global):
+                bound.update(node.names)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                if node.id not in bound and node.id not in available:
+                    problems.append(f"{source.name}:{node.lineno} {node.id}")
+
+    assert not problems, "names that cannot resolve at runtime: " + ", ".join(
+        sorted(set(problems))
+    )
