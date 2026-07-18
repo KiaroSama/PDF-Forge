@@ -139,8 +139,10 @@ def test_watermark_painted_through_a_shared_form(tmp_path):
 def test_non_target_image_on_the_same_page_survives(tmp_path):
     src = tmp_path / "two.pdf"
     doc = pymupdf.open()
-    mark = io.BytesIO(); Image.new("RGB", (80, 80), (255, 0, 0)).save(mark, "PNG")
-    other = io.BytesIO(); Image.new("RGB", (300, 200), (0, 128, 0)).save(other, "PNG")
+    mark = io.BytesIO()
+    Image.new("RGB", (80, 80), (255, 0, 0)).save(mark, "PNG")
+    other = io.BytesIO()
+    Image.new("RGB", (300, 200), (0, 128, 0)).save(other, "PNG")
     for _ in range(3):
         page = doc.new_page(width=500, height=500)
         page.insert_image(pymupdf.Rect(10, 10, 310, 210), stream=other.getvalue())
