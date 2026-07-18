@@ -40,6 +40,7 @@ __all__ = [
     'find_soffice', 'find_soffice_python', 'venv_site_packages',
     'unoserver_installed', 'unoserver_version', 'libreoffice_version',
     'runtime_status', 'random_localhost_port', 'RuntimeCandidate',
+    'verify_runtime_directory',
     'resolve_runtime_candidates', 'select_runtime', 'probe_soffice_version',
     'marker_version',
     'ConversionServer', 'convert_to_pdf', 'provision_runtime', 'clean_runtime',
@@ -875,6 +876,46 @@ def clean_runtime() -> bool:
     return False
 
 
+def verify_runtime_directory(base: Path, expect_version: str = None) -> "RuntimeCandidate":
+    """Validate a runtime directory as a complete, self-consistent tuple.
+
+    Checks the executable, the bundled Python/UNO interpreter, and the version
+    the binary itself reports. A directory that merely contains a ``soffice``
+    file is NOT accepted as installed (PF-015), and the provisioning marker is
+    only a hint - the binary decides.
+    """
+    base = Path(base)
+    if not base.exists():
+        return RuntimeCandidate(source="runtime-dir", reason="directory does not exist")
+    soffice = _search_soffice_under(base)
+    if soffice is None:
+        return RuntimeCandidate(source="runtime-dir", reason="soffice executable missing")
+    program = soffice.parent
+    python = None
+    for name in ("python.exe", "python3", "python"):
+        if (program / name).exists():
+            python = program / name
+            break
+    if python is None:
+        return RuntimeCandidate(
+            source="runtime-dir", soffice=soffice,
+            reason="LibreOffice's bundled Python is missing",
+        )
+    version = probe_soffice_version(soffice)
+    if version is None:
+        return RuntimeCandidate(
+            source="runtime-dir", soffice=soffice, python=python,
+            reason="the binary did not report a version",
+        )
+    if expect_version and not version.startswith(expect_version.split(".")[0]):
+        return RuntimeCandidate(
+            source="runtime-dir", soffice=soffice, python=python, version=version,
+            reason=f"version mismatch: expected {expect_version}, found {version}",
+        )
+    return RuntimeCandidate(source="runtime-dir", soffice=soffice, python=python,
+                            version=version, complete=True)
+
+
 def provision_runtime(
     progress=None, force: bool = False, download=None, verify_checksum: bool = True,
 ) -> dict:
@@ -894,9 +935,21 @@ def provision_runtime(
     meta = load_runtime_meta()
     target = libreoffice_dir()
 
-    if not force and find_soffice() is not None and _search_soffice_under(target):
-        logger.info("LibreOffice runtime already present at %s.", target)
-        return {"status": "already-present", "soffice": str(find_soffice())}
+    if not force:
+        existing = verify_runtime_directory(target)
+        if existing.complete:
+            logger.info("Verified LibreOffice runtime already present at %s.", target)
+            return {"status": "already-present", "soffice": str(existing.soffice),
+                    "version": existing.version}
+        if target.exists():
+            # Exists but does not verify: interrupted extraction, partial
+            # delete, missing bundled Python, or a forged marker. Treat it as
+            # damaged and rebuild rather than reporting it installed (PF-015).
+            logger.warning(
+                "Existing runtime at %s is incomplete (%s); rebuilding it.",
+                target, existing.reason,
+            )
+            shutil.rmtree(target, ignore_errors=True)
 
     if os.name != "nt":
         raise OfficeRuntimeError(
@@ -954,21 +1007,44 @@ def provision_runtime(
 
     if force:
         clean_runtime()
-    target.mkdir(parents=True, exist_ok=True)
-    if progress:
-        progress("Extracting (administrative install, no system changes)...")
-    _admin_extract_msi(installer, target)
+    # Extract into a unique staging directory and promote it only once the
+    # complete runtime verifies, so an interrupted or partial extraction can
+    # never be mistaken for an installed runtime (PF-015).
+    runtime_root().mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix="pdfforge_lostage_",
+                                    dir=str(runtime_root())))
+    try:
+        if progress:
+            progress("Extracting (administrative install, no system changes)...")
+        _admin_extract_msi(installer, staging)
 
-    soffice = _search_soffice_under(target)
-    if soffice is None:
-        raise OfficeRuntimeError(
-            "Extraction finished but soffice was not found under the runtime "
-            "directory; the runtime is incomplete."
+        staged = verify_runtime_directory(staging, expect_version=version)
+        if not staged.complete:
+            raise OfficeRuntimeError(
+                f"The extracted runtime is incomplete: {staged.reason}. "
+                "Nothing was installed."
+            )
+        # The marker is written LAST, so its presence implies a verified tree.
+        (staging / ".provisioned.json").write_text(
+            json.dumps({"version": staged.version,
+                        "soffice": str(staged.soffice)}, indent=2),
+            encoding="utf-8",
         )
-    (target / ".provisioned.json").write_text(
-        json.dumps({"version": version, "soffice": str(soffice)}, indent=2),
-        encoding="utf-8",
-    )
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(str(staging), str(target))     # atomic promotion
+        staging = None
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    final = verify_runtime_directory(target, expect_version=version)
+    if not final.complete:
+        raise OfficeRuntimeError(
+            f"The promoted runtime does not verify: {final.reason}."
+        )
+    soffice = final.soffice
     logger.info("Provisioned LibreOffice %s at %s.", version, soffice)
     return {"status": "provisioned", "version": version, "soffice": str(soffice)}
 
@@ -987,37 +1063,28 @@ def _download(url: str, dest: Path, download=None) -> None:
 
 
 def _ensure_installer_service() -> None:
-    """Make sure the Windows Installer service is running before calling msiexec.
+    """Check the Windows Installer service WITHOUT changing its state.
 
-    ``msiexec /a`` does not reliably start ``msiserver`` from a non-interactive
-    session: when the service is stopped it can block indefinitely instead of
-    failing. Starting it first (or reporting clearly that it cannot be started)
-    turns a silent hang into an actionable message.
+    Provisioning documents that it makes no system changes, so it must not start
+    a stopped service behind the user's back (PF-017): that alters machine state
+    outside the project folder and may be blocked by policy. A stopped service
+    stops provisioning with an actionable message instead - and never silently
+    hangs, which is what msiexec would do on its own.
     """
     try:
         query = subprocess.run(["sc", "query", "msiserver"], capture_output=True,
                                text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
-        return  # Cannot query; let msiexec try anyway (guarded by its timeout).
-    if "RUNNING" in query.stdout.upper():
+        return  # Cannot query; let msiexec try (bounded by its own timeout).
+    state = query.stdout.upper()
+    if "RUNNING" in state or "STATE" not in state:
         return
-    logger.info("Windows Installer service is not running; starting it.")
-    try:
-        started = subprocess.run(["net", "start", "msiserver"], capture_output=True,
-                                 text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise OfficeRuntimeError(
-            "The Windows Installer service (msiserver) is not running and could "
-            f"not be started ({exc}). Start it and run --setup-office again."
-        ) from exc
-    if started.returncode != 0:
-        message = (started.stdout + started.stderr).strip().splitlines()
-        detail = message[-1] if message else f"exit code {started.returncode}"
-        raise OfficeRuntimeError(
-            "The Windows Installer service (msiserver) is stopped and could not "
-            f"be started: {detail}. Start it (an elevated 'net start msiserver') "
-            "and run --setup-office again. Nothing was installed."
-        )
+    raise OfficeRuntimeError(
+        "The Windows Installer service (msiserver) is stopped, and PDF Forge "
+        "does not change Windows service state. Start it yourself and run "
+        "--setup-office again:  net start msiserver  (elevated). "
+        "Nothing was downloaded or installed."
+    )
 
 
 def _admin_extract_msi(installer: Path, target: Path,

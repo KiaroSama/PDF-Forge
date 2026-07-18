@@ -6,6 +6,7 @@ override) and PF-037 (the version comes from the binary; a marker is only a
 cache hint, so a forged one cannot make the runtime report ready).
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -133,3 +134,108 @@ def test_real_runtime_reports_a_probed_version():
     marker = ort.marker_version()
     if marker:
         assert status["libreoffice_version"].startswith(marker.split(".")[0])
+
+
+# --------------------------------------------------------------------------- #
+# PF-015 - a partial extraction is never accepted as installed
+# --------------------------------------------------------------------------- #
+
+def test_soffice_only_directory_is_not_accepted(tmp_path):
+    """The reported case: only a discovered soffice left in an incomplete tree."""
+    partial = fake_runtime(tmp_path / "partial", with_python=False)
+    result = ort.verify_runtime_directory(partial)
+    assert result.complete is False
+    assert "Python" in result.reason
+
+
+def test_interrupted_extraction_is_not_accepted(tmp_path):
+    empty = tmp_path / "interrupted"
+    empty.mkdir()
+    result = ort.verify_runtime_directory(empty)
+    assert result.complete is False
+    assert "soffice" in result.reason
+
+
+def test_marker_alone_does_not_make_a_runtime_complete(tmp_path):
+    forged = fake_runtime(tmp_path / "forged", marker="25.8.7")
+    # The fake soffice cannot report a version, so the tuple is incomplete.
+    result = ort.verify_runtime_directory(forged)
+    assert result.complete is False
+    assert "version" in result.reason
+
+
+def test_provisioning_rebuilds_an_incomplete_runtime(tmp_path, monkeypatch):
+    """An existing-but-broken runtime must be rebuilt, not reported as present."""
+    broken = fake_runtime(tmp_path / "rt", with_python=False)
+    monkeypatch.setattr(ort, "libreoffice_dir", lambda: broken)
+    monkeypatch.setattr(ort, "runtime_root", lambda: tmp_path)
+    monkeypatch.setattr(ort, "load_runtime_meta", lambda: {
+        "version": "25.8.7",
+        "windows": {"url": "https://example.invalid/x.msi", "sha256": "00"},
+    })
+    monkeypatch.setattr(os, "name", "nt", raising=False)
+
+    calls = {"download": 0}
+
+    def fake_download(_url, dest):
+        calls["download"] += 1
+        Path(dest).write_bytes(b"msi")
+
+    # Checksum verification is skipped so the test stops at extraction.
+    with pytest.raises(ort.OfficeRuntimeError):
+        ort.provision_runtime(download=fake_download, verify_checksum=False)
+    assert calls["download"] == 1, "a broken runtime must trigger a rebuild"
+
+
+def test_real_runtime_verifies_completely():
+    """The provisioned runtime on this machine must pass the full tuple check."""
+    if not ort.runtime_status(verify_version=False)["soffice"]:
+        pytest.skip("no provisioned LibreOffice on this machine")
+    result = ort.verify_runtime_directory(ort.libreoffice_dir())
+    assert result.complete, result.reason
+    assert result.python and result.version
+
+
+# --------------------------------------------------------------------------- #
+# PF-017 - Windows Installer service state is never changed
+# --------------------------------------------------------------------------- #
+
+def test_provisioning_never_starts_a_service():
+    source = Path(ort.__file__).read_text(encoding="utf-8")
+    assert '"net", "start"' not in source and "net start msiserver\"" not in source, (
+        "provisioning must not change Windows service state"
+    )
+
+
+def test_stopped_service_is_reported_not_started(monkeypatch):
+    import subprocess as sp
+
+    class Result:
+        stdout = "SERVICE_NAME: msiserver\n        STATE : 1  STOPPED"
+        stderr = ""
+        returncode = 0
+
+    started = {"called": False}
+
+    def fake_run(cmd, *a, **k):
+        if cmd[:1] == ["net"]:
+            started["called"] = True
+        return Result()
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    with pytest.raises(ort.OfficeRuntimeError) as excinfo:
+        ort._ensure_installer_service()
+    assert "does not change Windows service state" in str(excinfo.value)
+    assert started["called"] is False, "the service must not be started"
+
+
+def test_running_service_passes(monkeypatch):
+    import subprocess as sp
+
+    class Result:
+        stdout = "SERVICE_NAME: msiserver\n        STATE : 4  RUNNING"
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Result())
+    ort._ensure_installer_service()   # must not raise
