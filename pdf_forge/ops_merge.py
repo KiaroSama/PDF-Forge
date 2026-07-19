@@ -328,12 +328,14 @@ def _run_merge_with_sources(mode: str, sources: List[Path]) -> None:
             # Reopen each source silently with its captured password.
             for src, src_pw in zip(sources, passwords):
                 docs.append(open_source_pdf(src, password=src_pw))
-            written = write_merged_pdfs_to_pdf(
+            result = write_merged_pdfs_to_pdf(
                 docs,
                 out_path,
                 progress=lambda c, t: _print_progress("Merging pages", c, t),
                 protection=merge_protection,
             )
+            # Report the file actually written, not the configured name (C-01).
+            written_path, written = result.path, result.count
         except Exception as exc:  # noqa: BLE001 - present a clean message, log details
             print_error(f"Failed to create the merged PDF: {exc}")
             logger.exception("Merge failed for output '%s'", out_path)
@@ -342,9 +344,9 @@ def _run_merge_with_sources(mode: str, sources: List[Path]) -> None:
             for doc in docs:
                 close_doc(doc)
         print_success(
-            f"Done. Merged {len(sources)} file(s), {written} page(s) into:\n  {out_path}"
+            f"Done. Merged {len(sources)} file(s), {written} page(s) into:\n  {written_path}"
         )
-        logger.info("Merge complete: output='%s' pages=%d", out_path, written)
+        logger.info("Merge complete: output='%s' pages=%d", written_path, written)
 
     queue_task(
         f"Merge {len(sources)} PDF(s) -> {out_path.name}",

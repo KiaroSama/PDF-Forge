@@ -6,10 +6,16 @@
 
 [project]
 name = "pdf-forge"
-version = "2.0.0"
+# Single source of truth: the version lives in pdf_forge/constants.py, which is
+# what the application, the banner and --version already report. Declaring it
+# here as well let the two drift (metadata said 2.0.0 while the app said 2.0.1).
+dynamic = ["version"]
 description = "Interactive, local PDF toolkit (page tools, merge, convert, protect)."
 requires-python = ">=3.10"
 readme = "README.md"
+
+[tool.setuptools.dynamic]
+version = { attr = "pdf_forge.constants.APP_VERSION" }
 
 [tool.pytest.ini_options]
 minversion = "8.0"

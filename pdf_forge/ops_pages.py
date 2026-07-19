@@ -107,21 +107,24 @@ def _extract_single_file(ref, source: Path, total_pages: int, group: "PageGroup"
         doc = None
         try:
             doc = ref.open()
-            written = write_pages_to_pdf(
+            result = write_pages_to_pdf(
                 doc,
                 pages_zero_based,
                 out_path,
                 progress=lambda c, t: _print_progress("Extracting", c, t),
                 protection=protection,
             )
+            # No-clobber promotion may have chosen a suffixed name; everything
+            # downstream must name the file that was actually written (C-01).
+            written_path, written = result.path, result.count
         except Exception as exc:  # noqa: BLE001 - present a clean message, log details
             print_error(f"Failed to create the output PDF: {exc}")
             logger.exception("Extraction failed for output '%s'", out_path)
             return
         finally:
             close_doc(doc)
-        print_success(f"Done. Wrote {written} page(s) to:\n  {out_path}")
-        logger.info("Extract complete: output='%s' pages=%d", out_path, written)
+        print_success(f"Done. Wrote {written} page(s) to:\n  {written_path}")
+        logger.info("Extract complete: output='%s' pages=%d", written_path, written)
 
     queue_task(
         f"Extract pages {group.text} from {source.name} -> {out_path.name}",
@@ -188,8 +191,9 @@ def _extract_multiple_files(ref, source: Path, total_pages: int,
             pages_zero_based = [p - 1 for p in group.pages]
             _print_progress("Writing files", index, len(groups))
             try:
-                written = write_pages_to_pdf(doc, pages_zero_based, out_path,
-                                             protection=protection)
+                result = write_pages_to_pdf(doc, pages_zero_based, out_path,
+                                            protection=protection)
+                written_path, written = result.path, result.count
             except Exception as exc:  # noqa: BLE001
                 sys.stdout.write("\n")
                 print_error(f"Failed while writing '{out_path.name}': {exc}")
@@ -199,7 +203,7 @@ def _extract_multiple_files(ref, source: Path, total_pages: int,
                 )
                 _report_created(created_files, total_written, out_dir)
                 return
-            created_files.append(out_path)
+            created_files.append(written_path)
             total_written += written
 
         print_success(
@@ -383,8 +387,9 @@ def operation_split_chunks() -> None:
             pages_zero_based = list(range(start - 1, end))
             _print_progress("Writing chunks", index, len(chunks))
             try:
-                written = write_pages_to_pdf(reader, pages_zero_based, out_path,
-                                             protection=protection)
+                result = write_pages_to_pdf(reader, pages_zero_based, out_path,
+                                            protection=protection)
+                written_path, written = result.path, result.count
             except Exception as exc:  # noqa: BLE001
                 sys.stdout.write("\n")
                 print_error(f"Failed while writing '{out_path.name}': {exc}")
@@ -395,7 +400,7 @@ def operation_split_chunks() -> None:
                 )
                 _report_created(created_files, total_written, out_dir)
                 return
-            created_files.append(out_path)
+            created_files.append(written_path)
             total_written += written
 
         print_success(
@@ -525,11 +530,12 @@ def operation_delete_pages_single() -> None:
         doc = None
         try:
             doc = ref.open()
-            written = write_pages_to_pdf(
+            result = write_pages_to_pdf(
                 doc, kept, out_path,
                 progress=lambda c, t: _print_progress("Writing pages", c, t),
                 protection=protection,
             )
+            written_path, written = result.path, result.count
         except Exception as exc:  # noqa: BLE001 - clean message, log details
             print_error(f"Failed to create the output PDF: {exc}")
             logger.exception("Delete-pages failed for output '%s'", out_path)
@@ -537,9 +543,9 @@ def operation_delete_pages_single() -> None:
         finally:
             close_doc(doc)
         print_success(
-            f"Done. Deleted {len(present)} page(s); kept {written}:\n  {out_path}"
+            f"Done. Deleted {len(present)} page(s); kept {written}:\n  {written_path}"
         )
-        logger.info("Delete-pages complete: output='%s' kept=%d", out_path, written)
+        logger.info("Delete-pages complete: output='%s' kept=%d", written_path, written)
 
     queue_task(
         f"Delete pages {selection_text} from {source.name} -> {out_path.name}",
@@ -654,8 +660,9 @@ def operation_delete_pages_batch() -> None:
             file_policy = None
             result["unprotected"] = True
         try:
-            written = write_pages_to_pdf(reader, kept, out_path,
-                                         protection=file_policy)
+            written_result = write_pages_to_pdf(reader, kept, out_path,
+                                                protection=file_policy)
+            written_path, written = written_result.path, written_result.count
         except Exception as exc:  # noqa: BLE001 - keep the batch going
             print_error(f"  Failed: {exc}")
             logger.exception("Delete-pages batch write failed for '%s'", src)
@@ -666,7 +673,7 @@ def operation_delete_pages_batch() -> None:
         result["processed"] = 1
         print_success(
             f"  -> deleted {len(present)} page(s) [{summarize_ranges(present)}]; "
-            f"kept {written} -> {out_path.name}"
+            f"kept {written} -> {written_path.name}"
         )
         if missing:
             print_note(

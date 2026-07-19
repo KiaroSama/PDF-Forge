@@ -27,7 +27,7 @@ def test_write_pages_and_original_unchanged(tmp_path):
 
     reader = app.open_source_pdf(src)
     out = tmp_path / "extract.pdf"
-    written = app.write_pages_to_pdf(reader, [0, 2, 4], out)
+    written = app.write_pages_to_pdf(reader, [0, 2, 4], out).count
 
     assert written == 3
     assert out.exists()
@@ -81,7 +81,7 @@ def test_unicode_and_persian_paths(tmp_path):
 
     reader = app.open_source_pdf(src)
     out = folder / "خروجی.pdf"  # "output"
-    written = app.write_pages_to_pdf(reader, [0, 1, 2], out)
+    written = app.write_pages_to_pdf(reader, [0, 1, 2], out).count
 
     assert written == 3
     assert out.exists()
@@ -106,7 +106,8 @@ def test_full_chunk_split_integrity(tmp_path):
     for start, end in chunks:
         name = app.build_chunk_output_name("big", start, end, pad)
         path = out_dir / name
-        total += app.write_pages_to_pdf(reader, list(range(start - 1, end)), path)
+        total += app.write_pages_to_pdf(
+            reader, list(range(start - 1, end)), path).count
 
     assert total == 23
     files = sorted(out_dir.glob("*.pdf"))
@@ -127,7 +128,7 @@ def test_merge_two_pdfs_page_count(tmp_path):
     readers = [app.open_source_pdf(a), app.open_source_pdf(b)]
     out = tmp_path / "merged.pdf"
 
-    written = app.write_merged_pdfs_to_pdf(readers, out)
+    written = app.write_merged_pdfs_to_pdf(readers, out).count
 
     assert written == 8
     assert out.exists()
@@ -140,7 +141,7 @@ def test_merge_preserves_order(tmp_path):
     c = make_pdf(tmp_path / "c.pdf", 1)
     readers = [app.open_source_pdf(c), app.open_source_pdf(a), app.open_source_pdf(b)]
     out = tmp_path / "ordered.pdf"
-    written = app.write_merged_pdfs_to_pdf(readers, out)
+    written = app.write_merged_pdfs_to_pdf(readers, out).count
     # c(1) + a(2) + b(4) = 7 pages in that order.
     assert written == 7
     assert len(PdfReader(str(out)).pages) == 7
@@ -265,7 +266,7 @@ def test_merge_unicode_persian_paths(tmp_path):
 
     readers = [app.open_source_pdf(a), app.open_source_pdf(b)]
     out = folder / "ادغام.pdf"  # "merged"
-    written = app.write_merged_pdfs_to_pdf(readers, out)
+    written = app.write_merged_pdfs_to_pdf(readers, out).count
 
     assert written == 5
     assert out.exists()

@@ -21,13 +21,14 @@ import errno
 import json
 import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Mapping, Optional, Set
 
 from .constants import *  # noqa: F401,F403
 
 __all__ = [
-    'PromotionError', 'promote_atomically', 'claim_unique_path',
+    'PromotionError', 'OutputResult', 'promote_atomically', 'claim_unique_path',
     'state_dir', 'manifest_path', 'file_identity', 'FileLock',
     'load_generated_outputs', 'record_generated_output',
     'forget_generated_outputs', 'state_store_warning',
@@ -82,6 +83,35 @@ def claim_unique_path(path: Path, max_attempts: int = 10000) -> Path:
     raise PromotionError(f"Could not allocate a free name near '{path}'.")
 
 
+@dataclass(frozen=True)
+class OutputResult:
+    """What a writer actually produced.
+
+    ``path`` is the path on disk, which is NOT always the path that was
+    configured: when the requested name appeared between configuration and
+    execution, no-clobber promotion allocates a ``_2``/``_3`` sibling. Callers
+    must use this value for validation, manifest recording, success messages,
+    logs, created-file lists and statistics - a writer that reports the
+    configured path can name a file it did not write.
+
+    ``count`` is the operation's own measure (pages written, pages modified);
+    ``stats`` carries anything else an operation needs to report.
+    """
+
+    path: Path
+    count: int = 0
+    stats: Mapping[str, object] = field(default_factory=dict)
+
+
+def _discard(path: Path, description: str) -> None:
+    """Remove one artifact we own, never raising in a cleanup path."""
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        logger.warning("Could not remove %s: %s", description, path)
+
+
 def promote_atomically(tmp_path: Path, final_path: Path,
                        record: bool = True) -> Path:
     """Promote a validated temp file to its final name without clobbering.
@@ -95,6 +125,7 @@ def promote_atomically(tmp_path: Path, final_path: Path,
     place every PDF output is finalized - so no writer can forget it.
     """
     tmp_path, final_path = Path(tmp_path), Path(final_path)
+    claimed = None
     try:
         final_path.parent.mkdir(parents=True, exist_ok=True)
         claimed = claim_unique_path(final_path)
@@ -103,11 +134,15 @@ def promote_atomically(tmp_path: Path, final_path: Path,
         # created by us microseconds earlier and nobody else can hold that name.
         os.replace(str(tmp_path), str(claimed))
     except Exception:
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except OSError:
-            logger.warning("Could not remove temporary file: %s", tmp_path)
+        # Clean up BOTH artifacts, independently: a failure to remove one must
+        # not abandon the other. The claim is an empty placeholder wearing the
+        # user's expected output name, so leaving it behind hands them a 0-byte
+        # file and pushes every later run onto a _2 suffix. Only the placeholder
+        # this call created is removed - never a pre-existing external file,
+        # which claim_unique_path by construction never returns.
+        _discard(tmp_path, "temporary file")
+        if claimed is not None:
+            _discard(claimed, "claimed output placeholder")
         raise
     if record:
         record_generated_output(claimed)

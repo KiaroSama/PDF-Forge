@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .constants import *  # noqa: F401,F403
-from .safeio import promote_atomically
+from .safeio import OutputResult, promote_atomically
 from .core import *  # noqa: F401,F403
 
 __all__ = ['_import_pymupdf', 'PdfOpenError', 'PdfPasswordCancelled',
@@ -361,11 +361,24 @@ def detect_protection(doc) -> ProtectionPolicy:
 
 
 def _save_doc_to_path_safely(out_doc, out_path: Path, expected_pages: int,
-                             validate, protection: "ProtectionPolicy" = None) -> None:
+                             validate, protection: "ProtectionPolicy" = None,
+                             deep_validate=None) -> Path:
     """Save a document via temp file -> validate -> atomic rename.
+
+    Returns the path actually written, which is not always ``out_path``: when
+    the requested name appeared between configuration and execution, no-clobber
+    promotion allocates a suffixed sibling. The caller must use the returned
+    value for reporting, logging and any further validation.
 
     ``protection`` (optional) re-applies the source's encryption policy to the
     output so a transformation never silently strips protection.
+
+    ``deep_validate`` (optional) receives the STAGING path and raises to reject
+    the output. It runs before the final name is claimed, so an output that
+    fails a semantic check never becomes a user-visible file and never enters
+    the generated-output manifest. Validating after promotion would leave the
+    rejected file on disk, and - when the requested name was taken - would
+    inspect a file this run did not write.
     """
     tmp_fd, tmp_name = tempfile.mkstemp(
         suffix=".tmp", prefix=".pdfforge_", dir=str(out_path.parent)
@@ -381,9 +394,11 @@ def _save_doc_to_path_safely(out_doc, out_path: Path, expected_pages: int,
         validate(tmp_path, expected_pages=expected_pages,
                  password=(protection.password if extra else None))
         logger.debug("Validated temporary output (%d page(s)).", expected_pages)
-        # Atomic promotion. The final path is guaranteed unique by the caller.
-        out_path = promote_atomically(tmp_path, out_path)
-        # Remember it so a later folder run never reprocesses our own output.
+        if deep_validate is not None:
+            deep_validate(tmp_path)
+        # Atomic promotion, and the manifest entry, happen only once every
+        # check has passed against the bytes that will become the output.
+        return promote_atomically(tmp_path, out_path)
     except Exception:
         try:
             if tmp_path.exists():
@@ -395,13 +410,18 @@ def _save_doc_to_path_safely(out_doc, out_path: Path, expected_pages: int,
 
 
 def write_pages_to_pdf(doc, pages_zero_based: Sequence[int], out_path: Path,
-                       progress=None, protection: "ProtectionPolicy" = None) -> int:
+                       progress=None,
+                       protection: "ProtectionPolicy" = None) -> OutputResult:
     """Write the given 0-based pages to ``out_path`` using a safe temp file.
 
-    The data is first written to a temporary file in the destination directory,
-    validated, then atomically renamed to the final path. Temporary files are
+    The data is written to a temporary file in the destination directory, fully
+    validated there - shallow structure, exact page selection and order, and the
+    decided protection - and only then atomically promoted. Temporary files are
     removed on failure. ``protection`` re-applies the source's encryption policy
-    so a page transformation never silently strips it. Returns pages written.
+    so a page transformation never silently strips it.
+
+    Returns an :class:`OutputResult` whose ``path`` is the file actually
+    written; it differs from ``out_path`` when the requested name was taken.
     """
     pymupdf = _import_pymupdf()
 
@@ -418,21 +438,26 @@ def write_pages_to_pdf(doc, pages_zero_based: Sequence[int], out_path: Path,
             out_doc.insert_pdf(doc, from_page=page_index, to_page=page_index)
             if progress is not None:
                 progress(index, total)
-        _save_doc_to_path_safely(out_doc, out_path, total, _validate_written_pdf,
-                                 protection=protection)
-        # Deep postcondition: the output must hold exactly the selected pages,
-        # in order, with exactly the protection that was decided (PF-035).
-        validate_page_selection_output(
-            out_path, doc, pages_zero_based,
-            password=getattr(protection, "password", "") or None,
+        def _deep(staging: Path) -> None:
+            # The output must hold exactly the selected pages, in order, with
+            # exactly the protection that was decided - checked on the staging
+            # bytes, before any user-visible name exists (PF-035, C-02).
+            validate_page_selection_output(
+                staging, doc, pages_zero_based,
+                password=getattr(protection, "password", "") or None,
+            )
+            validate_protection_postcondition(staging, protection)
+
+        written = _save_doc_to_path_safely(
+            out_doc, out_path, total, _validate_written_pdf,
+            protection=protection, deep_validate=_deep,
         )
-        validate_protection_postcondition(out_path, protection)
     finally:
         out_doc.close()
 
     elapsed = time.perf_counter() - started
-    logger.info("Wrote '%s' (%d page(s)) in %.2fs.", out_path, total, elapsed)
-    return total
+    logger.info("Wrote '%s' (%d page(s)) in %.2fs.", written, total, elapsed)
+    return OutputResult(path=written, count=total)
 
 
 def _page_fingerprints(doc):
@@ -634,17 +659,19 @@ def write_merged_pdfs_to_pdf(docs, out_path: Path, progress=None,
                 "Appended source %d/%d (%d page(s); running total=%d).",
                 doc_index, len(docs), page_count, written,
             )
-        _save_doc_to_path_safely(out_doc, out_path, total, _validate_merged_pdf,
-                                 protection=protection)
+        written_path = _save_doc_to_path_safely(
+            out_doc, out_path, total, _validate_merged_pdf,
+            protection=protection,
+        )
     finally:
         out_doc.close()
 
     elapsed = time.perf_counter() - started
     logger.info(
         "Merged %d source(s) -> '%s' (%d page(s)) in %.2fs.",
-        len(docs), out_path, total, elapsed,
+        len(docs), written_path, total, elapsed,
     )
-    return total
+    return OutputResult(path=written_path, count=total)
 
 
 def scan_image_dpi_stats(doc, max_pages: int = 40):
