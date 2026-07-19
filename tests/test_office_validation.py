@@ -353,6 +353,9 @@ def test_bridge_loss_without_password_falls_back_to_the_cli(tmp_path, monkeypatc
     password involved must fall back to the CLI instead of failing the file.
     """
     from pdf_forge import office_runtime as ort
+    # convert_to_pdf lives in office_server and calls the CLI fallback as a
+    # module-local name, so the patch has to land where it is defined.
+    from pdf_forge import office_server
 
     src = make_ooxml(tmp_path / "doc.docx", "word")
     out = tmp_path / "doc.pdf"
@@ -381,7 +384,7 @@ def test_bridge_loss_without_password_falls_back_to_the_cli(tmp_path, monkeypatc
     fake_module.UnoClient = FakeUnoClient
     monkeypatch.setitem(sys.modules, "unoserver", types.ModuleType("unoserver"))
     monkeypatch.setitem(sys.modules, "unoserver.client", fake_module)
-    monkeypatch.setattr(ort, "convert_via_soffice_cli", fake_cli)
+    monkeypatch.setattr(office_server, "convert_via_soffice_cli", fake_cli)
 
     ort.convert_to_pdf(FakeServer(), src, out, timeout=30)
     assert calls["cli"] == 1, "the CLI fallback must run"
@@ -392,6 +395,9 @@ def test_bridge_loss_with_a_password_does_not_fall_back(tmp_path, monkeypatch):
     """The CLI cannot carry a password without exposing it on a command line,
     so an encrypted source must stay on the in-memory path and fail loudly."""
     from pdf_forge import office_runtime as ort
+    # convert_to_pdf lives in office_server and calls the CLI fallback as a
+    # module-local name, so the patch has to land where it is defined.
+    from pdf_forge import office_server
 
     src = make_ooxml(tmp_path / "doc.docx", "word")
 
@@ -416,7 +422,7 @@ def test_bridge_loss_with_a_password_does_not_fall_back(tmp_path, monkeypatch):
     fake_module.UnoClient = FakeUnoClient
     monkeypatch.setitem(sys.modules, "unoserver", types.ModuleType("unoserver"))
     monkeypatch.setitem(sys.modules, "unoserver.client", fake_module)
-    monkeypatch.setattr(ort, "convert_via_soffice_cli", fake_cli)
+    monkeypatch.setattr(office_server, "convert_via_soffice_cli", fake_cli)
 
     with pytest.raises(ort.OfficeRuntimeError):
         ort.convert_to_pdf(FakeServer(), src, tmp_path / "o.pdf",
@@ -432,6 +438,8 @@ def test_conversion_timeout_scales_with_input_size(tmp_path):
     queue forever.
     """
     from pdf_forge import office_runtime as ort
+    # convert_to_pdf lives in office_server and calls the CLI fallback as a
+    # module-local name, so the patch has to land where it is defined.
 
     small = tmp_path / "small.pptx"
     small.write_bytes(b"x" * 1024)

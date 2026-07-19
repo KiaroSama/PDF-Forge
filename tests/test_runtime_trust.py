@@ -15,6 +15,23 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pdf_forge import office_runtime as ort  # noqa: E402
+# The implementation modules behind the office_runtime facade. Internals are
+# patched and inspected where they are DEFINED: patching the facade would not
+# affect calls made inside these modules.
+from pdf_forge import office_discovery as ort_discovery  # noqa: E402
+from pdf_forge import office_provision as ort_provision  # noqa: E402
+from pdf_forge import office_server as ort_server  # noqa: E402
+
+
+def _package_sources() -> str:
+    """Every module in the package, concatenated.
+
+    Scanned as a whole rather than one named file so these guarantees survive
+    a refactor that moves the code between modules.
+    """
+    package = Path(ort.__file__).resolve().parent
+    return "\n".join(p.read_text(encoding="utf-8")
+                     for p in sorted(package.glob("*.py")))
 
 
 def fake_runtime(base: Path, with_python: bool = True, marker: str = None) -> Path:
@@ -44,7 +61,7 @@ def test_incomplete_local_runtime_does_not_mask_a_valid_override(tmp_path, monke
     broken = fake_runtime(tmp_path / "local", with_python=False)   # no bundled Python
     good = fake_runtime(tmp_path / "override", with_python=True)
 
-    monkeypatch.setattr(ort, "libreoffice_dir", lambda: broken)
+    monkeypatch.setattr(ort_discovery, "libreoffice_dir", lambda: broken)
     monkeypatch.setenv("PDF_FORGE_SOFFICE", str(good))
 
     chosen = ort.select_runtime(verify_version=False)
@@ -56,7 +73,7 @@ def test_incomplete_local_runtime_does_not_mask_a_valid_override(tmp_path, monke
 def test_complete_local_runtime_is_preferred_over_an_override(tmp_path, monkeypatch):
     local = fake_runtime(tmp_path / "local")
     other = fake_runtime(tmp_path / "override")
-    monkeypatch.setattr(ort, "libreoffice_dir", lambda: local)
+    monkeypatch.setattr(ort_discovery, "libreoffice_dir", lambda: local)
     monkeypatch.setenv("PDF_FORGE_SOFFICE", str(other))
 
     chosen = ort.select_runtime(verify_version=False)
@@ -65,7 +82,7 @@ def test_complete_local_runtime_is_preferred_over_an_override(tmp_path, monkeypa
 
 def test_both_invalid_reports_every_rejection_reason(tmp_path, monkeypatch):
     broken = fake_runtime(tmp_path / "local", with_python=False)
-    monkeypatch.setattr(ort, "libreoffice_dir", lambda: broken)
+    monkeypatch.setattr(ort_discovery, "libreoffice_dir", lambda: broken)
     monkeypatch.setenv("PDF_FORGE_SOFFICE", str(tmp_path / "nothing-here"))
 
     assert ort.select_runtime(verify_version=False) is None
@@ -79,7 +96,7 @@ def test_both_invalid_reports_every_rejection_reason(tmp_path, monkeypatch):
 def test_missing_soffice_is_explained(tmp_path, monkeypatch):
     empty = tmp_path / "empty"
     empty.mkdir()
-    monkeypatch.setattr(ort, "libreoffice_dir", lambda: empty)
+    monkeypatch.setattr(ort_discovery, "libreoffice_dir", lambda: empty)
     monkeypatch.delenv("PDF_FORGE_SOFFICE", raising=False)
     status = ort.runtime_status(verify_version=False)
     assert status["ready"] is False
@@ -93,7 +110,7 @@ def test_missing_soffice_is_explained(tmp_path, monkeypatch):
 def test_forged_marker_cannot_make_a_runtime_ready(tmp_path, monkeypatch):
     """A marker claiming a version means nothing if the binary cannot answer."""
     forged = fake_runtime(tmp_path / "forged", marker="99.9.9")
-    monkeypatch.setattr(ort, "libreoffice_dir", lambda: forged)
+    monkeypatch.setattr(ort_discovery, "libreoffice_dir", lambda: forged)
     monkeypatch.delenv("PDF_FORGE_SOFFICE", raising=False)
 
     assert ort.marker_version(forged) == "99.9.9", "marker is readable"
@@ -105,9 +122,9 @@ def test_forged_marker_cannot_make_a_runtime_ready(tmp_path, monkeypatch):
 
 def test_probe_failure_is_reported_not_guessed(tmp_path, monkeypatch):
     runtime = fake_runtime(tmp_path / "rt", marker="25.8.7")
-    monkeypatch.setattr(ort, "libreoffice_dir", lambda: runtime)
+    monkeypatch.setattr(ort_discovery, "libreoffice_dir", lambda: runtime)
     monkeypatch.delenv("PDF_FORGE_SOFFICE", raising=False)
-    monkeypatch.setattr(ort, "probe_soffice_version", lambda *_a, **_k: None)
+    monkeypatch.setattr(ort_discovery, "probe_soffice_version", lambda *_a, **_k: None)
     status = ort.runtime_status(verify_version=True)
     assert status["libreoffice_version"] is None
     assert status["ready"] is False
@@ -169,9 +186,9 @@ def test_marker_alone_does_not_make_a_runtime_complete(tmp_path):
 def test_provisioning_rebuilds_an_incomplete_runtime(tmp_path, monkeypatch):
     """An existing-but-broken runtime must be rebuilt, not reported as present."""
     broken = fake_runtime(tmp_path / "rt", with_python=False)
-    monkeypatch.setattr(ort, "libreoffice_dir", lambda: broken)
-    monkeypatch.setattr(ort, "runtime_root", lambda: tmp_path)
-    monkeypatch.setattr(ort, "load_runtime_meta", lambda: {
+    monkeypatch.setattr(ort_discovery, "libreoffice_dir", lambda: broken)
+    monkeypatch.setattr(ort_discovery, "runtime_root", lambda: tmp_path)
+    monkeypatch.setattr(ort_discovery, "load_runtime_meta", lambda: {
         "version": "25.8.7",
         "windows": {"url": "https://example.invalid/x.msi", "sha256": "00"},
     })
@@ -201,7 +218,7 @@ def test_real_runtime_verifies_completely():
 # --------------------------------------------------------------------------- #
 
 def test_provisioning_never_starts_a_service():
-    source = Path(ort.__file__).read_text(encoding="utf-8")
+    source = _package_sources()
     assert '"net", "start"' not in source and "net start msiserver\"" not in source, (
         "provisioning must not change Windows service state"
     )
@@ -238,13 +255,13 @@ def test_a_stopped_demand_start_service_is_not_a_blocker(monkeypatch):
         "        START_TYPE  : 3   DEMAND_START\n"
         "        STATE       : 1   STOPPED"
     ))
-    ort._ensure_installer_service()   # must not raise
+    ort_provision._ensure_installer_service()   # must not raise
     assert touched["state"] is False, "the service must not be started"
 
 
 def test_running_service_passes(monkeypatch):
     _fake_sc(monkeypatch, "SERVICE_NAME: msiserver\n        STATE : 4  RUNNING")
-    ort._ensure_installer_service()   # must not raise
+    ort_provision._ensure_installer_service()   # must not raise
 
 
 def test_disabled_service_is_reported_not_enabled(monkeypatch):
@@ -252,7 +269,7 @@ def test_disabled_service_is_reported_not_enabled(monkeypatch):
         "SERVICE_NAME: msiserver\n        START_TYPE  : 4   DISABLED"
     ))
     with pytest.raises(ort.OfficeRuntimeError) as excinfo:
-        ort._ensure_installer_service()
+        ort_provision._ensure_installer_service()
     assert "does not change Windows service state" in str(excinfo.value)
     assert touched["state"] is False, "the service must not be re-enabled"
 
@@ -266,7 +283,7 @@ def test_conversion_profile_is_hardened_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("PDF_FORGE_HARDEN_PROFILE", raising=False)
     profile = tmp_path / "prof"
     profile.mkdir()
-    ort._harden_profile(profile)
+    ort_server._harden_profile(profile)
     xcu = (profile / "user" / "registrymodifications.xcu").read_text(encoding="utf-8")
 
     # Macros must not run.
@@ -280,7 +297,7 @@ def test_conversion_profile_is_hardened_by_default(tmp_path, monkeypatch):
 
 
 def test_hardening_is_applied_unless_explicitly_disabled():
-    source = Path(ort.__file__).read_text(encoding="utf-8")
+    source = _package_sources()
     assert 'PDF_FORGE_HARDEN_PROFILE") != "0"' in source, (
         "hardening must be the default, not opt-in"
     )
@@ -290,7 +307,7 @@ def test_hardened_profile_is_isolated_and_removed(tmp_path, monkeypatch):
     """The lockdown must never touch the user's own LibreOffice configuration."""
     profile = tmp_path / "prof"
     profile.mkdir()
-    ort._harden_profile(profile)
+    ort_server._harden_profile(profile)
     written = list(profile.rglob("registrymodifications.xcu"))
     assert len(written) == 1
     # It lives inside the per-run profile, which teardown deletes.
