@@ -4,7 +4,7 @@ name: CI
 # main, and on demand.
 on:
   push:
-    branches: [main, 'fix/**']
+    branches: [main, 'fix/**', 'feature/**', 'refactor/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
