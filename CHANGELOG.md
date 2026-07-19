@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   install; all outputs were identical.
 
 ### Fixed
+- `save_with_password` (the end-to-end encrypted-fixture helper) verifies the
+  file it produced is genuinely encrypted before reporting success. It used
+  to accept "the output exists and is non-empty", so a caller could assert
+  against an unencrypted fixture instead of skipping.
 - An encrypted document is decrypted in memory before Microsoft Office opens it.
   Passing a password through COM raises a modal dialog that no automation
   setting suppresses, which blocked a headless run indefinitely.

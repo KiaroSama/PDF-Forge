@@ -735,6 +735,11 @@ Important details:
   headless run would block on it forever; a decrypted copy lives in a temporary
   directory only for the duration of that one conversion. The LibreOffice path
   does not need this because unoserver takes the password in memory.
+- **Known limitation of the LibreOffice backend:** it cannot open an Office file
+  encrypted by Microsoft Office (AES/agile encryption) — the conversion fails
+  with a lost-bridge error rather than converting. This is a LibreOffice
+  limitation, not a trimming side effect: an untrimmed 1.6 GB install fails
+  identically. Encrypted sources therefore need the Microsoft Office backend.
 - The provisioned LibreOffice is **trimmed to the conversion components only**.
   Interface translations (~120 languages), spelling dictionaries, help, clipart,
   templates, wizards, the Java bridge and the PDF *import* filter are removed —

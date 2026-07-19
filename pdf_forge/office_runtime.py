@@ -488,8 +488,16 @@ def save_with_password(server, src: Path, out: Path, password: str) -> bool:
     Used to build encrypted fixtures for the end-to-end tests without needing
     Microsoft Office. Returns ``False`` when this build cannot do it, so callers
     skip rather than fail. The password is passed in memory only.
+
+    The result is *verified* to be genuinely encrypted before success is
+    reported. LibreOffice accepts ``EncryptFile`` and can still write a plain
+    file, and the previous "the output exists and is non-empty" check reported
+    that as success - which made a caller assert against an unencrypted fixture
+    instead of skipping.
     """
     from unoserver.client import UnoClient
+
+    from .office import is_encrypted_office_file
 
     try:
         client = UnoClient(server="127.0.0.1", port=str(server.port))
@@ -499,10 +507,24 @@ def save_with_password(server, src: Path, out: Path, password: str) -> bool:
             convert_to="docx",
             filter_options=[f"EncryptFile={password}"],
         )
-        return Path(out).exists() and Path(out).stat().st_size > 0
     except Exception as exc:  # noqa: BLE001 - fixture creation is best effort
         logger.info("Could not create an encrypted fixture: %s", exc)
         return False
+
+    produced = Path(out)
+    if not produced.exists() or produced.stat().st_size == 0:
+        return False
+    if not is_encrypted_office_file(produced):
+        logger.info(
+            "This LibreOffice build wrote '%s' without encrypting it; "
+            "no encrypted fixture is available.", produced.name,
+        )
+        try:
+            produced.unlink()
+        except OSError:
+            pass
+        return False
+    return True
 
 
 def _terminate(process: subprocess.Popen) -> None:
