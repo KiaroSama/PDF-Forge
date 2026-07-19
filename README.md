@@ -50,12 +50,23 @@ images. The original PDFs are never modified, overwritten, or deleted.
   and [`unoserver`](https://pypi.org/project/unoserver/) (the CLI control layer
   for the convert-to-PDF tool). All ship as prebuilt wheels, so no external
   tools are required for the PDF tools.
-- **Only for main menu 11 (Convert to PDF):** a LibreOffice runtime. It is a
-  native renderer, so it cannot live inside the virtual environment; PDF Forge
-  downloads a pinned, checksum-verified official build into the project folder
-  (`.tools/libreoffice/`) on request with
-  `.\.venv\Scripts\python.exe -m pdf_forge --setup-office`. It is **never**
-  installed system-wide and no GUI is shown. Every other tool works without it.
+- **Only for main menu 11 (Convert to PDF):** a document converter. Nothing is
+  installed up front; the first time you actually convert something, PDF Forge
+  picks a backend in two steps:
+  1. **Microsoft Office, if it is installed.** It is used directly through COM,
+     which needs no download and no extra disk space, and it is the native
+     renderer for these formats. PDF Forge tells you when it takes this path.
+  2. **Otherwise it offers to install its own LibreOffice** (default: yes). A
+     pinned, checksum-verified official build is extracted into the project
+     folder (`.tools/libreoffice/`) and trimmed to just the conversion
+     components — about **724 MB instead of 1.6 GB**, because interface
+     translations, help, clipart, templates and spelling dictionaries for ~120
+     languages are removed. It is **never** installed system-wide and no GUI is
+     shown.
+
+  Every other tool works without either backend. You can still provision
+  LibreOffice ahead of time with
+  `.\.venv\Scripts\python.exe -m pdf_forge --setup-office`.
 
 ## How to run it
 
@@ -696,16 +707,45 @@ ever overwritten and two queued jobs cannot collide.
 
 #### How the conversion stack works
 
+There are two interchangeable rendering backends. The choice is made when you
+convert, never at startup:
+
+| Backend | When it is used | Cost |
+|---------|-----------------|------|
+| **Microsoft Office** (COM) | whenever Office is installed | nothing to download, 0 MB extra |
+| **LibreOffice** (headless) | only when Office is absent, and only after you agree | ~349 MB download, ~724 MB on disk |
+
 | Layer | What it is | Where it lives |
 |-------|------------|----------------|
-| Control | `unoserver` / `unoconvert` (Python) | the project `.venv`, pinned in `requirements.txt` |
-| Rendering | LibreOffice **headless** | project-local `.tools/libreoffice/` (git-ignored) |
+| Control (LibreOffice path) | `unoserver` / `unoconvert` (Python) | the project `.venv`, pinned in `requirements.txt` |
+| Control (Office path) | `pywin32` COM automation | the project `.venv`, Windows only |
+| Rendering | Microsoft Office **or** LibreOffice headless | installed Office / project-local `.tools/libreoffice/` |
 | Validation | PyMuPDF | already a runtime dependency |
 
 Important details:
 
 - **PyMuPDF validates the produced PDF; it does not render Office or spreadsheet
-  files.** All document rendering is LibreOffice's job.
+  files.** All document rendering is the backend's job.
+- With the Microsoft Office backend, files are opened **read-only with macros
+  force-disabled**, in a dedicated Office process (`DispatchEx`) that never
+  attaches to documents you already have open, and every application is quit in
+  a `finally` path so nothing is left running.
+- An **encrypted document is decrypted in memory** before Office sees it. Office
+  raises a modal password dialog that no automation setting suppresses, and a
+  headless run would block on it forever; a decrypted copy lives in a temporary
+  directory only for the duration of that one conversion. The LibreOffice path
+  does not need this because unoserver takes the password in memory.
+- **Known limitation of the LibreOffice backend:** it cannot open an Office file
+  encrypted by Microsoft Office (AES/agile encryption) — the conversion fails
+  with a lost-bridge error rather than converting. This is a LibreOffice
+  limitation, not a trimming side effect: an untrimmed 1.6 GB install fails
+  identically. Encrypted sources therefore need the Microsoft Office backend.
+- The provisioned LibreOffice is **trimmed to the conversion components only**.
+  Interface translations (~120 languages), spelling dictionaries, help, clipart,
+  templates, wizards, the Java bridge and the PDF *import* filter are removed —
+  1.6 GB becomes ~724 MB. Every removal was verified by converting Word, Excel,
+  PowerPoint and CSV sources through both the CLI and the production unoserver
+  path and comparing the extracted text of every page against a full install.
 - LibreOffice is **not installed globally**. It is provisioned into the project
   folder by an official *administrative extraction* — no system install, no
   PATH, registry, shortcut, file-association, update-service, or Start-Menu

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Microsoft Office is used as the converter when it is installed.** It is the
+  native renderer for these formats, needs no download and no extra disk space,
+  and LibreOffice is never provisioned on such a machine. Word, Excel,
+  PowerPoint and CSV all go through it; files are opened read-only with macros
+  force-disabled in a dedicated process.
+
+### Changed
+- **The LibreOffice runtime is optional and installed on demand.** Nothing is
+  downloaded at startup or as a prerequisite. When a conversion is requested and
+  Microsoft Office is absent, PDF Forge explains the cost and asks whether to
+  install its own converter (default: yes).
+- **The provisioned LibreOffice is trimmed to the conversion components**:
+  1.6 GB becomes ~724 MB. Interface translations for ~120 languages, spelling
+  dictionaries, help, clipart, templates, wizards, the Java bridge and the PDF
+  import filter are removed. Every removal was verified by converting Word,
+  Excel, PowerPoint and CSV sources through both the CLI and the production
+  unoserver path and comparing the extracted text of every page with a full
+  install; all outputs were identical.
+
+### Fixed
+- `save_with_password` (the end-to-end encrypted-fixture helper) verifies the
+  file it produced is genuinely encrypted before reporting success. It used
+  to accept "the output exists and is non-empty", so a caller could assert
+  against an unencrypted fixture instead of skipping.
+- An encrypted document is decrypted in memory before Microsoft Office opens it.
+  Passing a password through COM raises a modal dialog that no automation
+  setting suppresses, which blocked a headless run indefinitely.
+- Microsoft Office renames an export target whose extension is not `.pdf`, which
+  left the converted file behind as `<name>.convert.tmp.pdf` and reported a
+  failure. Exports now go to a controlled `.pdf` path.
+- A UTF-8 CSV is handed to Excel with a byte-order mark. Without one Excel
+  guesses the system code page, so non-Latin text arrived as mojibake
+  ("سلام" imported as "Ø³Ù„Ø§Ù…"). The source file is never modified.
+
 ## [2.0.1] - 2026-07-19
 
 ### Fixed
