@@ -22,6 +22,8 @@ from .safeio import promote_atomically
 from .encrypt import *  # noqa: F401,F403
 from .office import *  # noqa: F401,F403
 from . import office_runtime as ort
+from . import msoffice
+from . import convert_backend as cb
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
 
@@ -366,36 +368,53 @@ def _apply_output_protection(out_path: Path, mode: str, password: str) -> None:
     # to compress, split, or protect next, so it must stay discoverable.
 
 
-def _run_conversion(jobs, source_families) -> None:
-    """Execute the whole conversion batch through one task-owned server."""
-    status = ort.runtime_status()
-    if not status["ready"]:
+def _run_conversion(jobs, source_families, backend=None) -> None:
+    """Execute the whole conversion batch through one task-owned session."""
+    # The backend was chosen while configuring; re-check it here because the
+    # task may run much later, and Office could have been removed since.
+    backend = backend or cb.detect_backend()
+    if not backend:
         print_error(
-            "The conversion runtime is not ready. Missing: "
-            + _missing_runtime(status)
-            + ". See the README 'Convert to PDF' setup notes."
+            "No document converter is available any more. Microsoft Office was "
+            "not found and the project-local LibreOffice is not ready."
         )
-        logger.error("Convert aborted; runtime not ready: %s", status)
+        logger.error("Convert aborted; no backend available.")
         return
 
-    print_info(
-        f"Starting local LibreOffice {status['libreoffice_version'] or '?'} "
-        f"(unoserver {status['unoserver_version'] or '?'})..."
-    )
-    try:
-        server = ort.start_conversion_server()
-        server = ort.warm_up(server)
-    except ort.OfficeRuntimeError as exc:
-        print_error(f"Could not start the conversion runtime: {exc}")
-        logger.error("Convert server start failed: %s", exc)
-        return
+    if backend.kind == cb.MSOFFICE:
+        print_info(f"Converting with Microsoft Office ({backend.detail})...")
+        try:
+            server = msoffice.start_session()
+        except msoffice.MsOfficeError as exc:
+            print_error(f"Microsoft Office could not be started: {exc}")
+            logger.error("MS Office session start failed: %s", exc)
+            return
+    else:
+        status = ort.runtime_status()
+        if not status["ready"]:
+            print_error(
+                "The conversion runtime is not ready. Missing: "
+                + _missing_runtime(status) + "."
+            )
+            logger.error("Convert aborted; runtime not ready: %s", status)
+            return
+        print_info(
+            f"Starting local LibreOffice {status['libreoffice_version'] or '?'} "
+            f"(unoserver {status['unoserver_version'] or '?'})..."
+        )
+        try:
+            server = ort.warm_up(ort.start_conversion_server())
+        except ort.OfficeRuntimeError as exc:
+            print_error(f"Could not start the conversion runtime: {exc}")
+            logger.error("Convert server start failed: %s", exc)
+            return
 
     ok = failed = skipped = 0
     try:
         for index, job in enumerate(jobs, start=1):
             src, fam, out = job["src"], job["family"], job["out"]
             print_info(f"[{index}/{len(jobs)}] {src.name} ({_family_label(fam)})")
-            result, server = _convert_with_restart(server, job)
+            result, server = _convert_with_restart(server, job, backend=backend)
             if server is None:
                 print_error(
                     "  The conversion runtime could not be restarted; stopping."
@@ -420,13 +439,12 @@ def _run_conversion(jobs, source_families) -> None:
         f"Excel {counts['excel']}, CSV {counts['csv']}.)"
     )
     logger.info(
-        "Convert batch complete: ok=%d failed=%d skipped=%d lo=%s unoserver=%s",
-        ok, failed, skipped, status["libreoffice_version"],
-        status["unoserver_version"],
+        "Convert batch complete: ok=%d failed=%d skipped=%d backend=%s",
+        ok, failed, skipped, cb.backend_label(backend),
     )
 
 
-def _convert_with_restart(server, job, attempts: int = 3):
+def _convert_with_restart(server, job, attempts: int = 3, backend=None):
     # `attempts` counts total tries; `restarts` counts how many times the
     # LibreOffice runtime had to be replaced. They are reported separately so a
     # message can never overstate what actually happened (PF-039).
@@ -440,7 +458,7 @@ def _convert_with_restart(server, job, attempts: int = 3):
     restarts = 0
     for attempt in range(attempts):
         try:
-            return _convert_one(server, job), server
+            return _convert_one(server, job, backend), server
         except ort.OfficeRuntimeError as exc:
             if not ort.is_bridge_lost(exc) or attempt == attempts - 1:
                 message = (
@@ -474,7 +492,7 @@ def _convert_with_restart(server, job, attempts: int = 3):
     return "fail", server
 
 
-def _convert_one(server, job) -> str:
+def _convert_one(server, job, backend=None) -> str:
     """Convert a single job (with password + protection flow).
 
     Returns ``'ok'`` | ``'fail'`` | ``'skip'``. The temporary directory holding
@@ -497,13 +515,13 @@ def _convert_one(server, job) -> str:
             except (OSError, UnicodeError, ValueError) as exc:
                 logger.warning("CSV normalization failed for '%s': %s", src, exc)
                 source_for_convert = src
-        return _convert_one_body(server, job, source_for_convert)
+        return _convert_one_body(server, job, source_for_convert, backend)
     finally:
         if csv_dir is not None:
             shutil.rmtree(csv_dir, ignore_errors=True)
 
 
-def _convert_one_body(server, job, source_for_convert) -> str:
+def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
     """Password + conversion + finalization for one already-prepared source."""
     src, out = job["src"], job["out"]
     password: Optional[str] = None
@@ -518,12 +536,34 @@ def _convert_one_body(server, job, source_for_convert) -> str:
                 return "skip"
             attempted = True
 
+        use_msoffice = backend is not None and backend.kind == cb.MSOFFICE
         while True:
             tmp = out.with_suffix(".convert.tmp")
             try:
                 out.parent.mkdir(parents=True, exist_ok=True)
-                ort.convert_to_pdf(server, source_for_convert, tmp, password=password)
+                if use_msoffice:
+                    msoffice.convert_to_pdf(
+                        server, source_for_convert, tmp, job["family"],
+                        password=password, encrypted=bool(password),
+                    )
+                else:
+                    ort.convert_to_pdf(server, source_for_convert, tmp,
+                                       password=password)
                 _validate_pdf_output(tmp)
+            except msoffice.MsOfficePasswordError:
+                _safe_unlink(tmp)
+                pw = _prompt_convert_password(src.name, attempted)
+                if pw is None:
+                    print_note(f"  Skipped (password not provided): {src.name}")
+                    return "skip"
+                password = pw
+                attempted = True
+                continue
+            except msoffice.MsOfficeError as exc:
+                _safe_unlink(tmp)
+                print_error(f"  Failed: {exc}")
+                logger.error("Microsoft Office convert failed for '%s': %s", src, exc)
+                return "fail"
             except ort.OfficeRuntimeError as exc:
                 _safe_unlink(tmp)
                 if str(exc) == ort.PASSWORD_SENTINEL:
@@ -610,36 +650,69 @@ def operation_convert_folder() -> None:
     _configure_and_queue(files, mode="folder")
 
 
-def _warn_if_runtime_missing() -> bool:
-    """Warn early when the conversion runtime is incomplete. False = not ready.
+def _resolve_backend():
+    """Pick the conversion backend, offering to install LibreOffice only if needed.
 
-    Checked while configuring rather than only at run time, so the user is not
-    left with a queued task that is certain to fail.
+    Two steps, in this order:
+
+    1. If Microsoft Office is installed, use it and say so. It is the native
+       renderer for these formats and needs no download at all.
+    2. Otherwise offer the project-local LibreOffice. It is *not* a startup
+       prerequisite: nothing is downloaded until the user actually converts
+       something and agrees here.
+
+    Returns a ``BackendChoice`` (falsy when no backend is available).
     """
-    status = ort.runtime_status()
-    if status["ready"]:
-        return True
+    choice = cb.detect_backend()
+    if choice.kind == cb.MSOFFICE:
+        print_success(
+            f"Using the Microsoft Office already installed on this PC "
+            f"({choice.detail}). No download or extra disk space is needed."
+        )
+        logger.info("Convert backend: Microsoft Office (%s).", choice.detail)
+        return choice
+    if choice.kind == cb.LIBREOFFICE:
+        logger.info("Convert backend: project-local LibreOffice %s.", choice.detail)
+        return choice
+
+    size = cb.runtime_download_size_mb()
     print_warning(
-        "The convert-to-PDF runtime is not ready yet - missing: "
-        + _missing_runtime(status) + "."
+        "Microsoft Office was not found on this PC, so PDF Forge needs its own "
+        "converter for this tool."
     )
     print_note(
-        "Set it up once with:\n"
-        "  .\\.venv\\Scripts\\python.exe -m pdf_forge --setup-office\n"
-        "It downloads the pinned official LibreOffice build into this project "
-        "folder only (no system install, no GUI). Every other tool works "
-        "without it."
+        "It installs a trimmed, CLI-only LibreOffice into this project folder "
+        f"only{f' (about {size} MB to download)' if size else ''}: no system "
+        "install, no PATH, registry, shortcut or service change, and no GUI. "
+        "Only the conversion components are kept - interface translations, "
+        "help, clipart and spelling dictionaries are not installed. Every "
+        "other tool in PDF Forge works without it."
     )
-    return False
+    if not ask_yes_no("Install the converter now?", default_yes=True):
+        print_warning("Nothing was installed; returning to menu.")
+        logger.info("User declined the LibreOffice install.")
+        return cb.BackendChoice("none")
+
+    try:
+        result = ort.provision_runtime(progress=lambda msg: print_info(f"  {msg}"))
+    except ort.OfficeRuntimeError as exc:
+        print_error(f"The converter could not be installed: {exc}")
+        logger.error("Provisioning failed: %s", exc)
+        return cb.BackendChoice("none")
+    print_success(f"Converter ready ({result.get('status')}).")
+
+    choice = cb.detect_backend()
+    if not choice:
+        print_error(
+            "The converter was installed but still does not report as ready."
+        )
+        logger.error("Post-install backend detection failed.")
+    return choice
 
 
 def _configure_and_queue(files, mode: str) -> None:
-    runtime_ready = _warn_if_runtime_missing()
-    if not runtime_ready and not ask_yes_no(
-        "Queue the conversion anyway (it will fail until the runtime is set up)?",
-        default_yes=False,
-    ):
-        print_warning("Returning to menu.")
+    backend = _resolve_backend()
+    if not backend:
         return
 
     plan = _build_jobs(files)
@@ -668,7 +741,7 @@ def _configure_and_queue(files, mode: str) -> None:
     source_families = family_counts([j["src"] for j in jobs])
 
     def _run():
-        _run_conversion(jobs, source_families)
+        _run_conversion(jobs, source_families, backend)
 
     label = (
         f"Convert {len(jobs)} file(s) to PDF"

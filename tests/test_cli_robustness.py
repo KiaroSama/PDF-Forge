@@ -171,7 +171,7 @@ def test_permission_denied_is_reported_cleanly(tmp_path):
 def test_success_on_first_attempt_reports_no_restart(monkeypatch, capsys):
     calls = {"n": 0}
 
-    def convert(_server, job):
+    def convert(_server, job, _backend=None):
         calls["n"] += 1
         return "ok"
 
@@ -183,7 +183,7 @@ def test_success_on_first_attempt_reports_no_restart(monkeypatch, capsys):
 
 
 def test_final_failure_message_matches_configured_attempts(monkeypatch, capsys):
-    def always_lost(_server, _job):
+    def always_lost(_server, _job, _backend=None):
         raise app.office_runtime.OfficeRuntimeError(
             app.office_runtime.BRIDGE_LOST_SENTINEL)
 

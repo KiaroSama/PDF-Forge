@@ -23,3 +23,14 @@ unoserver==3.7
 # OLE2 compound-file parser: identifies password-protected OOXML packages
 # (an encrypted .docx is an OLE2 container, not a ZIP).
 olefile==0.47
+
+# Windows COM bindings: let PDF Forge drive an already-installed Microsoft
+# Office as the preferred converter for the "Convert to PDF" tool. When Office
+# is present this needs no download and no extra disk space, and LibreOffice is
+# never provisioned. Windows-only; every other platform uses LibreOffice.
+pywin32==312; sys_platform == "win32"
+
+# Decrypts a password-protected Office document in memory before it reaches
+# Microsoft Office. Handing Office an encrypted file raises a modal password
+# dialog that cannot be suppressed and blocks a headless run indefinitely.
+msoffcrypto-tool==6.0.0; sys_platform == "win32"

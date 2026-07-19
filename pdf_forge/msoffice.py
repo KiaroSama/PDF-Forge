@@ -1,0 +1,399 @@
+"""Convert documents to PDF through an installed Microsoft Office (Windows).
+
+This is the *preferred* conversion backend when Microsoft Office is present: it
+costs no extra disk space, it is the native renderer for these formats, and it
+avoids a 1.6 GB LibreOffice runtime entirely. The project-local LibreOffice in
+``office_runtime`` stays as the fallback for machines without Office.
+
+The session object here plays the same role as the unoserver handle so both
+backends plug into one conversion loop: create it once per batch, convert many
+files through it, stop it at the end.
+
+Safety notes:
+
+* Macros are force-disabled in every application before a file is opened, and
+  automatic link/index updates are suppressed - the same guarantees the
+  LibreOffice path makes.
+* Passwords are passed as in-process COM arguments. They never reach a command
+  line, an environment variable, or a log record.
+* A file is opened read-only; nothing is written back to the source.
+* Every application is quit in a ``finally`` path, so a failed conversion does
+  not leave a headless Office process behind.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import tempfile
+from pathlib import Path
+from typing import Dict, Optional
+
+from .constants import LOG_PREFIX
+
+logger = logging.getLogger(LOG_PREFIX)
+
+__all__ = [
+    'MsOfficeError', 'MsOfficePasswordError', 'MsOfficeSession', 'detect_office',
+    'is_available', 'start_session', 'convert_to_pdf', 'describe_office',
+    'office_families', 'decrypt_to_temp',
+]
+
+# msoAutomationSecurityForceDisable: open with macros disabled regardless of the
+# user's trust-centre configuration.
+_MSO_FORCE_DISABLE = 3
+
+# A password that no real file uses. Supplying it makes Office fail with an
+# error on an encrypted file instead of blocking on a modal password dialog,
+# which would hang a headless run forever.
+_REFUSE_PROMPT_PASSWORD = "\0pdfforge-no-prompt\0"
+
+_PROGIDS = {
+    "word": "Word.Application",
+    "excel": "Excel.Application",
+    "powerpoint": "PowerPoint.Application",
+}
+
+# csv is opened by Excel; it has no application of its own.
+_FAMILY_APP = {"word": "word", "excel": "excel", "csv": "excel",
+               "powerpoint": "powerpoint"}
+
+
+class MsOfficeError(RuntimeError):
+    """Microsoft Office is unusable, or a conversion failed."""
+
+
+class MsOfficePasswordError(MsOfficeError):
+    """The supplied password does not open this file."""
+
+
+def decrypt_to_temp(path: Path, password: Optional[str], temp_dir: Path) -> Path:
+    """Decrypt an encrypted Office file to a temporary copy, or fail cleanly.
+
+    Microsoft Office is never handed the encrypted file itself. Passing it a
+    password through COM proved unreliable: a wrong password raises a modal
+    dialog that no ``DisplayAlerts``/``Interactive`` setting suppresses, and the
+    call then blocks forever (measured - the process had to be killed). Because
+    the password has to be verified locally anyway, decrypting here removes the
+    dialog from the picture entirely and turns a bad password into an ordinary
+    ``MsOfficePasswordError`` the caller can re-prompt for.
+
+    Trade-off, deliberately accepted: a decrypted copy exists on disk for the
+    duration of the conversion. It is written inside the caller-owned temporary
+    directory and the caller deletes it in a ``finally``. The LibreOffice
+    backend does not need this because unoserver takes the password in memory.
+
+    The password itself is never written to disk and never logged.
+    """
+    try:
+        import msoffcrypto
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise MsOfficeError(
+            "msoffcrypto-tool is not installed, so an encrypted document "
+            "cannot be opened safely with Microsoft Office."
+        ) from exc
+
+    path = Path(path)
+    target = Path(temp_dir) / f"decrypted{path.suffix}"
+    try:
+        with path.open("rb") as handle:
+            office_file = msoffcrypto.OfficeFile(handle)
+            office_file.load_key(password=password or "", verify_password=True)
+            with target.open("wb") as out_handle:
+                office_file.decrypt(out_handle)
+    except Exception as exc:  # noqa: BLE001 - any failure means "cannot open"
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        name = type(exc).__name__
+        # msoffcrypto reports a bad key as InvalidKeyError, and an absent or
+        # empty password as DecryptionError; both mean "this password does not
+        # open the file", which the caller re-prompts for.
+        if "InvalidKey" in name or "Password" in name or "Decryption" in name:
+            raise MsOfficePasswordError("wrong password") from None
+        # An unreadable or unsupported container must NOT be handed to Office:
+        # it is exactly the case that would block on a dialog.
+        raise MsOfficeError(
+            f"This encrypted file could not be decrypted locally ({name}), so "
+            "it was not opened with Microsoft Office."
+        ) from None
+    return target
+
+
+def _csv_with_bom(path: Path, temp_dir: Path) -> Path:
+    """Give Excel a CSV it will decode as UTF-8 instead of the ANSI code page.
+
+    Excel guesses a plain CSV's encoding from the system code page, so a UTF-8
+    file without a byte-order mark comes out as mojibake for anything non-Latin
+    (measured: "سلام" imported as "Ø³Ù„Ø§Ù…"). A BOM is the documented signal that
+    makes Excel decode UTF-8, so a prefixed copy is handed over instead. The
+    source file is never modified.
+
+    A file that already starts with a BOM is passed through untouched, and a
+    file that is not valid UTF-8 is left alone as well - guessing a different
+    encoding here would corrupt data the CSV pipeline already resolved.
+    """
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise MsOfficeError(f"The CSV could not be read: {exc}") from exc
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return path
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return path
+    target = Path(temp_dir) / path.name
+    try:
+        target.write_bytes(b"\xef\xbb\xbf" + raw)
+    except OSError as exc:
+        raise MsOfficeError(f"The CSV copy could not be written: {exc}") from exc
+    return target
+
+
+def _com():
+    """Import the COM bindings, or explain precisely what is missing."""
+    try:
+        import pythoncom  # noqa: F401
+        import win32com.client as win32
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise MsOfficeError(
+            "The Windows COM bindings (pywin32) are not installed, so an "
+            "installed Microsoft Office cannot be used."
+        ) from exc
+    return win32
+
+
+def detect_office() -> Optional[Dict[str, object]]:
+    """Report which Microsoft Office applications can actually be automated.
+
+    Availability is decided by COM registration (the ProgID -> CLSID mapping in
+    HKEY_CLASSES_ROOT), not by looking for files on disk: a leftover Office
+    folder from a removed installation must not read as usable. The lookup is a
+    registry read, so detection costs nothing and never starts an application.
+
+    Returns ``None`` when Office cannot be used at all.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+    except ImportError:  # pragma: no cover - non-Windows
+        return None
+    # COM automation itself needs pywin32; without it Office is unusable even
+    # when installed, and reporting it as available would mislead the user.
+    try:
+        import win32com.client  # noqa: F401
+    except ImportError:
+        return None
+
+    available = []
+    for family, progid in _PROGIDS.items():
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, progid + r"\CLSID"):
+                available.append(family)
+        except OSError:
+            continue
+    if not available:
+        return None
+    return {"apps": available, "families": office_families(available)}
+
+
+def office_families(apps) -> list:
+    """Map available applications to the source families they can convert."""
+    apps = set(apps)
+    return sorted({fam for fam, app in _FAMILY_APP.items() if app in apps})
+
+
+def is_available() -> bool:
+    return detect_office() is not None
+
+
+def describe_office(detected: Optional[Dict[str, object]] = None) -> str:
+    """One-line human description, e.g. "Word, Excel, PowerPoint"."""
+    detected = detected or detect_office()
+    if not detected:
+        return "not installed"
+    names = {"word": "Word", "excel": "Excel", "powerpoint": "PowerPoint"}
+    return ", ".join(names[a] for a in detected["apps"])  # type: ignore[index]
+
+
+class MsOfficeSession:
+    """Holds the Office applications used by one conversion batch.
+
+    Applications are created lazily - converting only spreadsheets never starts
+    Word - and reused across the batch, because starting an Office application
+    costs several seconds.
+    """
+
+    def __init__(self) -> None:
+        self._apps: Dict[str, object] = {}
+        self._co_initialised = False
+
+    # -- lifecycle ------------------------------------------------------- #
+    def start(self) -> "MsOfficeSession":
+        import pythoncom
+
+        # A queued task runs on a worker thread, and COM must be initialised on
+        # the thread that will use it.
+        try:
+            pythoncom.CoInitialize()
+            self._co_initialised = True
+        except Exception as exc:  # noqa: BLE001 - already initialised is fine
+            logger.debug("CoInitialize returned: %s", exc)
+        return self
+
+    def stop(self) -> None:
+        for family, app in list(self._apps.items()):
+            try:
+                app.Quit()
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+                logger.warning("Could not quit Microsoft %s: %s", family, exc)
+            self._apps.pop(family, None)
+        if self._co_initialised:
+            try:
+                import pythoncom
+
+                pythoncom.CoUninitialize()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("CoUninitialize returned: %s", exc)
+            self._co_initialised = False
+
+    def __enter__(self) -> "MsOfficeSession":
+        return self.start()
+
+    def __exit__(self, *exc_info) -> None:
+        self.stop()
+
+    # -- applications ---------------------------------------------------- #
+    def _app(self, family: str):
+        app_name = _FAMILY_APP.get(family)
+        if app_name is None:
+            raise MsOfficeError(f"Unsupported source family: {family}")
+        if app_name in self._apps:
+            return self._apps[app_name]
+
+        win32 = _com()
+        try:
+            # DispatchEx forces a dedicated process instead of attaching to an
+            # Office instance the user already has open, so the user's own
+            # documents and settings are never touched.
+            app = win32.DispatchEx(_PROGIDS[app_name])
+        except Exception as exc:  # noqa: BLE001
+            raise MsOfficeError(
+                f"Microsoft {app_name.title()} could not be started: {exc}"
+            ) from exc
+
+        # PowerPoint rejects setting Visible=False on some builds, so each
+        # application is hardened with what it actually supports.
+        for attribute, value in (("Visible", False), ("DisplayAlerts", False),
+                                 ("AutomationSecurity", _MSO_FORCE_DISABLE)):
+            try:
+                setattr(app, attribute, value)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("%s.%s could not be set: %s", app_name, attribute, exc)
+        self._apps[app_name] = app
+        return app
+
+    # -- conversion ------------------------------------------------------ #
+    def convert(self, src: Path, out: Path, family: str,
+                password: Optional[str] = None, encrypted: bool = False) -> None:
+        src, out = Path(src), Path(out)
+        app_name = _FAMILY_APP.get(family)
+        if app_name is None:
+            raise MsOfficeError(f"Unsupported source family: {family}")
+        handler = {"word": _convert_word, "excel": _convert_excel,
+                   "powerpoint": _convert_powerpoint}[app_name]
+        with tempfile.TemporaryDirectory(prefix="pdfforge_msoffice_") as scratch:
+            scratch_dir = Path(scratch)
+            if encrypted:
+                # Office never sees the encrypted file - see decrypt_to_temp.
+                src = decrypt_to_temp(src, password, scratch_dir)
+            if family == "csv":
+                src = _csv_with_bom(src, scratch_dir)
+            # Office *renames* an export target whose extension is not .pdf
+            # (asking for "x.convert.tmp" silently writes "x.convert.tmp.pdf"),
+            # so it always exports to a .pdf path we control and the result is
+            # moved to whatever the caller asked for.
+            produced = scratch_dir / "converted.pdf"
+            app = self._app(family)
+            # Even a file believed to be unencrypted must not be able to raise a
+            # password dialog; the sentinel makes Office fail instead of block.
+            handler(app, src, produced, _REFUSE_PROMPT_PASSWORD)
+            if not produced.exists() or produced.stat().st_size == 0:
+                raise MsOfficeError(
+                    "Microsoft Office reported success but produced no output "
+                    "file."
+                )
+            out.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(str(produced), str(out))
+
+
+# RPC_E_DISCONNECTED: after ExportAsFixedFormat, Office sometimes releases the
+# document object itself. The export has already succeeded and the process does
+# not leak (verified), so this specific failure means "already closed".
+_ALREADY_CLOSED = -2147417848
+
+
+def _close_quietly(handle, what: str, close) -> None:
+    """Close a document/workbook/presentation, tolerating an already-closed one."""
+    if handle is None:
+        return
+    try:
+        close()
+    except Exception as exc:  # noqa: BLE001 - a close failure must not lose the output
+        code = getattr(exc, "hresult", None) or (exc.args[0] if exc.args else None)
+        if code == _ALREADY_CLOSED:
+            logger.debug("%s was already released by Office.", what)
+            return
+        logger.warning("Could not close the %s: %s", what, exc)
+
+
+def _convert_word(app, src: Path, out: Path, secret: str) -> None:
+    doc = None
+    try:
+        doc = app.Documents.Open(
+            str(src), ConfirmConversions=False, ReadOnly=True,
+            AddToRecentFiles=False, PasswordDocument=secret,
+            WritePasswordDocument=secret, Visible=False,
+        )
+        # Do not let a field or linked index rewrite content during export.
+        doc.ExportAsFixedFormat(str(out), 17)  # wdExportFormatPDF
+    finally:
+        _close_quietly(doc, "Word document", lambda: doc.Close(0))
+
+
+def _convert_excel(app, src: Path, out: Path, secret: str) -> None:
+    book = None
+    try:
+        book = app.Workbooks.Open(
+            str(src), UpdateLinks=0, ReadOnly=True, Password=secret,
+            WriteResPassword=secret, IgnoreReadOnlyRecommended=True,
+        )
+        book.ExportAsFixedFormat(0, str(out))  # xlTypePDF
+    finally:
+        _close_quietly(book, "workbook", lambda: book.Close(False))
+
+
+def _convert_powerpoint(app, src: Path, out: Path, secret: str) -> None:
+    presentation = None
+    try:
+        # A password in the path ("file::pw::") is never needed: an
+        # encrypted source is decrypted before it reaches PowerPoint.
+        presentation = app.Presentations.Open(
+            str(src), ReadOnly=True, Untitled=True, WithWindow=False,
+        )
+        presentation.SaveAs(str(out), 32)  # ppSaveAsPDF
+    finally:
+        _close_quietly(presentation, "presentation", lambda: presentation.Close())
+
+
+def start_session() -> MsOfficeSession:
+    return MsOfficeSession().start()
+
+
+def convert_to_pdf(session: MsOfficeSession, src: Path, out: Path, family: str,
+                   password: Optional[str] = None, encrypted: bool = False) -> None:
+    """Convert one file, mirroring ``office_runtime.convert_to_pdf``."""
+    session.convert(src, out, family, password=password, encrypted=encrypted)
