@@ -730,16 +730,21 @@ Important details:
   force-disabled**, in a dedicated Office process (`DispatchEx`) that never
   attaches to documents you already have open, and every application is quit in
   a `finally` path so nothing is left running.
-- An **encrypted document is decrypted in memory** before Office sees it. Office
-  raises a modal password dialog that no automation setting suppresses, and a
-  headless run would block on it forever; a decrypted copy lives in a temporary
-  directory only for the duration of that one conversion. The LibreOffice path
-  does not need this because unoserver takes the password in memory.
-- **Known limitation of the LibreOffice backend:** it cannot open an Office file
-  encrypted by Microsoft Office (AES/agile encryption) — the conversion fails
-  with a lost-bridge error rather than converting. This is a LibreOffice
-  limitation, not a trimming side effect: an untrimmed 1.6 GB install fails
-  identically. Encrypted sources therefore need the Microsoft Office backend.
+- **An encrypted document is decrypted locally before either backend sees it.**
+  Neither can be handed the encrypted file directly: Microsoft Office raises a
+  modal password dialog that no automation setting suppresses and blocks a
+  headless run forever, and LibreOffice cannot open a Microsoft-encrypted file
+  at all — it loses the UNO bridge instead of converting (an untrimmed 1.6 GB
+  install fails identically, so this is a LibreOffice limitation rather than a
+  trimming side effect).
+
+  Both paths therefore go through one decryptor (`office_decrypt`): the password
+  is verified and the document decrypted with `msoffcrypto-tool`, and only the
+  plain copy reaches the converter. A wrong password becomes an ordinary
+  re-prompt instead of a hang or a lost bridge. The decrypted copy lives in a
+  temporary directory for the duration of that one conversion and is removed in
+  a `finally`; the password itself is never written to disk, never placed on a
+  command line, and never logged.
 - The provisioned LibreOffice is **trimmed to the conversion components only**.
   Interface translations (~120 languages), spelling dictionaries, help, clipart,
   templates, wizards, the Java bridge and the PDF *import* filter are removed —

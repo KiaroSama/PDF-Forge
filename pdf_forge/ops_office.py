@@ -24,6 +24,9 @@ from .office import *  # noqa: F401,F403
 from . import office_runtime as ort
 from . import msoffice
 from . import convert_backend as cb
+from .office_decrypt import (
+    DecryptError, DecryptPasswordError, decrypt_to_temp,
+)
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
 
@@ -546,11 +549,22 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
                         server, source_for_convert, tmp, job["family"],
                         password=password, encrypted=bool(password),
                     )
+                elif password:
+                    # LibreOffice cannot open a document encrypted by Microsoft
+                    # Office - it loses the UNO bridge instead of converting -
+                    # so the source is decrypted locally first and the server
+                    # only ever sees a plain document. The decrypted copy lives
+                    # in a temporary directory that is removed straight after.
+                    with tempfile.TemporaryDirectory(
+                            prefix="pdfforge_decrypt_") as scratch:
+                        plain = decrypt_to_temp(
+                            source_for_convert, password, Path(scratch)
+                        )
+                        ort.convert_to_pdf(server, plain, tmp)
                 else:
-                    ort.convert_to_pdf(server, source_for_convert, tmp,
-                                       password=password)
+                    ort.convert_to_pdf(server, source_for_convert, tmp)
                 _validate_pdf_output(tmp)
-            except msoffice.MsOfficePasswordError:
+            except (msoffice.MsOfficePasswordError, DecryptPasswordError):
                 _safe_unlink(tmp)
                 pw = _prompt_convert_password(src.name, attempted)
                 if pw is None:
@@ -559,10 +573,10 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
                 password = pw
                 attempted = True
                 continue
-            except msoffice.MsOfficeError as exc:
+            except (msoffice.MsOfficeError, DecryptError) as exc:
                 _safe_unlink(tmp)
                 print_error(f"  Failed: {exc}")
-                logger.error("Microsoft Office convert failed for '%s': %s", src, exc)
+                logger.error("Convert failed for '%s': %s", src, exc)
                 return "fail"
             except ort.OfficeRuntimeError as exc:
                 _safe_unlink(tmp)

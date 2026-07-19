@@ -29,13 +29,16 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from .constants import LOG_PREFIX
+from .office_decrypt import (
+    DecryptError, DecryptPasswordError, decrypt_to_temp,
+)
 
 logger = logging.getLogger(LOG_PREFIX)
 
 __all__ = [
     'MsOfficeError', 'MsOfficePasswordError', 'MsOfficeSession', 'detect_office',
     'is_available', 'start_session', 'convert_to_pdf', 'describe_office',
-    'office_families', 'decrypt_to_temp',
+    'office_families',
 ]
 
 # msoAutomationSecurityForceDisable: open with macros disabled regardless of the
@@ -64,60 +67,6 @@ class MsOfficeError(RuntimeError):
 
 class MsOfficePasswordError(MsOfficeError):
     """The supplied password does not open this file."""
-
-
-def decrypt_to_temp(path: Path, password: Optional[str], temp_dir: Path) -> Path:
-    """Decrypt an encrypted Office file to a temporary copy, or fail cleanly.
-
-    Microsoft Office is never handed the encrypted file itself. Passing it a
-    password through COM proved unreliable: a wrong password raises a modal
-    dialog that no ``DisplayAlerts``/``Interactive`` setting suppresses, and the
-    call then blocks forever (measured - the process had to be killed). Because
-    the password has to be verified locally anyway, decrypting here removes the
-    dialog from the picture entirely and turns a bad password into an ordinary
-    ``MsOfficePasswordError`` the caller can re-prompt for.
-
-    Trade-off, deliberately accepted: a decrypted copy exists on disk for the
-    duration of the conversion. It is written inside the caller-owned temporary
-    directory and the caller deletes it in a ``finally``. The LibreOffice
-    backend does not need this because unoserver takes the password in memory.
-
-    The password itself is never written to disk and never logged.
-    """
-    try:
-        import msoffcrypto
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise MsOfficeError(
-            "msoffcrypto-tool is not installed, so an encrypted document "
-            "cannot be opened safely with Microsoft Office."
-        ) from exc
-
-    path = Path(path)
-    target = Path(temp_dir) / f"decrypted{path.suffix}"
-    try:
-        with path.open("rb") as handle:
-            office_file = msoffcrypto.OfficeFile(handle)
-            office_file.load_key(password=password or "", verify_password=True)
-            with target.open("wb") as out_handle:
-                office_file.decrypt(out_handle)
-    except Exception as exc:  # noqa: BLE001 - any failure means "cannot open"
-        try:
-            target.unlink()
-        except OSError:
-            pass
-        name = type(exc).__name__
-        # msoffcrypto reports a bad key as InvalidKeyError, and an absent or
-        # empty password as DecryptionError; both mean "this password does not
-        # open the file", which the caller re-prompts for.
-        if "InvalidKey" in name or "Password" in name or "Decryption" in name:
-            raise MsOfficePasswordError("wrong password") from None
-        # An unreadable or unsupported container must NOT be handed to Office:
-        # it is exactly the case that would block on a dialog.
-        raise MsOfficeError(
-            f"This encrypted file could not be decrypted locally ({name}), so "
-            "it was not opened with Microsoft Office."
-        ) from None
-    return target
 
 
 def _csv_with_bom(path: Path, temp_dir: Path) -> Path:
@@ -308,8 +257,13 @@ class MsOfficeSession:
         with tempfile.TemporaryDirectory(prefix="pdfforge_msoffice_") as scratch:
             scratch_dir = Path(scratch)
             if encrypted:
-                # Office never sees the encrypted file - see decrypt_to_temp.
-                src = decrypt_to_temp(src, password, scratch_dir)
+                # Office never sees the encrypted file - see office_decrypt.
+                try:
+                    src = decrypt_to_temp(src, password, scratch_dir)
+                except DecryptPasswordError as exc:
+                    raise MsOfficePasswordError(str(exc)) from None
+                except DecryptError as exc:
+                    raise MsOfficeError(str(exc)) from None
             if family == "csv":
                 src = _csv_with_bom(src, scratch_dir)
             # Office *renames* an export target whose extension is not .pdf

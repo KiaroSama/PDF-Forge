@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Encrypted sources now convert on the LibreOffice backend too.** Both
+  backends share one local decryptor: neither can be handed an encrypted file
+  directly (Office blocks on a modal dialog, LibreOffice loses the UNO bridge),
+  so the password is verified and the document decrypted with `msoffcrypto-tool`
+  first and only the plain copy reaches the converter. A wrong password is an
+  ordinary re-prompt.
+
+### Changed
+- `office_runtime` was split into `office_discovery`, `office_server` and
+  `office_provision`, with `office_runtime` re-exporting the public API so no
+  caller changed. The two oversized test modules were split by feature into
+  twelve focused modules with shared fixture builders in `tests/helpers.py`; the
+  test inventory is unchanged (186 functions, none lost).
+
 - **Microsoft Office is used as the converter when it is installed.** It is the
   native renderer for these formats, needs no download and no extra disk space,
   and LibreOffice is never provisioned on such a machine. Word, Excel,

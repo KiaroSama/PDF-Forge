@@ -13,6 +13,7 @@ import pytest
 
 from pdf_forge import convert_backend as cb
 from pdf_forge import msoffice
+from pdf_forge import office_decrypt
 from pdf_forge import office_provision as ort_provision
 from pdf_forge import office_runtime as ort
 from pdf_forge import ops_office
@@ -132,7 +133,7 @@ def test_a_wrong_password_is_reported_not_passed_to_office(tmp_path, monkeypatch
                         mock.Mock(OfficeFile=FakeOfficeFile))
     src = tmp_path / "locked.xlsx"
     src.write_bytes(b"not really an office file")
-    with pytest.raises(msoffice.MsOfficePasswordError):
+    with pytest.raises(office_decrypt.DecryptPasswordError):
         msoffice.decrypt_to_temp(src, "wrong", tmp_path)
 
 
@@ -146,9 +147,9 @@ def test_an_unverifiable_container_is_refused(tmp_path, monkeypatch):
                         mock.Mock(OfficeFile=FakeOfficeFile))
     src = tmp_path / "weird.docx"
     src.write_bytes(b"x")
-    with pytest.raises(msoffice.MsOfficeError) as excinfo:
+    with pytest.raises(office_decrypt.DecryptError) as excinfo:
         msoffice.decrypt_to_temp(src, "pw", tmp_path)
-    assert not isinstance(excinfo.value, msoffice.MsOfficePasswordError)
+    assert not isinstance(excinfo.value, office_decrypt.DecryptPasswordError)
 
 
 def test_a_failed_decrypt_leaves_no_plaintext_behind(tmp_path, monkeypatch):
@@ -168,7 +169,7 @@ def test_a_failed_decrypt_leaves_no_plaintext_behind(tmp_path, monkeypatch):
                         mock.Mock(OfficeFile=FakeOfficeFile))
     src = tmp_path / "locked.docx"
     src.write_bytes(b"x")
-    with pytest.raises(msoffice.MsOfficePasswordError):
+    with pytest.raises(office_decrypt.DecryptPasswordError):
         msoffice.decrypt_to_temp(src, None, tmp_path)
     assert list(tmp_path.glob("decrypted*")) == []
 
@@ -259,3 +260,83 @@ def test_a_non_utf8_csv_is_left_alone(tmp_path):
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     assert msoffice._csv_with_bom(src, scratch) == src
+
+
+# --------------------------------------------------------------------------- #
+# Both backends decrypt locally: neither can open an encrypted source directly
+# --------------------------------------------------------------------------- #
+
+def test_both_backends_share_one_decryptor():
+    """LibreOffice loses its bridge on an encrypted source; Office hangs on a
+    dialog. Neither may ever be handed the encrypted file itself."""
+    from pdf_forge import office_decrypt, ops_office
+
+    assert msoffice.decrypt_to_temp is office_decrypt.decrypt_to_temp
+    assert ops_office.decrypt_to_temp is office_decrypt.decrypt_to_temp
+
+
+def test_libreoffice_path_never_forwards_a_password(tmp_path, monkeypatch):
+    """The password goes to the local decryptor, not to the conversion server."""
+    from pdf_forge import office_decrypt, ops_office
+
+    seen = {}
+
+    def fake_decrypt(path, password, temp_dir):
+        seen["password"] = password
+        plain = Path(temp_dir) / "decrypted.xlsx"
+        plain.write_bytes(b"plain")
+        return plain
+
+    def fake_convert(_server, src, out, **kwargs):
+        seen["convert_kwargs"] = kwargs
+        seen["converted"] = Path(src).name
+        Path(out).write_bytes(b"%PDF-1.7\n")
+
+    monkeypatch.setattr(ops_office, "decrypt_to_temp", fake_decrypt)
+    monkeypatch.setattr(ops_office.ort, "convert_to_pdf", fake_convert)
+    monkeypatch.setattr(ops_office, "_validate_pdf_output", lambda _p: None)
+    monkeypatch.setattr(ops_office, "_prompt_output_protection", lambda _n: None)
+    monkeypatch.setattr(ops_office, "is_encrypted_office_file", lambda _p: True)
+    monkeypatch.setattr(ops_office, "_prompt_convert_password", lambda *_a: "s3cret")
+
+    src = tmp_path / "locked.xlsx"
+    src.write_bytes(b"encrypted")
+    job = {"src": src, "family": "excel", "out": tmp_path / "locked.pdf",
+           "csv_dialect": None}
+    assert ops_office._convert_one(object(), job, cb.BackendChoice(cb.LIBREOFFICE)) == "ok"
+
+    assert seen["password"] == "s3cret", "the decryptor must receive the password"
+    assert seen["converted"] == "decrypted.xlsx", "the server must get the plain copy"
+    assert not seen["convert_kwargs"].get("password"), (
+        "the password must not be forwarded to the conversion server"
+    )
+    assert office_decrypt.decrypt_to_temp is not fake_decrypt  # sanity: patch scoped
+
+
+def test_a_decrypt_failure_reprompts_instead_of_failing(tmp_path, monkeypatch):
+    from pdf_forge import office_decrypt, ops_office
+
+    attempts = iter(["wrong", "right"])
+
+    def fake_decrypt(path, password, temp_dir):
+        if password != "right":
+            raise office_decrypt.DecryptPasswordError("wrong password")
+        plain = Path(temp_dir) / "decrypted.xlsx"
+        plain.write_bytes(b"plain")
+        return plain
+
+    monkeypatch.setattr(ops_office, "decrypt_to_temp", fake_decrypt)
+    monkeypatch.setattr(ops_office.ort, "convert_to_pdf",
+                        lambda _s, _i, out, **_k: Path(out).write_bytes(b"%PDF-1.7\n"))
+    monkeypatch.setattr(ops_office, "_validate_pdf_output", lambda _p: None)
+    monkeypatch.setattr(ops_office, "_prompt_output_protection", lambda _n: None)
+    monkeypatch.setattr(ops_office, "is_encrypted_office_file", lambda _p: True)
+    monkeypatch.setattr(ops_office, "_prompt_convert_password",
+                        lambda *_a: next(attempts))
+
+    src = tmp_path / "locked.xlsx"
+    src.write_bytes(b"encrypted")
+    job = {"src": src, "family": "excel", "out": tmp_path / "out.pdf",
+           "csv_dialect": None}
+    assert ops_office._convert_one(object(), job, cb.BackendChoice(cb.LIBREOFFICE)) == "ok"
+    assert next(attempts, "used") == "used", "a wrong password must re-prompt"
