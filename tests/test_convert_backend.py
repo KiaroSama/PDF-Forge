@@ -13,6 +13,7 @@ import pytest
 
 from pdf_forge import convert_backend as cb
 from pdf_forge import msoffice
+from pdf_forge import office_provision as ort_provision
 from pdf_forge import office_runtime as ort
 from pdf_forge import ops_office
 
@@ -199,7 +200,7 @@ def test_trimming_keeps_what_conversion_actually_needs():
     """
     essential = ("share/registry", "share/config", "Fonts", "program/python-core")
     for path in essential:
-        assert not any(entry.startswith(path) for entry in ort._TRIMMABLE), path
+        assert not any(entry.startswith(path) for entry in ort_provision._TRIMMABLE), path
 
 
 def test_trimming_removes_the_listed_components(tmp_path):
@@ -211,7 +212,7 @@ def test_trimming_removes_the_listed_components(tmp_path):
     keep.mkdir(parents=True)
     (keep / "keep.bin").write_bytes(b"y" * 1024)
 
-    freed = ort._trim_runtime(tmp_path)
+    freed = ort_provision._trim_runtime(tmp_path)
 
     assert freed >= 3 * 4096
     assert not (tmp_path / "share" / "extensions").exists()
@@ -220,7 +221,7 @@ def test_trimming_removes_the_listed_components(tmp_path):
 
 
 def test_trimming_a_missing_component_is_not_an_error(tmp_path):
-    assert ort._trim_runtime(tmp_path) == 0
+    assert ort_provision._trim_runtime(tmp_path) == 0
 
 
 # --------------------------------------------------------------------------- #
