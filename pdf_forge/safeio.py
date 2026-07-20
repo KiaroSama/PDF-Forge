@@ -21,6 +21,7 @@ import errno
 import hashlib
 import json
 import os
+import sys
 import platform
 import time
 from dataclasses import dataclass, field
@@ -234,7 +235,10 @@ def _process_start(pid: int) -> Optional[str]:
     Returns ``_ALIVE_UNKNOWN`` when the process is running but its start time
     cannot be read, so an unreadable owner is never mistaken for a dead one.
     """
-    if os.name == "nt":
+    # sys.platform (not os.name) is the form a type checker narrows on, so the
+    # Windows-only ctypes attributes below are not analysed when linting on
+    # Linux - where ctypes.WinDLL genuinely does not exist.
+    if sys.platform == "win32":
         import ctypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)

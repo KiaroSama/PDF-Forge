@@ -74,6 +74,10 @@ GATES: List[Gate] = [
          [PYTHON, "-m", "ruff", "check", "pdf_forge", "tests"]),
     Gate("Mypy", "ci.yml / lint",
          [PYTHON, "-m", "mypy"]),
+    # CI lints on ubuntu, so a Windows-only attribute (ctypes.WinDLL) passes
+    # here and fails there. --platform makes that reachable locally.
+    Gate("Mypy (as analysed on Linux)", "ci.yml / lint",
+         [PYTHON, "-m", "mypy", "--platform", "linux"]),
     Gate("Coverage threshold", "ci.yml / coverage",
          [PYTHON, "-m", "pytest", "--cov", "--cov-report=term-missing"],
          slow=True),
@@ -115,7 +119,8 @@ GATES: List[Gate] = [
 # honest about the limits of a local run.
 UNCOVERABLE = [
     ("Linux test matrix", "ci.yml / test",
-     "this is a Windows machine; the ubuntu-latest jobs cannot run here"),
+     "this is a Windows machine; the ubuntu-latest jobs cannot run here "
+     "(type checking IS covered - see the --platform linux gate)"),
     ("Python 3.10 / 3.12 / 3.13 matrix", "ci.yml / test",
      "only Python 3.11 is installed; version-specific breakage (for example a "
      "stdlib module newer than the 3.10 floor) is invisible locally"),
