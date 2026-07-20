@@ -69,3 +69,16 @@ desktop.ini
 .DS_Store
 .idea/
 .vscode/
+
+# Assistant/agent working state and private local-only notes. Kept out of the
+# repository whether or not the paths exist yet, so a tool that creates one
+# later cannot have it staged by a broad "commit everything".
+/explain-AI.md
+/.agents/
+/.claude/
+/.kiro/
+/.codex/
+/.cursor/
+/.cline/
+.ignoreme
+**/.ignoreme

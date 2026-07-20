@@ -137,14 +137,17 @@ def test_the_orphan_reaper_matches_the_form_on_the_command_line(tmp_path):
     form, 2 for the URI form. The reaper was therefore inert, and the leak it
     was written to fix had stopped because of _remove_profile's retry loop.
     """
+    # Before touching the reaper: it returns early off Windows, so on Linux
+    # there is no glob to inspect and asserting on one fails for a reason that
+    # has nothing to do with the defect.
+    if os.name != "nt":
+        pytest.skip("the reaper is Windows-only; there is no glob to match")
+
     profile = tmp_path / "pdfforge_loprofile_probe"
     profile.mkdir()
     glob = _reaper_glob(profile)
 
     assert glob, "no glob was passed to the process query"
-    if os.name != "nt":
-        pytest.skip("the reaper is a Windows path; nothing to match elsewhere")
-
     command_line_form = profile.resolve().as_uri()
     needle = glob.strip("*")
     assert needle in command_line_form, (
