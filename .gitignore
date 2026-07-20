@@ -6,9 +6,9 @@
 # Private AI explanation file (never commit, even if absent).
 explain-AI.md
 
-# Strictly local-only protected directories at any depth.
-.ignoreme/
-**/.ignoreme/
+# Strictly local-only protected entries at any depth. No trailing slash: the
+# directory-only form left a *file* of this name in a subdirectory unprotected.
+.ignoreme
 
 # Local AI assistant configuration (never commit, at any depth).
 .claude/
