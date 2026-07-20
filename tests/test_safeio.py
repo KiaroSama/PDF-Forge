@@ -73,51 +73,62 @@ def test_promotion_cleans_temp_on_failure(tmp_path):
     assert not tmp.exists(), "temp file must be removed on failure"
 
 
-def test_file_lock_gives_up_instead_of_spinning(tmp_path):
-    """Regression: a lock path that can never be created must not hang.
+def _lock_outcome(lock, wait: float = 15.0):
+    """Enter ``lock`` on a worker thread; return 'acquired' or the error name.
 
-    The lock directory sits under a plain file, so mkdir raises FileExistsError.
-    That is 'locking impossible', not 'someone holds the lock' - treating it as
-    contention previously spun forever because the stale check short-circuited
-    the deadline.
+    A worker thread keeps a regression in the retry loop from hanging the whole
+    suite instead of failing this one test.
     """
     import threading
 
-    blocker = tmp_path / "afile"
-    blocker.write_text("x", encoding="utf-8")
     done = threading.Event()
+    result = []
 
     def run():
-        with app.safeio.FileLock(blocker / "sub" / "m.lock", timeout=30):
-            pass
+        try:
+            with lock:
+                result.append("acquired")
+        except OSError as exc:
+            result.append(type(exc).__name__)
         done.set()
 
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    assert done.wait(10), "FileLock spun instead of giving up"
+    threading.Thread(target=run, daemon=True).start()
+    assert done.wait(wait), "FileLock never returned"
+    return result[0]
 
 
-def test_file_lock_honours_its_timeout_under_contention(tmp_path):
-    """A held lock must time out and continue unlocked, not block forever."""
-    import threading
+def test_file_lock_reports_unusable_storage_instead_of_spinning(tmp_path):
+    """A lock path that can never be created must fail fast and fail CLOSED.
+
+    The lock directory sits under a plain file, so mkdir raises FileExistsError.
+    That is 'locking is impossible', not 'someone holds the lock' - treating it
+    as contention previously spun forever. Giving up is right; giving back an
+    *unlocked* lock is not, because the caller then rewrites the manifest with
+    no mutual exclusion at all.
+    """
+    blocker = tmp_path / "afile"
+    blocker.write_text("x", encoding="utf-8")
+    lock = app.safeio.FileLock(blocker / "sub" / "m.lock", timeout=30)
+    assert _lock_outcome(lock, wait=10) == "LockUnavailable"
+
+
+def test_contended_lock_fails_closed_when_its_timeout_expires(tmp_path):
+    """A held lock must raise once its bounded wait expires.
+
+    It must never block forever *and* never continue unlocked: the caller's
+    read-modify-write is only safe while the lock is genuinely held.
+    """
     import time as _time
 
     lock_path = tmp_path / "held.lock"
     holder = app.safeio.FileLock(lock_path, timeout=30)
     holder.__enter__()  # keep it held for the duration of the test
     try:
-        done = threading.Event()
         started = _time.monotonic()
-
-        def run():
-            with app.safeio.FileLock(lock_path, timeout=0.5):
-                pass
-            done.set()
-
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
-        assert done.wait(15), "contended lock never timed out"
+        assert _lock_outcome(app.safeio.FileLock(lock_path, timeout=0.5)) == \
+            "LockTimeout"
         assert _time.monotonic() - started < 15
+        assert lock_path.exists(), "the holder's lock must survive"
     finally:
         holder.__exit__()
 

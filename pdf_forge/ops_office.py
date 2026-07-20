@@ -8,6 +8,7 @@ in-memory UNO password API with unlimited retries.
 """
 from __future__ import annotations
 
+import csv
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -354,70 +355,136 @@ def _prompt_output_protection(filename: str):
         print_error("Choose 1, 2, or 3.")
 
 
-def _apply_output_protection(out_path: Path, mode: str, password: str) -> None:
-    """Re-encrypt a produced PDF in place (via temp) using the AES-256 protector."""
+def _apply_output_protection(staging: Path, password: str,
+                             scratch: Path) -> Path:
+    """Return a NEW staging file holding the protected version of ``staging``.
+
+    Protection is a transformation of an artifact this operation owns, never a
+    promotion onto a user-visible name. The previous version wrote the encrypted
+    bytes and then called the no-clobber promoter with the *unencrypted* staging
+    file as its destination; because that file still existed, promotion selected
+    a suffixed sibling, the encrypted copy landed there as an orphan, and the
+    caller went on to promote the unencrypted file as the user's output. The
+    user chose a password and received an unprotected PDF (C-08).
+
+    The result is validated with the selected password before it is returned, so
+    a protection that did not take effect can never be promoted.
+    """
     pymupdf = _import_pymupdf()
-    doc = pymupdf.open(str(out_path))
+    protected = scratch / "protected.pdf"
+    doc = pymupdf.open(str(staging))
     try:
-        tmp = out_path.with_suffix(".protect.tmp")
-        save_encrypted_pdf(doc, tmp, user_pw=password, owner_pw=password,
+        save_encrypted_pdf(doc, protected, user_pw=password, owner_pw=password,
                            permissions=all_permissions())
     finally:
         close_doc(doc)
-    promote_atomically(tmp, out_path)
-    # Deliberately NOT recorded in the generated-output manifest: that manifest
-    # stops a PDF folder tool from re-processing its *own* PDF output. A PDF
-    # converted from a document is a brand-new source the user will usually want
-    # to compress, split, or protect next, so it must stay discoverable.
+
+    check = pymupdf.open(str(protected))
+    try:
+        if not check.needs_pass or not check.authenticate(password):
+            raise PdfOpenError(
+                "The protected output could not be reopened with the password "
+                "that was selected; it was not promoted."
+            )
+    finally:
+        check.close()
+    return protected
 
 
-def _run_conversion(jobs, source_families, backend=None) -> None:
-    """Execute the whole conversion batch through one task-owned session."""
-    # The backend was chosen while configuring; re-check it here because the
-    # task may run much later, and Office could have been removed since.
-    backend = backend or cb.detect_backend()
-    if not backend:
+def _backend_sessions(plan):
+    """Lazily start one session per backend the plan actually needs.
+
+    Returns ``(get, close)``. ``get(kind)`` starts that backend on first use and
+    reuses it afterwards, so a batch of spreadsheets never starts Word and a
+    batch that Office fully covers never starts LibreOffice.
+    """
+    sessions = {}
+
+    def replace(kind, session):
+        """Record a restarted session so later jobs use the live one."""
+        sessions[kind] = session
+
+    def get(kind):
+        if kind in sessions:
+            return sessions[kind]
+        if kind == cb.MSOFFICE:
+            print_info("Starting Microsoft Office...")
+            session = msoffice.start_session()
+        else:
+            status = ort.runtime_status()
+            if not status["ready"]:
+                raise ort.OfficeRuntimeError(
+                    "The conversion runtime is not ready. Missing: "
+                    + _missing_runtime(status) + "."
+                )
+            print_info(
+                f"Starting local LibreOffice "
+                f"{status['libreoffice_version'] or '?'} "
+                f"(unoserver {status['unoserver_version'] or '?'})..."
+            )
+            session = ort.warm_up(ort.start_conversion_server())
+        sessions[kind] = session
+        return session
+
+    def close():
+        for kind, session in sessions.items():
+            try:
+                session.stop()
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+                logger.warning("Could not stop the %s session: %s", kind, exc)
+
+    return get, close, replace
+
+
+def _run_conversion(jobs, source_families, backend=None, plan=None) -> None:
+    """Execute the whole conversion batch, routing each family to its backend."""
+    # The routing was chosen while configuring; re-check it here because the
+    # task may run much later and Office could have been removed since.
+    families = sorted({job["family"] for job in jobs})
+    plan = cb.plan_batch(families)
+    unusable = [fam for fam, choice in plan.items() if not choice]
+    if len(unusable) == len(families):
         print_error(
             "No document converter is available any more. Microsoft Office was "
             "not found and the project-local LibreOffice is not ready."
         )
         logger.error("Convert aborted; no backend available.")
         return
-
-    if backend.kind == cb.MSOFFICE:
-        print_info(f"Converting with Microsoft Office ({backend.detail})...")
-        try:
-            server = msoffice.start_session()
-        except msoffice.MsOfficeError as exc:
-            print_error(f"Microsoft Office could not be started: {exc}")
-            logger.error("MS Office session start failed: %s", exc)
-            return
-    else:
-        status = ort.runtime_status()
-        if not status["ready"]:
-            print_error(
-                "The conversion runtime is not ready. Missing: "
-                + _missing_runtime(status) + "."
-            )
-            logger.error("Convert aborted; runtime not ready: %s", status)
-            return
-        print_info(
-            f"Starting local LibreOffice {status['libreoffice_version'] or '?'} "
-            f"(unoserver {status['unoserver_version'] or '?'})..."
+    for fam in unusable:
+        print_warning(
+            f"  {_family_label(fam)} files cannot be converted: no available "
+            "backend handles them."
         )
-        try:
-            server = ort.warm_up(ort.start_conversion_server())
-        except ort.OfficeRuntimeError as exc:
-            print_error(f"Could not start the conversion runtime: {exc}")
-            logger.error("Convert server start failed: %s", exc)
-            return
+
+    # Per-family routing, stated up front so the user can see where each kind of
+    # file is going rather than inferring it from one batch-wide label (C-10).
+    for fam in families:
+        if plan[fam]:
+            print_info(f"  {_family_label(fam)} -> {cb.backend_label(plan[fam])}")
+
+    get_session, close_sessions, set_session = _backend_sessions(plan)
 
     ok = failed = skipped = 0
     try:
         for index, job in enumerate(jobs, start=1):
             src, fam, out = job["src"], job["family"], job["out"]
             print_info(f"[{index}/{len(jobs)}] {src.name} ({_family_label(fam)})")
-            result, server = _convert_with_restart(server, job, backend=backend)
+            job_backend = plan.get(fam)
+            if not job_backend:
+                skipped += 1
+                print_note(f"  Skipped ({_family_label(fam)} has no backend).")
+                continue
+            try:
+                server = get_session(job_backend.kind)
+            except (msoffice.MsOfficeError, ort.OfficeRuntimeError) as exc:
+                print_error(f"  Failed: {exc}")
+                logger.error("Backend start failed for '%s': %s", src, exc)
+                failed += 1
+                continue
+            result, server = _convert_with_restart(server, job,
+                                                   backend=job_backend)
+            if server is not None:
+                set_session(job_backend.kind, server)
             if server is None:
                 print_error(
                     "  The conversion runtime could not be restarted; stopping."
@@ -426,14 +493,15 @@ def _run_conversion(jobs, source_families, backend=None) -> None:
                 break
             if result == "ok":
                 ok += 1
-                print_success(f"  -> {out.name}")
+                # Report the file that was actually written: promotion may have
+                # allocated a suffixed name (C-01).
+                print_success(f"  -> {Path(job.get('written', out)).name}")
             elif result == "skip":
                 skipped += 1
             else:
                 failed += 1
     finally:
-        if server is not None:
-            server.stop()
+        close_sessions()
 
     counts = family_counts([j["src"] for j in jobs])
     print_success(
@@ -443,7 +511,8 @@ def _run_conversion(jobs, source_families, backend=None) -> None:
     )
     logger.info(
         "Convert batch complete: ok=%d failed=%d skipped=%d backend=%s",
-        ok, failed, skipped, cb.backend_label(backend),
+        ok, failed, skipped,
+        "; ".join(f"{f}={cb.backend_label(c)}" for f, c in plan.items()),
     )
 
 
@@ -515,13 +584,46 @@ def _convert_one(server, job, backend=None) -> str:
                 source_for_convert = normalize_csv_for_import(
                     src, job["csv_dialect"], csv_dir / src.name
                 )
-            except (OSError, UnicodeError, ValueError) as exc:
-                logger.warning("CSV normalization failed for '%s': %s", src, exc)
-                source_for_convert = src
+            except (OSError, UnicodeError, ValueError, csv.Error) as exc:
+                # Converting the raw source instead would silently discard the
+                # detected (and possibly user-corrected) delimiter and encoding,
+                # and the backend would re-guess them - a wrong PDF reported as
+                # a success. Fail the file with a visible reason (C-16).
+                print_error(
+                    f"  Failed: the CSV could not be prepared for conversion "
+                    f"({exc}); it was not converted."
+                )
+                logger.error("CSV normalization failed for '%s': %s", src, exc)
+                return "fail"
         return _convert_one_body(server, job, source_for_convert, backend)
     finally:
         if csv_dir is not None:
             shutil.rmtree(csv_dir, ignore_errors=True)
+
+
+def _discard_stage(stage_dir: Path) -> None:
+    """Remove a whole task-owned staging directory, never raising."""
+    shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+def _require_matching_family(plain: Path, expected_family: str,
+                             display_name: str) -> None:
+    """Reject a decrypted package whose real family is not the one claimed.
+
+    Before decryption every encrypted OOXML container looks identical - an OLE2
+    holding ``EncryptionInfo``/``EncryptedPackage`` - so the extension is the
+    only family evidence available, and it is attacker-controlled. An encrypted
+    workbook renamed ``.docx`` would otherwise be decrypted and handed straight
+    to Word (C-11). Validate the plaintext instead, against the family the job
+    was actually planned for.
+    """
+    ok, reason = validate_office_file(plain, expected_family=expected_family)
+    if not ok:
+        raise DecryptError(
+            f"'{display_name}' decrypted successfully but is not a "
+            f"{_family_label(expected_family)} file ({reason}); it was not "
+            "converted."
+        )
 
 
 def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
@@ -541,9 +643,15 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
 
         use_msoffice = backend is not None and backend.kind == cb.MSOFFICE
         while True:
-            tmp = out.with_suffix(".convert.tmp")
+            # Staging lives in a task-owned unique directory beside the
+            # destination, never a deterministic sibling of the output: two
+            # processes converting into the same folder used to collide on
+            # "<out>.convert.tmp" before any no-clobber check applied (C-07).
+            out.parent.mkdir(parents=True, exist_ok=True)
+            stage_dir = Path(tempfile.mkdtemp(prefix=".pdfforge_convert_",
+                                              dir=str(out.parent)))
+            tmp = stage_dir / "converted.pdf"
             try:
-                out.parent.mkdir(parents=True, exist_ok=True)
                 if use_msoffice:
                     msoffice.convert_to_pdf(
                         server, source_for_convert, tmp, job["family"],
@@ -555,17 +663,15 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
                     # so the source is decrypted locally first and the server
                     # only ever sees a plain document. The decrypted copy lives
                     # in a temporary directory that is removed straight after.
-                    with tempfile.TemporaryDirectory(
-                            prefix="pdfforge_decrypt_") as scratch:
-                        plain = decrypt_to_temp(
-                            source_for_convert, password, Path(scratch)
-                        )
-                        ort.convert_to_pdf(server, plain, tmp)
+                    plain = decrypt_to_temp(source_for_convert, password,
+                                            stage_dir)
+                    _require_matching_family(plain, job["family"], src.name)
+                    ort.convert_to_pdf(server, plain, tmp)
                 else:
                     ort.convert_to_pdf(server, source_for_convert, tmp)
                 _validate_pdf_output(tmp)
             except (msoffice.MsOfficePasswordError, DecryptPasswordError):
-                _safe_unlink(tmp)
+                _discard_stage(stage_dir)
                 pw = _prompt_convert_password(src.name, attempted)
                 if pw is None:
                     print_note(f"  Skipped (password not provided): {src.name}")
@@ -574,12 +680,12 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
                 attempted = True
                 continue
             except (msoffice.MsOfficeError, DecryptError) as exc:
-                _safe_unlink(tmp)
+                _discard_stage(stage_dir)
                 print_error(f"  Failed: {exc}")
                 logger.error("Convert failed for '%s': %s", src, exc)
                 return "fail"
             except ort.OfficeRuntimeError as exc:
-                _safe_unlink(tmp)
+                _discard_stage(stage_dir)
                 if str(exc) == ort.PASSWORD_SENTINEL:
                     # Encrypted / wrong password: prompt (unlimited retries).
                     pw = _prompt_convert_password(src.name, attempted)
@@ -596,26 +702,36 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
                 logger.error("Convert failed for '%s': %s", src, exc)
                 return "fail"
             except PdfOpenError as exc:
-                _safe_unlink(tmp)
+                _discard_stage(stage_dir)
                 print_error(f"  Failed output validation: {exc}")
                 logger.error("Convert output invalid for '%s': %s", src, exc)
                 return "fail"
 
             # Success: optional output protection for encrypted sources.
             try:
+                final_staging = tmp
                 if password:
                     choice = _prompt_output_protection(src.name)
                     if choice and choice[0] != "none":
                         mode, new_pw = choice
-                        _apply_output_protection(
-                            tmp, mode, password if mode == "same" else new_pw
+                        # Protection replaces the artifact about to be promoted;
+                        # it never promotes anything itself (C-08).
+                        final_staging = _apply_output_protection(
+                            tmp, password if mode == "same" else new_pw,
+                            stage_dir,
                         )
-                promote_atomically(tmp, out)
+                # One promotion, once, with an explicit recording policy: a
+                # converted PDF is a brand-new source the user will usually want
+                # to split, compress or protect next, so it stays visible to the
+                # PDF folder tools and is deliberately NOT recorded (C-09).
+                job["written"] = promote_atomically(final_staging, out,
+                                                    record=False)
             except Exception as exc:  # noqa: BLE001
-                _safe_unlink(tmp)
                 print_error(f"  Failed finalizing output: {exc}")
                 logger.exception("Convert finalize failed for '%s'", src)
                 return "fail"
+            finally:
+                _discard_stage(stage_dir)
             return "ok"
     finally:
         password = None  # drop the source password as soon as this file ends

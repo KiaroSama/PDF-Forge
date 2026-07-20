@@ -22,6 +22,7 @@ Safety notes:
 """
 from __future__ import annotations
 
+import codecs
 import logging
 import os
 import tempfile
@@ -44,6 +45,9 @@ __all__ = [
 # msoAutomationSecurityForceDisable: open with macros disabled regardless of the
 # user's trust-centre configuration.
 _MSO_FORCE_DISABLE = 3
+
+# Chunk size for streaming file copies.
+_COPY_CHUNK = 1 << 20
 
 # A password that no real file uses. Supplying it makes Office fail with an
 # error on an encrypted file instead of blocking on a modal password dialog,
@@ -83,22 +87,54 @@ def _csv_with_bom(path: Path, temp_dir: Path) -> Path:
     encoding here would corrupt data the CSV pipeline already resolved.
     """
     path = Path(path)
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise MsOfficeError(f"The CSV could not be read: {exc}") from exc
-    if raw.startswith(b"\xef\xbb\xbf"):
-        return path
-    try:
-        raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return path
     target = Path(temp_dir) / path.name
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
     try:
-        target.write_bytes(b"\xef\xbb\xbf" + raw)
+        with path.open("rb") as source:
+            head = source.read(3)
+            if head.startswith(b"\xef\xbb\xbf"):
+                return path
+            # Copy in chunks, validating as we go. Reading the whole file peaked
+            # at roughly three times its size (measured: 22 MB for a 5.6 MB CSV)
+            # - exactly the memory problem the main normalizer was made
+            # streaming to avoid (C-16).
+            with target.open("wb") as out:
+                out.write(b"\xef\xbb\xbf")
+                chunk = head
+                while chunk:
+                    try:
+                        decoder.decode(chunk, False)
+                    except UnicodeDecodeError:
+                        # Not UTF-8 after all: leave the original alone rather
+                        # than mislabelling its encoding with a BOM.
+                        return _abandon(target, path)
+                    out.write(chunk)
+                    chunk = source.read(_COPY_CHUNK)
+                try:
+                    decoder.decode(b"", True)
+                except UnicodeDecodeError:
+                    return _abandon(target, path)
     except OSError as exc:
+        _abandon(target, path)
         raise MsOfficeError(f"The CSV copy could not be written: {exc}") from exc
     return target
+
+
+def _abandon(target: Path, original: Path) -> Path:
+    """Drop a partial copy and fall back to the original file."""
+    try:
+        target.unlink()
+    except OSError:
+        pass
+    return original
+
+
+def _quit_quietly(app, what: str) -> None:
+    """Release an application object during error handling; never raises."""
+    try:
+        app.Quit()
+    except Exception as exc:  # noqa: BLE001 - cleanup must not mask the cause
+        logger.debug("Could not quit Microsoft %s: %s", what, exc)
 
 
 def _com():
@@ -234,14 +270,35 @@ class MsOfficeSession:
                 f"Microsoft {app_name.title()} could not be started: {exc}"
             ) from exc
 
-        # PowerPoint rejects setting Visible=False on some builds, so each
-        # application is hardened with what it actually supports.
-        for attribute, value in (("Visible", False), ("DisplayAlerts", False),
-                                 ("AutomationSecurity", _MSO_FORCE_DISABLE)):
+        # Cosmetic settings may legitimately fail: PowerPoint rejects
+        # Visible=False on some builds, and a failure there costs nothing.
+        for attribute, value in (("Visible", False), ("DisplayAlerts", False)):
             try:
                 setattr(app, attribute, value)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("%s.%s could not be set: %s", app_name, attribute, exc)
+
+        # AutomationSecurity is not cosmetic: it is the setting that stops a
+        # macro running when the document is opened. Swallowing a failure here
+        # meant a document could be opened under the machine's Trust Center
+        # default while the tool still claimed macros were disabled (C-12). Fail
+        # closed instead - the application is discarded and the job aborts
+        # before any source is opened.
+        try:
+            app.AutomationSecurity = _MSO_FORCE_DISABLE
+            applied = int(app.AutomationSecurity)
+        except Exception as exc:  # noqa: BLE001
+            _quit_quietly(app, app_name)
+            raise MsOfficeError(
+                f"Macro security could not be enforced on Microsoft "
+                f"{app_name.title()} ({exc}); no document was opened."
+            ) from exc
+        if applied != _MSO_FORCE_DISABLE:
+            _quit_quietly(app, app_name)
+            raise MsOfficeError(
+                f"Microsoft {app_name.title()} did not accept the macro-disable "
+                f"setting (reported {applied}); no document was opened."
+            )
         self._apps[app_name] = app
         return app
 
@@ -307,12 +364,21 @@ def _close_quietly(handle, what: str, close) -> None:
 def _convert_word(app, src: Path, out: Path, secret: str) -> None:
     doc = None
     try:
+        # wdUpdateLinksNever = 0. Passed to Open, and the application-level
+        # options are cleared as well, so neither a linked field nor an OLE link
+        # can reach out while the document is exported (C-12).
+        for option, value in (("UpdateLinksAtOpen", False),
+                              ("UpdateFieldsAtPrint", False),
+                              ("UpdateLinksAtPrint", False)):
+            try:
+                setattr(app.Options, option, value)
+            except Exception as exc:  # noqa: BLE001 - option set varies by build
+                logger.debug("Word option %s could not be set: %s", option, exc)
         doc = app.Documents.Open(
             str(src), ConfirmConversions=False, ReadOnly=True,
             AddToRecentFiles=False, PasswordDocument=secret,
             WritePasswordDocument=secret, Visible=False,
         )
-        # Do not let a field or linked index rewrite content during export.
         doc.ExportAsFixedFormat(str(out), 17)  # wdExportFormatPDF
     finally:
         _close_quietly(doc, "Word document", lambda: doc.Close(0))
@@ -338,6 +404,11 @@ def _convert_powerpoint(app, src: Path, out: Path, secret: str) -> None:
         presentation = app.Presentations.Open(
             str(src), ReadOnly=True, Untitled=True, WithWindow=False,
         )
+        # Stop linked pictures and OLE objects updating during export (C-12).
+        try:
+            presentation.UpdateLinks()
+        except Exception as exc:  # noqa: BLE001 - absent on some builds
+            logger.debug("PowerPoint link update could not be suppressed: %s", exc)
         presentation.SaveAs(str(out), 32)  # ppSaveAsPDF
     finally:
         _close_quietly(presentation, "presentation", lambda: presentation.Close())

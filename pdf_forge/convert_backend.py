@@ -15,7 +15,7 @@ Everything else in PDF Forge works without either backend.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 from . import msoffice
 from . import office_runtime as ort
@@ -24,6 +24,7 @@ from .constants import LOG_PREFIX
 logger = logging.getLogger(LOG_PREFIX)
 
 __all__ = ['MSOFFICE', 'LIBREOFFICE', 'BackendChoice', 'detect_backend',
+           'plan_batch', 'msoffice_backend', 'libreoffice_backend',
            'backend_label', 'runtime_download_size_mb']
 
 MSOFFICE = "msoffice"
@@ -31,19 +32,31 @@ LIBREOFFICE = "libreoffice"
 
 
 class BackendChoice:
-    """The backend a conversion batch will use, plus how to describe it."""
+    """A backend, plus the source families it can actually convert.
 
-    __slots__ = ("kind", "detail")
+    ``families`` matters because Microsoft Office availability is per
+    application: a machine with Word registered but not Excel can convert a
+    .docx and cannot convert a .xlsx. Treating "some Office exists" as "Office
+    handles everything" routed spreadsheet jobs at a missing application and
+    failed them outright, even with a ready LibreOffice standing by (C-10).
+    """
 
-    def __init__(self, kind: str, detail: str = "") -> None:
+    __slots__ = ("kind", "detail", "families")
+
+    def __init__(self, kind: str, detail: str = "", families=()) -> None:
         self.kind = kind
         self.detail = detail
+        self.families = tuple(families)
 
     def __bool__(self) -> bool:
         return self.kind in (MSOFFICE, LIBREOFFICE)
 
+    def handles(self, family: str) -> bool:
+        return bool(self) and (not self.families or family in self.families)
+
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"BackendChoice({self.kind!r}, {self.detail!r})"
+        return (f"BackendChoice({self.kind!r}, {self.detail!r}, "
+                f"{self.families!r})")
 
 
 def backend_label(choice: "BackendChoice") -> str:
@@ -70,17 +83,56 @@ def runtime_download_size_mb() -> Optional[int]:
         return None
 
 
+def libreoffice_backend() -> BackendChoice:
+    """The project-local LibreOffice, when it is ready. Falsy otherwise.
+
+    LibreOffice converts every supported family, so its ``families`` is empty -
+    meaning "no restriction".
+    """
+    status = ort.runtime_status()
+    if status.get("ready"):
+        return BackendChoice(LIBREOFFICE,
+                             str(status.get("libreoffice_version") or ""))
+    return BackendChoice("none")
+
+
+def msoffice_backend() -> BackendChoice:
+    """An installed Microsoft Office, restricted to the families it registers."""
+    detected = msoffice.detect_office()
+    if not detected:
+        return BackendChoice("none")
+    return BackendChoice(MSOFFICE, msoffice.describe_office(detected),
+                         families=detected.get("families") or ())
+
+
 def detect_backend() -> BackendChoice:
     """Pick a backend without installing anything and without asking.
 
     Callers that may install (the interactive path) handle the LibreOffice
     prompt themselves; this function only reports what is usable right now.
     """
-    detected = msoffice.detect_office()
-    if detected:
-        return BackendChoice(MSOFFICE, msoffice.describe_office(detected))
+    office = msoffice_backend()
+    if office:
+        return office
+    return libreoffice_backend()
 
-    status = ort.runtime_status()
-    if status.get("ready"):
-        return BackendChoice(LIBREOFFICE, str(status.get("libreoffice_version") or ""))
-    return BackendChoice("none")
+
+def plan_batch(families) -> Dict[str, BackendChoice]:
+    """Choose a backend per source family.
+
+    Microsoft Office is preferred for the families it can actually open, and the
+    ready LibreOffice covers the rest. A family that neither backend can convert
+    maps to a falsy choice, so the caller can report it instead of routing the
+    job at a missing application.
+    """
+    office = msoffice_backend()
+    libre = libreoffice_backend()
+    plan: Dict[str, BackendChoice] = {}
+    for family in families:
+        if office.handles(family):
+            plan[family] = office
+        elif libre.handles(family):
+            plan[family] = libre
+        else:
+            plan[family] = BackendChoice("none")
+    return plan

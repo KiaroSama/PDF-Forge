@@ -7,8 +7,10 @@ PF-021 (delimiter scoring ranks consistency before column count) and PF-022
 (temporary directories never leak).
 """
 
+import codecs
 import csv
 import hashlib
+import io
 import sys
 import tempfile
 from pathlib import Path
@@ -76,6 +78,99 @@ def test_utf16_bom_is_recognised(tmp_path):
     path = tmp_path / "u16.csv"
     path.write_bytes("naïve,b\n1,2\n".encode("utf-16"))
     assert app.detect_csv_dialect(path).encoding == "UTF-16"
+
+
+# --------------------------------------------------------------------------- #
+# C-15 - the sample boundary and the BOM must never corrupt the data
+# --------------------------------------------------------------------------- #
+
+SAMPLE_UNITS = SAMPLE_LIMIT // 2          # UTF-16 code units inside the sample
+_BOMS = {"le": codecs.BOM_UTF16_LE, "be": codecs.BOM_UTF16_BE}
+_CODECS = {"le": "utf-16-le", "be": "utf-16-be"}
+
+
+def _utf16_text(units_before_tail: int, tail: str) -> str:
+    """Build CSV text whose first ``units_before_tail`` UTF-16 units are BMP.
+
+    ``tail`` then starts exactly at that code-unit offset, so the caller can put
+    a surrogate pair (or an ordinary character) astride the sample boundary.
+    """
+    text = "name,note\n"
+    while len(text) < units_before_tail - 32:
+        text += "ann,filler text\n"
+    pad = units_before_tail - len(text)
+    assert pad >= 5, "padding cell does not fit"
+    text += "zzz," + "x" * (pad - 4)
+    assert len(text) == units_before_tail
+    return text + tail + "\nbob,end\n"
+
+
+def _write_utf16(path: Path, text: str, order: str) -> None:
+    path.write_bytes(_BOMS[order] + text.encode(_CODECS[order]))
+
+
+def _logical_rows(text: str) -> list:
+    return list(csv.reader(io.StringIO(text, newline="")))
+
+
+def _normalized_rows(tmp_path: Path, src: Path, dialect) -> list:
+    out = tmp_path / (src.stem + "_norm.csv")
+    app.normalize_csv_for_import(src, dialect, out)
+    with open(out, "r", encoding="utf-8", newline="") as handle:
+        return list(csv.reader(handle))
+
+
+@pytest.mark.parametrize("order", ["le", "be"])
+def test_utf16_surrogate_pair_split_by_the_sample_boundary(tmp_path, order):
+    """The 65536-byte sample ends between the two halves of a surrogate pair."""
+    # The BOM is code unit 0, so the last text unit inside the sample is index
+    # SAMPLE_UNITS - 2: put the pair's high half there and its low half past
+    # the boundary.
+    text = _utf16_text(SAMPLE_UNITS - 2, "\U0001F600")
+    src = tmp_path / f"surrogate_{order}.csv"
+    _write_utf16(src, text, order)
+    assert src.stat().st_size > SAMPLE_LIMIT
+
+    dialect = app.detect_csv_dialect(src)
+    assert dialect.encoding == "UTF-16", (
+        f"valid UTF-16{order.upper()} misread as {dialect.encoding} at a split "
+        "surrogate pair"
+    )
+    assert _normalized_rows(tmp_path, src, dialect) == _logical_rows(text)
+
+
+@pytest.mark.parametrize("order", ["le", "be"])
+def test_utf16_ordinary_boundary_split(tmp_path, order):
+    """A plain BMP file larger than the sample must still read as UTF-16."""
+    text = _utf16_text(SAMPLE_UNITS + 40, "سلام")
+    src = tmp_path / f"plain_{order}.csv"
+    _write_utf16(src, text, order)
+    assert src.stat().st_size > SAMPLE_LIMIT
+
+    dialect = app.detect_csv_dialect(src)
+    assert dialect.encoding == "UTF-16"
+    assert _normalized_rows(tmp_path, src, dialect) == _logical_rows(text)
+
+
+def test_utf8_bom_with_a_quoted_first_field(tmp_path):
+    """The BOM is an encoding marker, never part of the first cell."""
+    src = tmp_path / "bom_quoted.csv"
+    src.write_bytes(b'\xef\xbb\xbf"name","note"\n"a","b"\n')
+
+    dialect = app.detect_csv_dialect(src)
+    rows = _normalized_rows(tmp_path, src, dialect)
+    assert rows[0][0] == "name", f"first cell was {rows[0][0]!r}"
+    assert rows == [["name", "note"], ["a", "b"]]
+
+
+def test_utf8_bom_with_persian_and_emoji(tmp_path):
+    src = tmp_path / "bom_fa.csv"
+    text = 'name,note\n"سما","فارسی 😀"\nbob,ok\n'
+    src.write_bytes(codecs.BOM_UTF8 + text.encode("utf-8"))
+
+    dialect = app.detect_csv_dialect(src)
+    assert dialect.encoding == "UTF-8"
+    assert _normalized_rows(tmp_path, src, dialect) == _logical_rows(text)
 
 
 def test_detection_never_modifies_the_source(tmp_path):
