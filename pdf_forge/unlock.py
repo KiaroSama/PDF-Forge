@@ -6,19 +6,20 @@ import time
 from pathlib import Path
 
 from .constants import *  # noqa: F401,F403
-from .safeio import promote_atomically
+from .safeio import OutputResult, promote_atomically
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
 __all__ = ['unlock_pdf_doc']  # permission helpers live in pdf_io
 
 
-def unlock_pdf_doc(doc, out_path: Path) -> int:
+def unlock_pdf_doc(doc, out_path: Path) -> OutputResult:
     """Save an already-opened (and authenticated) document with no encryption.
 
     Removes the open password and every permission restriction, producing a
     fully unlocked copy. The source is never modified. Written safely
-    (temporary file -> validate -> atomic rename). Returns the page count.
+    (temporary file -> validate -> atomic rename). Returns an
+    :class:`OutputResult` carrying the path actually written and the page count.
     """
     pymupdf = _import_pymupdf()
 
@@ -41,7 +42,8 @@ def unlock_pdf_doc(doc, out_path: Path) -> int:
             use_objstms=1,
         )
         _validate_written_pdf(tmp_path, expected_pages=total)
-        out_path = promote_atomically(tmp_path, out_path)
+        # Never rebind out_path: the caller must be told the written name.
+        written = promote_atomically(tmp_path, out_path)
     except Exception:
         try:
             if tmp_path.exists():
@@ -52,6 +54,6 @@ def unlock_pdf_doc(doc, out_path: Path) -> int:
 
     elapsed = time.perf_counter() - started
     logger.info(
-        "Unlocked '%s' (%d page(s)) in %.2fs.", out_path, total, elapsed
+        "Unlocked '%s' (%d page(s)) in %.2fs.", written, total, elapsed
     )
-    return total
+    return OutputResult(path=written, count=total)

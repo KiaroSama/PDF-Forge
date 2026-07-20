@@ -393,7 +393,9 @@ def operation_split_chunks() -> None:
             pages_zero_based = list(range(start - 1, end))
             _print_progress("Writing chunks", index, len(chunks))
             try:
-                result = write_pages_to_pdf(reader, pages_zero_based, out_path,
+                # Write from the document this runner reopened; the
+                # configure-time reader was closed before queueing (PF-004).
+                result = write_pages_to_pdf(doc, pages_zero_based, out_path,
                                             protection=protection)
                 written_path, written = result.path, result.count
             except Exception as exc:  # noqa: BLE001

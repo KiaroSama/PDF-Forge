@@ -18,6 +18,7 @@ on:
       - 'pdf_forge/ops_office.py'
       - 'office_runtime_meta.json'
       - 'tests/test_office_e2e.py'
+      - 'tests/test_office_links.py'
       - '.github/workflows/office-e2e.yml'
 
 permissions:
@@ -83,7 +84,10 @@ jobs:
         # random localhost port with an isolated profile, so they cannot
         # contend. Serially this suite took ~30 minutes; the wall time is
         # now the slowest single test rather than the sum of all of them.
-        run: python -m pytest tests/test_office_e2e.py -v -n auto
+        # test_office_links.py proves external-link suppression end to end
+        # against a loopback recorder; it only counts as evidence if it runs
+        # here, so it is named explicitly rather than left to a path filter.
+        run: python -m pytest tests/test_office_e2e.py tests/test_office_links.py -v -n auto
 
       # C-18 gate 15: the full provisioning lifecycle, not just one setup. A
       # clean-then-reinstall proves removal really removes and that a second

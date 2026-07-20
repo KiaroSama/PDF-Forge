@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Sequence
 
 from .constants import *  # noqa: F401,F403
-from .safeio import promote_atomically
+from .safeio import OutputResult, promote_atomically
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
@@ -111,13 +111,14 @@ def render_pages_to_pngs(doc, pages_zero_based: Sequence[int], out_dir: Path,
 
 
 def render_pdf_to_image_pdf(doc, page_count: int, out_path: Path, dpi: int,
-                            progress=None, protection=None) -> int:
+                            progress=None, protection=None) -> OutputResult:
     """Rasterize every page and assemble the images into one image-only PDF.
 
     Every page is rendered to an image at the given DPI and placed on a new page
     of the same physical size as the source page (temporary file -> validate ->
     atomic rename). The result contains no selectable text, which is the point:
-    the output is not editable. Returns the number of pages written.
+    the output is not editable. Returns an :class:`OutputResult` carrying the
+    path actually written and the number of pages written.
     """
     pymupdf = _import_pymupdf()
 
@@ -156,7 +157,9 @@ def render_pdf_to_image_pdf(doc, page_count: int, out_path: Path, dpi: int,
                 tmp_path, expected_pages=page_count,
                 password=protection.password if protect_kwargs else None,
             )
-            out_path = promote_atomically(tmp_path, out_path)
+            # Never rebind out_path: the requested and the written name must
+            # stay distinguishable all the way back to the caller.
+            written = promote_atomically(tmp_path, out_path)
         except Exception:
             try:
                 if tmp_path.exists():
@@ -170,9 +173,9 @@ def render_pdf_to_image_pdf(doc, page_count: int, out_path: Path, dpi: int,
     elapsed = time.perf_counter() - started
     logger.info(
         "Wrote image-only PDF '%s' (%d page(s)) at %d DPI in %.2fs.",
-        out_path, page_count, dpi, elapsed,
+        written, page_count, dpi, elapsed,
     )
-    return page_count
+    return OutputResult(path=written, count=page_count)
 
 
 def _image_content_key(item) -> str:
@@ -243,8 +246,12 @@ def _smask_xref(doc, xref: int) -> int:
 
 
 def _write_image_with_alpha(doc, xref: int, smask_xref: int, out_dir: Path,
-                            final_path: Path) -> None:
-    """Write a PNG whose alpha channel is rebuilt from the image's soft mask."""
+                            final_path: Path) -> Path:
+    """Write a PNG whose alpha channel is rebuilt from the image's soft mask.
+
+    Returns the path actually written, which the caller must record instead of
+    the requested one.
+    """
     pymupdf = _import_pymupdf()
     base = pymupdf.Pixmap(doc, xref)
     mask = pymupdf.Pixmap(doc, smask_xref)
@@ -255,7 +262,7 @@ def _write_image_with_alpha(doc, xref: int, smask_xref: int, out_dir: Path,
             combined = base
         else:
             combined = pymupdf.Pixmap(base, mask)
-        _atomic_pixmap_save(combined, out_dir, final_path, "png")
+        return _atomic_pixmap_save(combined, out_dir, final_path, "png")
     finally:
         base = mask = None
 
@@ -278,8 +285,11 @@ def _composite_on_white(pymupdf, doc, pixmap, smask_xref: int):
 
 
 def _atomic_pixmap_save(pixmap, out_dir: Path, final_path: Path, fmt: str,
-                        jpg_quality=None) -> None:
-    """Save a pixmap via temp file -> validate -> atomic rename."""
+                        jpg_quality=None) -> Path:
+    """Save a pixmap via temp file -> validate -> atomic rename.
+
+    Returns the path actually written; ``final_path`` is only the request.
+    """
     tmp_fd, tmp_name = tempfile.mkstemp(
         suffix=".tmp", prefix=".pdfforge_", dir=str(out_dir)
     )
@@ -291,7 +301,7 @@ def _atomic_pixmap_save(pixmap, out_dir: Path, final_path: Path, fmt: str,
         else:
             pixmap.save(str(tmp_path), output=fmt, jpg_quality=jpg_quality)
         _validate_image_file(tmp_path)
-        final_path = promote_atomically(tmp_path, final_path, record=False)
+        return promote_atomically(tmp_path, final_path, record=False)
     except Exception:
         try:
             if tmp_path.exists():
@@ -361,8 +371,9 @@ def extract_embedded_images(doc, out_dir: Path, jpeg_quality=None,
             # separate /SMask object), so copying them raw would silently drop
             # the transparency. Rebuild alpha from the mask and write a PNG.
             final_path = unique_file_path(out_dir / f"p{page_number}_{per_page}.png")
-            _write_image_with_alpha(doc, xref, smask_xref, out_dir, final_path)
-            created.append(final_path)
+            created.append(
+                _write_image_with_alpha(doc, xref, smask_xref, out_dir, final_path)
+            )
             if progress is not None:
                 progress(index, total)
             continue

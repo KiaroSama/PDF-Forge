@@ -95,15 +95,18 @@ def operation_unlock_pdf() -> None:
         try:
             # Reopen silently with the captured password (no prompt mid-run).
             rdoc = open_source_pdf(source, password=source_pw)
-            written = unlock_pdf_doc(rdoc, out_path)
+            result = unlock_pdf_doc(rdoc, out_path)
         except Exception as exc:  # noqa: BLE001 - clean message, log details
             print_error(f"Failed to unlock the PDF: {exc}")
             logger.exception("Unlock failed for output '%s'", out_path)
             return
         finally:
             close_doc(rdoc)
-        print_success(f"Done. Unlocked {written} page(s):\n  {out_path}")
-        logger.info("Unlock complete: output='%s' pages=%d", out_path, written)
+        # The written path, not the configured one: promotion may have had to
+        # allocate a suffixed sibling.
+        print_success(f"Done. Unlocked {result.count} page(s):\n  {result.path}")
+        logger.info("Unlock complete: output='%s' pages=%d",
+                    result.path, result.count)
 
     queue_task(f"Unlock {source.name} -> {out_path.name}", _run,
                sources=[capture_file_source(source)])

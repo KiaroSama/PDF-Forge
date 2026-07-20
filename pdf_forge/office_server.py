@@ -123,7 +123,12 @@ def _harden_profile(profile_dir: Path) -> Path:
       * ``MacroSecurityLevel = 3`` (very high) and macro execution disabled, so
         a macro inside a converted document is never run;
       * link/update modes set to 0, so a document cannot refresh external links,
-        DDE, or data sources - i.e. cannot reach the network - while converting;
+        DDE, or data sources while converting, and untrusted referer links
+        blocked so a *linked graphic* cannot be fetched either. The two are
+        separate settings: the update modes alone left a document able to reach
+        the network through an image whose target is an external URL, which is
+        measured end to end in ``tests/test_office_links.py`` against a
+        loopback recorder with a positive control;
       * document recovery and the first-start wizard disabled, so conversion
         never blocks on a dialog.
 
@@ -144,6 +149,14 @@ def _harden_profile(profile_dir: Path) -> Path:
                     "Link", "int", "0")
         + _xcu_prop("/org.openoffice.Office.Calc/Content/Update",
                     "Link", "int", "0")
+        # The two Update/Link modes above govern links to other *documents*,
+        # DDE and data sources - they do not cover a linked graphic, which
+        # LibreOffice fetches while loading, before export. A converted
+        # document could therefore still reach the network through the most
+        # ordinary web-bug shape: an image whose target is an external URL.
+        # Measured: 1 request without this property, 0 with it.
+        + _xcu_prop("/org.openoffice.Office.Common/Security/Scripting",
+                    "BlockUntrustedRefererLinks", "boolean", "true")
         + _xcu_prop("/org.openoffice.Office.Common/Save/Document",
                     "CreateBackup", "boolean", "false")
         + _xcu_prop("/org.openoffice.Office.Recovery/RecoveryInfo",

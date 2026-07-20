@@ -35,7 +35,8 @@ def test_protect_open_password(tmp_path):
     finally:
         doc.close()
 
-    assert written == 3
+    assert written.count == 3
+    assert written.path == out          # destination was free, so no suffix
     # The output needs the password to open.
     locked = pymupdf.open(str(out))
     assert locked.needs_pass
@@ -123,7 +124,8 @@ def test_unlock_removes_owner_restrictions(tmp_path):
     finally:
         doc.close()
 
-    assert written == 3
+    assert written.count == 3
+    assert written.path == out
     check = pymupdf.open(str(out))
     try:
         assert check.page_count == 3

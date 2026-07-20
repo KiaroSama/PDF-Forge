@@ -198,7 +198,7 @@ def operation_compress_pdf() -> None:
 
     def _run():
         try:
-            stats = compress_pdf(
+            result = compress_pdf(
                 source, out_path, jpeg_quality, dpi_target, password=pw,
                 protection=protection,
             )
@@ -206,19 +206,22 @@ def operation_compress_pdf() -> None:
             print_error(f"Failed to compress the PDF: {exc}")
             logger.exception("Compression failed for output '%s'", out_path)
             return
-        old, new = stats["original_size"], stats["new_size"]
+        # The written path, not the configured one: promotion may have had to
+        # allocate a suffixed sibling.
+        written = result.path
+        old, new = result.stats["original_size"], result.stats["new_size"]
         saved = old - new
         if saved > 0:
             percent = 100.0 * saved / old
             print_success(
                 f"Done. {_format_size(old)} -> {_format_size(new)} "
-                f"(saved {_format_size(saved)}, {percent:.1f}%):\n  {out_path}"
+                f"(saved {_format_size(saved)}, {percent:.1f}%):\n  {written}"
             )
         else:
             print_warning(
                 f"Done, but no size reduction was possible "
                 f"({_format_size(old)} -> {_format_size(new)}). The file was "
-                f"already efficiently compressed:\n  {out_path}"
+                f"already efficiently compressed:\n  {written}"
             )
 
     queue_task(
@@ -466,7 +469,7 @@ def operation_compress_pdf_batch() -> None:
                 out_path = unique_file_path(src.parent / f"{src.stem}_smaller.pdf")
             try:
                 decided = decisions.get(normalized_path_key(src))
-                stats = compress_pdf(
+                result = compress_pdf(
                     src, out_path, jpeg_quality, dpi_target,
                     password_prompt=prompt_password,
                     protection=decided if isinstance(decided, ProtectionPolicy)
@@ -477,7 +480,7 @@ def operation_compress_pdf_batch() -> None:
                 logger.exception("Batch compress failed for '%s'", src)
                 failed += 1
                 continue
-            old, new = stats["original_size"], stats["new_size"]
+            old, new = result.stats["original_size"], result.stats["new_size"]
             total_old += old
             total_new += new
             ok += 1
@@ -485,7 +488,7 @@ def operation_compress_pdf_batch() -> None:
             delta_pct = (100.0 * (new - old) / old) if old else 0.0
             print_success(
                 f"  -> {_format_size(old)} -> {_format_size(new)} "
-                f"({delta_pct:+.1f}%) {out_path.name}"
+                f"({delta_pct:+.1f}%) {result.path.name}"
             )
 
         saved_total = total_old - total_new

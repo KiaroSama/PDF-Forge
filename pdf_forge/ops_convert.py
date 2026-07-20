@@ -373,7 +373,7 @@ def operation_pdf_to_image_pdf() -> None:
                 count, dpi, out_path,
             )
             try:
-                written = render_pdf_to_image_pdf(
+                result = render_pdf_to_image_pdf(
                     rpdf,
                     count,
                     out_path,
@@ -381,11 +381,15 @@ def operation_pdf_to_image_pdf() -> None:
                     progress=lambda c, t: _print_progress("Rasterizing pages", c, t),
                     protection=protection,
                 )
+                # The written path, not the configured one: promotion may have
+                # had to allocate a suffixed sibling.
                 print_success(
-                    f"Done. Wrote {written} rasterized page(s) to:\n  {out_path}"
+                    f"Done. Wrote {result.count} rasterized page(s) to:"
+                    f"\n  {result.path}"
                 )
                 logger.info(
-                    "Image-only PDF complete: output='%s' pages=%d", out_path, written
+                    "Image-only PDF complete: output='%s' pages=%d",
+                    result.path, result.count,
                 )
             except Exception as exc:  # noqa: BLE001 - clean message, log details
                 print_error(f"Failed to create the image-only PDF: {exc}")
@@ -463,14 +467,14 @@ def operation_image_pdf_batch_folder() -> None:
                 if file_policy.kind == "restricted":
                     file_policy = None
                     unprotected_notes.append(src.name)
-                written = render_pdf_to_image_pdf(
+                result = render_pdf_to_image_pdf(
                     pdf, page_count, out_path, dpi,
                     progress=lambda c, t: _print_progress("  Rasterizing", c, t),
                     protection=file_policy,
                 )
-                total_pages += written
+                total_pages += result.count
                 ok += 1
-                print_success(f"  -> {out_path.name} ({written} page(s))")
+                print_success(f"  -> {result.path.name} ({result.count} page(s))")
             except Exception as exc:  # noqa: BLE001 - keep the batch going
                 print_error(f"  Failed: {exc}")
                 logger.exception("Batch image-only PDF failed for '%s'", src)

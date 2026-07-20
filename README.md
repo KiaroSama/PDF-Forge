@@ -204,8 +204,10 @@ These are enforced in code and covered by regression tests:
   containing only `[Content_Types].xml`, a traversal entry, or a ZIP bomb is
   rejected with the exact reason, in both the manual and folder flows.
 - Conversion runs in a **fresh, hardened, isolated LibreOffice profile**:
-  macro execution is disabled, and external link/DDE/data updates are turned
-  off, so a converted document cannot run code or reach the network. The
+  macro execution is disabled, external link/DDE/data updates are turned off,
+  and untrusted referer links are blocked, so a converted document cannot run
+  code or reach the network - including through a linked image, which the
+  update settings alone did not cover. The
   profile is created per run, deleted afterwards, and never touches your own
   LibreOffice settings. (Set `PDF_FORGE_HARDEN_PROFILE=0` only for debugging.)
 - **Inline images cannot be extracted.** An image drawn directly inside a page's

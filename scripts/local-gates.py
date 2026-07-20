@@ -103,6 +103,9 @@ GATES: List[Gate] = [
           "capture_output=True,text=True,check=True).stdout;"
           "assert pdf_forge.APP_VERSION in out,(pdf_forge.APP_VERSION,out);"
           "print('version reported:',pdf_forge.APP_VERSION)"]),
+    Gate("Built wheel metadata reports the version", "ci.yml / cli-smoke",
+         [PYTHON, "-m", "pytest", "tests/test_wheel_metadata.py", "-q"],
+         slow=True),
     Gate("CLI: --diagnose", "ci.yml / cli-smoke",
          [PYTHON, "-m", "pdf_forge", "--diagnose"]),
     Gate("Office runtime reports ready", "office-e2e.yml",

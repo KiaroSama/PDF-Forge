@@ -66,8 +66,10 @@ def operation_remove_watermark() -> None:
         logger.error("Failed to open '%s': %s", source, exc)
         return
 
-    # Capture the working password so the queued runner reopens silently (A13).
-    pw = source_password(doc)
+    # Immutable identity of the source, captured while the configuration doc is
+    # still open. The queue verifies it before the runner starts (C-06) and the
+    # runner reopens through it, silently, with the captured password (A13).
+    ref = capture_source(doc, source)
     protection = detect_protection(doc)
     total_pages = doc.page_count
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
@@ -180,10 +182,11 @@ def operation_remove_watermark() -> None:
 
         def _run():
             # Reopen the source fresh (the configure-time doc is closed after
-            # previews, and removal mutates the document in place). The captured
-            # password makes this silent - no prompt during queue execution.
+            # previews, and removal mutates the document in place). Going
+            # through the reference re-proves identity and authenticates
+            # silently - no prompt during queue execution.
             try:
-                rdoc = open_source_pdf(source, password=pw)
+                rdoc = ref.open()
             except (PdfOpenError, RuntimeError) as exc:
                 print_error(str(exc))
                 logger.error("Failed to reopen '%s': %s", source, exc)
@@ -217,6 +220,9 @@ def operation_remove_watermark() -> None:
             f"Remove {len(chosen)} watermark(s) from {source.name} "
             f"-> {out_path.name}",
             _run,
+            # Identity of every source this task was configured against;
+            # the queue re-verifies it just before running (C-06).
+            sources=[ref],
         )
     finally:
         # Close the configure-time doc, remove the preview folder, and drop the

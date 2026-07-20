@@ -214,11 +214,12 @@ def test_compress_pdf_lossy_shrinks_image_pdf(tmp_path):
     out = tmp_path / "photos_compressed.pdf"
 
     quality, dpi = app.COMPRESSION_PRESETS["medium"]
-    stats = app.compress_pdf(src, out, quality, dpi)
+    result = app.compress_pdf(src, out, quality, dpi)
 
     assert out.exists()
-    assert stats["pages"] == 2
-    assert stats["new_size"] < stats["original_size"]
+    assert result.path == out          # destination was free, so no suffix
+    assert result.stats["pages"] == 2
+    assert result.stats["new_size"] < result.stats["original_size"]
     assert len(PdfReader(str(out)).pages) == 2
     # Source must remain byte-for-byte unchanged.
     assert file_hash(src) == original_hash
@@ -228,10 +229,11 @@ def test_compress_pdf_ultra_lossless_valid_output(tmp_path):
     src = make_pdf(tmp_path / "text.pdf", 5)
     out = tmp_path / "text_compressed.pdf"
 
-    stats = app.compress_pdf(src, out, None, None)  # ultra: lossless only
+    result = app.compress_pdf(src, out, None, None)  # ultra: lossless only
 
     assert out.exists()
-    assert stats["pages"] == 5
+    assert result.path == out
+    assert result.stats["pages"] == 5
     assert len(PdfReader(str(out)).pages) == 5
 
 

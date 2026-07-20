@@ -77,7 +77,7 @@ def operation_protect_open_password() -> None:
         try:
             rdoc = open_source_pdf(source, password=source_pw)
             # The same password opens the file and guards its permissions.
-            written = save_encrypted_pdf(
+            result = save_encrypted_pdf(
                 rdoc, out_path, user_pw=password, owner_pw=password,
                 permissions=all_permissions(),
             )
@@ -87,10 +87,13 @@ def operation_protect_open_password() -> None:
             return
         finally:
             close_doc(rdoc)
+        # The written path, not the configured one: promotion may have had to
+        # allocate a suffixed sibling.
         print_success(
-            f"Done. Protected {written} page(s) with an open password:\n  {out_path}"
+            f"Done. Protected {result.count} page(s) with an open password:"
+            f"\n  {result.path}"
         )
-        logger.info("Protect (open password) complete: output='%s'", out_path)
+        logger.info("Protect (open password) complete: output='%s'", result.path)
 
     queue_task(f"Protect (open password) {source.name} -> {out_path.name}", _run,
                sources=[capture_file_source(source)])
@@ -196,7 +199,7 @@ def operation_protect_restrict() -> None:
         rdoc = None
         try:
             rdoc = open_source_pdf(source, password=source_pw)
-            written = save_encrypted_pdf(
+            result = save_encrypted_pdf(
                 rdoc, out_path, user_pw=None, owner_pw=owner_password,
                 permissions=permissions,
             )
@@ -206,10 +209,12 @@ def operation_protect_restrict() -> None:
             return
         finally:
             close_doc(rdoc)
+        # The written path, not the configured one: promotion may have had to
+        # allocate a suffixed sibling.
         print_success(
-            f"Done. Restricted {written} page(s):\n  {out_path}"
+            f"Done. Restricted {result.count} page(s):\n  {result.path}"
         )
-        logger.info("Protect (restrict) complete: output='%s'", out_path)
+        logger.info("Protect (restrict) complete: output='%s'", result.path)
 
     queue_task(f"Protect (restrict) {source.name} -> {out_path.name}", _run,
                sources=[capture_file_source(source)])

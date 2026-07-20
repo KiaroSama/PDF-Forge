@@ -376,11 +376,14 @@ def _apply_output_protection(staging: Path, password: str,
     a protection that did not take effect can never be promoted.
     """
     pymupdf = _import_pymupdf()
-    protected = scratch / "protected.pdf"
     doc = pymupdf.open(str(staging))
     try:
-        save_encrypted_pdf(doc, protected, user_pw=password, owner_pw=password,
-                           permissions=all_permissions())
+        # Even inside our own scratch directory the writer decides the final
+        # name: validating (and returning) the requested one would inspect a
+        # file this call did not write.
+        protected = save_encrypted_pdf(
+            doc, scratch / "protected.pdf", user_pw=password, owner_pw=password,
+            permissions=all_permissions()).path
     finally:
         close_doc(doc)
 

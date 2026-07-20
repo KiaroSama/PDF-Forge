@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .constants import *  # noqa: F401,F403
-from .safeio import promote_atomically
+from .safeio import OutputResult, promote_atomically
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
@@ -55,13 +55,14 @@ def _validate_encrypted(path: Path, expected_pages: int, password: Optional[str]
 
 def save_encrypted_pdf(doc, out_path: Path, user_pw: Optional[str] = None,
                        owner_pw: Optional[str] = None,
-                       permissions: Optional[int] = None) -> int:
+                       permissions: Optional[int] = None) -> OutputResult:
     """Save an already-opened document as an AES-256 encrypted PDF.
 
     ``user_pw`` is the password required to open the file; ``owner_pw`` guards
     the permission settings. ``permissions`` is the bitmask of allowed actions
     (defaults to all allowed). The source is never modified. Written safely
-    (temporary file -> validate -> atomic rename). Returns the page count.
+    (temporary file -> validate -> atomic rename). Returns an
+    :class:`OutputResult` carrying the path actually written and the page count.
     """
     pymupdf = _import_pymupdf()
 
@@ -92,7 +93,8 @@ def save_encrypted_pdf(doc, out_path: Path, user_pw: Optional[str] = None,
     try:
         doc.save(str(tmp_path), **save_kwargs)
         _validate_encrypted(tmp_path, total, user_pw or owner_pw)
-        out_path = promote_atomically(tmp_path, out_path)
+        # Never rebind out_path: the caller must be told the written name.
+        written = promote_atomically(tmp_path, out_path)
     except Exception:
         try:
             if tmp_path.exists():
@@ -104,6 +106,6 @@ def save_encrypted_pdf(doc, out_path: Path, user_pw: Optional[str] = None,
     elapsed = time.perf_counter() - started
     logger.info(
         "Encrypted '%s' (%d page(s), user_pw=%s owner_pw=%s) in %.2fs.",
-        out_path, total, bool(user_pw), bool(owner_pw), elapsed,
+        written, total, bool(user_pw), bool(owner_pw), elapsed,
     )
-    return total
+    return OutputResult(path=written, count=total)

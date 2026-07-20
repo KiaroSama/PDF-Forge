@@ -72,7 +72,8 @@ def test_render_pdf_to_image_pdf(tmp_path):
     finally:
         pdf.close()
 
-    assert written == 4
+    assert written.count == 4
+    assert written.path == out          # destination was free, so no suffix
     reader = PdfReader(str(out))
     assert len(reader.pages) == 4
     assert reader.is_encrypted is False

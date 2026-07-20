@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from .constants import *  # noqa: F401,F403
-from .safeio import promote_atomically
+from .safeio import OutputResult, promote_atomically
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
@@ -16,7 +16,7 @@ __all__ = ['compress_pdf']
 
 def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
                  dpi_target: Optional[int], password_prompt=None,
-                 password=None, protection=None) -> dict:
+                 password=None, protection=None) -> OutputResult:
     """Compress a PDF into a new file; the source is never modified.
 
     Always applied (lossless, zero quality change):
@@ -29,7 +29,9 @@ def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
     ``dpi_target`` and re-encoded as JPEG at that quality. Bitonal (fax/scan
     B/W) images are left untouched - recompressing them usually hurts.
 
-    Returns a stats dict: pages, original_size, new_size (bytes).
+    Returns an :class:`OutputResult` whose ``path`` is the file actually written
+    (not always the requested one, see no-clobber promotion), ``count`` the page
+    count, and ``stats`` the sizes: pages, original_size, new_size (bytes).
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,7 +89,9 @@ def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
                      **protect_kwargs)
             _validate_written_pdf(tmp_path, expected_pages=page_count,
                                   password=policy.password if protect_kwargs else None)
-            out_path = promote_atomically(tmp_path, out_path)
+            # Never rebind out_path: keeping the requested and the written name
+            # apart is what stops a caller reporting a file it did not write.
+            written = promote_atomically(tmp_path, out_path)
         except Exception:
             try:
                 if tmp_path.exists():
@@ -98,15 +102,19 @@ def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
     finally:
         doc.close()
 
-    new_size = out_path.stat().st_size
+    new_size = written.stat().st_size
     elapsed = time.perf_counter() - started
     logger.info(
         "Compressed '%s' -> '%s': %d -> %d bytes (%.1f%%) in %.2fs.",
-        path, out_path, original_size, new_size,
+        path, written, original_size, new_size,
         (100.0 * new_size / original_size) if original_size else 0.0, elapsed,
     )
-    return {
-        "pages": page_count,
-        "original_size": original_size,
-        "new_size": new_size,
-    }
+    return OutputResult(
+        path=written,
+        count=page_count,
+        stats={
+            "pages": page_count,
+            "original_size": original_size,
+            "new_size": new_size,
+        },
+    )
