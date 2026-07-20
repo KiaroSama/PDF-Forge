@@ -19,16 +19,43 @@ import pdf_forge as app  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _load_pyproject() -> dict:
+    """Parse pyproject.toml on every supported interpreter.
+
+    ``tomllib`` is only stdlib from Python 3.11 and the support floor (and the
+    CI matrix) is 3.10, so fall back to ``tomli`` when it is installed and to a
+    focused text scan otherwise. The fallback reads only the three keys these
+    assertions need, which keeps the test working everywhere rather than
+    quietly skipping on the oldest interpreter - the one most likely to drift.
+    """
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    for module_name in ("tomllib", "tomli"):
+        try:
+            module = __import__(module_name)
+        except ImportError:
+            continue
+        return module.loads(text)
+
+    project: dict = {}
+    literal = re.search(r'^\s*version\s*=\s*"([^"]+)"', text, re.M)
+    if literal:
+        project["version"] = literal.group(1)
+    if re.search(r'^\s*dynamic\s*=\s*\[[^\]]*"version"', text, re.M):
+        project["dynamic"] = ["version"]
+    attr = re.search(r'version\s*=\s*\{\s*attr\s*=\s*"([^"]+)"', text)
+    tool = {"setuptools": {"dynamic": {"version": {"attr": attr.group(1)}}}} \
+        if attr else {}
+    return {"project": project, "tool": tool}
+
+
 def _pyproject_version() -> str:
     """The version the project metadata resolves to.
 
-    Read with tomllib so a dynamic declaration is visible as such: a literal
-    ``version`` must match, and a ``dynamic`` one must point at the package
-    attribute that the rest of these assertions use.
+    A dynamic declaration is visible as such: a literal ``version`` must match,
+    and a ``dynamic`` one must point at the package attribute that the rest of
+    these assertions use.
     """
-    import tomllib
-
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    data = _load_pyproject()
     project = data["project"]
     if "version" in project:
         return project["version"]
