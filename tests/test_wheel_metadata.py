@@ -145,12 +145,14 @@ def built_wheel(tmp_path_factory) -> dict:
     assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
 
     with zipfile.ZipFile(wheels[0]) as archive:
-        entries = [n for n in archive.namelist()
-                   if n.endswith(".dist-info/METADATA")]
+        names = archive.namelist()
+        entries = [n for n in names if n.endswith(".dist-info/METADATA")]
         assert len(entries) == 1, f"expected one METADATA, got {entries}"
         metadata = archive.read(entries[0]).decode("utf-8")
+        top_level = sorted({n.split("/")[0] for n in names})
 
-    return {"metadata": metadata, "status_before": before}
+    return {"metadata": metadata, "status_before": before,
+            "top_level": top_level}
 
 
 def _metadata_version(metadata: str) -> str:
@@ -203,6 +205,27 @@ def test_the_built_wheel_reports_the_expected_version(built_wheel):
     }
     assert len(set(surfaces.values())) == 1, surfaces
     assert wheel_version == EXPECTED_VERSION, surfaces
+
+
+def test_the_wheel_ships_the_package_and_nothing_else(built_wheel):
+    """Only pdf_forge and its dist-info may be distributed.
+
+    setuptools' flat-layout discovery counts every root directory with an
+    identifier-legal name as a package, so the runtime `logs/` directory this
+    app writes was enough to break the build with "Multiple top-level packages
+    discovered". pyproject now declares the package explicitly instead.
+
+    This guards the outcome rather than the declaration, because the fixture
+    builds from an export of *tracked* files - where logs/ never appears - so
+    only inspecting what the wheel actually contains can catch a stray
+    top-level directory being packaged.
+    """
+    unexpected = [name for name in built_wheel["top_level"]
+                  if name != "pdf_forge" and not name.endswith(".dist-info")]
+    assert not unexpected, (
+        f"the wheel ships more than the package: {unexpected} "
+        f"(all top-level entries: {built_wheel['top_level']})"
+    )
 
 
 def test_the_build_leaves_the_checkout_clean(built_wheel):

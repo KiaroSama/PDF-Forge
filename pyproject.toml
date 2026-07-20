@@ -14,6 +14,16 @@ description = "Interactive, local PDF toolkit (page tools, merge, convert, prote
 requires-python = ">=3.10"
 readme = "README.md"
 
+[tool.setuptools]
+# Declared, not auto-discovered. Flat-layout discovery treats every root
+# directory with an identifier-legal name as a package, so the git-ignored
+# `logs/` this app writes at runtime was enough to fail the build outright:
+#   error: Multiple top-level packages discovered in a flat-layout:
+#          ['logs', 'pdf_forge']
+# A clean CI checkout has no logs/ and so never saw it, while any machine that
+# had actually run the app could not build a wheel at all.
+packages = ["pdf_forge"]
+
 [tool.setuptools.dynamic]
 version = { attr = "pdf_forge.constants.APP_VERSION" }
 
