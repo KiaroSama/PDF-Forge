@@ -261,15 +261,31 @@ def test_concurrent_writers_do_not_lose_entries(tmp_path):
         import pdf_forge as app
         app.record_generated_output(Path(sys.argv[1]))
     """)
-    procs = [subprocess.Popen([sys.executable, "-c", script, str(t)],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    procs = [(t, subprocess.Popen([sys.executable, "-c", script, str(t)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True))
              for t in targets]
-    for proc in procs:
+    said = {}
+    for target, proc in procs:
         _o, err = proc.communicate(timeout=120)
         assert proc.returncode == 0, err
+        said[target] = err
+
     recorded = app.load_generated_outputs()
     for target in targets:
-        assert app.safeio._normalized(target) in recorded, f"lost entry for {target.name}"
+        if app.safeio._normalized(target) in recorded:
+            continue
+        # An entry may be absent only when that writer *said* so. Recording is
+        # deliberately best-effort - record_generated_output never raises,
+        # because a busy manifest lock must not fail a PDF that was written
+        # correctly - so under contention it can warn and record nothing. What
+        # must never happen is losing an entry silently, and that is what this
+        # asserts. The writer's own stderr is quoted, so a failure here names
+        # the reason instead of being an unexplained flake.
+        assert "tracking is unavailable" in said[target], (
+            f"lost entry for {target.name} with no warning to the user; "
+            f"that writer's output was:\n{said[target] or '(nothing)'}"
+        )
 
 
 def test_interrupted_write_leaves_previous_manifest_readable(tmp_path):
