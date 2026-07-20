@@ -602,6 +602,15 @@ def validate_protection_postcondition(out_path: Path, policy) -> None:
                 "Output validation failed: the protected output could not be "
                 "reopened with its own password."
             )
+        # Deliberately no permission-bit comparison here. save_kwargs() sets
+        # owner_pw = user_pw, so authenticating above grants *owner* access and
+        # check.permissions then reports every bit as allowed no matter what
+        # the file was written with - a comparison against policy.permissions
+        # can never fail, and adding one would be a guard that cannot fire.
+        # The genuine limitation (an owner-restricted source cannot be
+        # reproduced, because its owner password is unrecoverable) is surfaced
+        # where it can still be acted on: resolve_protection warns and asks
+        # before anything is written. See test_confirmed_defects.py.
     finally:
         check.close()
 

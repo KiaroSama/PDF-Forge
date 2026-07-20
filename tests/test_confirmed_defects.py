@@ -274,3 +274,100 @@ def test_a_byte_corrupted_manifest_is_quarantined(tmp_path, monkeypatch):
         "the damaged manifest was neither quarantined nor replaced; the next "
         "run will hit exactly the same bytes"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 6. Soft-mask compositing must actually composite
+# --------------------------------------------------------------------------- #
+
+def test_a_masked_area_composites_to_white_not_to_the_hidden_pixels(tmp_path):
+    """_composite_on_white raised on every input and silently fell back.
+
+    It built an opaque Pixmap and called copy(), which overwrites rather than
+    blends and refuses a source whose alpha differs from the target - "source
+    and target alpha must be equal". So the except branch ran every time and
+    the caller kept exactly the pixels the mask existed to hide: a transparent
+    logo came out as whatever was stored underneath.
+    """
+    import pymupdf
+
+    from pdf_forge import render
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    black = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 64, 64), False)
+    black.clear_with(0)
+    invisible = pymupdf.Pixmap(pymupdf.csGRAY, pymupdf.IRect(0, 0, 64, 64), False)
+    invisible.clear_with(0)          # alpha 0 everywhere: nothing is visible
+    page.insert_image(pymupdf.Rect(10, 10, 74, 74),
+                      pixmap=pymupdf.Pixmap(black, invisible))
+    src = tmp_path / "masked.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    doc = pymupdf.open(str(src))
+    try:
+        composited = None
+        for xref, _page_number, _n in render._iter_unique_images(doc):
+            smask = render._smask_xref(doc, xref)
+            if not smask:
+                continue
+            raw = pymupdf.Pixmap(doc, xref)
+            composited = render._composite_on_white(pymupdf, doc, raw, smask)
+            assert composited is not raw, (
+                "compositing raised and fell back to the raw pixmap"
+            )
+            break
+        assert composited is not None, "the fixture produced no soft-masked image"
+        assert composited.pixel(32, 32) == (255, 255, 255), (
+            "a fully transparent area kept its hidden pixels instead of "
+            f"showing white: {composited.pixel(32, 32)}"
+        )
+    finally:
+        doc.close()
+
+
+# --------------------------------------------------------------------------- #
+# 7. Why the postcondition does NOT compare permission bits
+# --------------------------------------------------------------------------- #
+
+def test_permission_bits_cannot_be_verified_after_owner_authentication(tmp_path):
+    """Records the measurement that makes a permission check impossible here.
+
+    A sweep proposed adding `check.permissions == policy.permissions` to
+    validate_protection_postcondition. It cannot work: save_kwargs() sets
+    owner_pw = user_pw, so authenticating grants *owner* access and the
+    reopened document reports every bit as allowed regardless of what was
+    written. Below, a file saved with permissions=0 reads back as fully
+    permitted. Such a comparison could never fail - it would be a guard that
+    cannot fire, which is the very defect class this file exists for.
+
+    The real limitation is handled where it can still be acted on:
+    resolve_protection warns that an owner-restricted source cannot be
+    reproduced and asks before anything is written.
+    """
+    import pymupdf
+
+    out = tmp_path / "restricted.pdf"
+    doc = pymupdf.open()
+    doc.new_page()
+    doc.save(str(out), encryption=pymupdf.PDF_ENCRYPT_AES_256,
+             user_pw="pw", owner_pw="pw", permissions=0)
+    doc.close()
+
+    check = pymupdf.open(str(out))
+    try:
+        assert check.authenticate("pw"), "the fixture password must work"
+        assert check.permissions & int(pymupdf.PDF_PERM_PRINT), (
+            "if this ever fails, permission bits survive owner authentication "
+            "and a real postcondition check becomes possible - revisit "
+            "validate_protection_postcondition"
+        )
+    finally:
+        check.close()
+
+    policy = app.pdf_io.ProtectionPolicy(
+        kind="password", password="pw",
+        permissions=int(pymupdf.PDF_PERM_PRINT))
+    # Passes, and must: the file is genuinely reopenable with its password.
+    app.pdf_io.validate_protection_postcondition(out, policy)

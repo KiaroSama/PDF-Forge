@@ -274,11 +274,21 @@ def _composite_on_white(pymupdf, doc, pixmap, smask_xref: int):
         if pixmap.colorspace and pixmap.colorspace.n > 3:
             pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)
         with_alpha = pixmap if pixmap.alpha else pymupdf.Pixmap(pixmap, mask)
-        white = pymupdf.Pixmap(with_alpha.colorspace, with_alpha.irect, False)
-        white.clear_with(255)
-        # Draw the transparent image onto the white sheet.
-        white.copy(with_alpha, with_alpha.irect)
-        return white
+        # Draw it onto a white page and re-render, which is what actually
+        # composites. The previous approach built an opaque Pixmap and called
+        # copy(): copy() overwrites rather than blends, and it refuses a source
+        # whose alpha differs from the target - "source and target alpha must
+        # be equal" - so it raised every single time and the caller silently
+        # fell back to the raw pixmap, keeping exactly the pixels the mask was
+        # there to hide.
+        sheet = pymupdf.open()
+        try:
+            page = sheet.new_page(width=with_alpha.width, height=with_alpha.height)
+            page.draw_rect(page.rect, color=None, fill=(1, 1, 1))
+            page.insert_image(page.rect, pixmap=with_alpha)
+            return page.get_pixmap()
+        finally:
+            sheet.close()
     except Exception as exc:  # noqa: BLE001 - fall back to the plain pixmap
         logger.warning("Soft-mask compositing failed for xref %d: %s", smask_xref, exc)
         return pixmap
