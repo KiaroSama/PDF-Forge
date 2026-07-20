@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pdf_forge as app  # noqa: E402
 import pymupdf  # noqa: E402
 from PIL import Image  # noqa: E402
+from helpers import rgb_png  # noqa: E402
 
 
 def stamped_pdf(path: Path, pages: int = 3, text: str = "") -> Path:
@@ -36,7 +37,8 @@ def stamped_pdf(path: Path, pages: int = 3, text: str = "") -> Path:
     return path
 
 
-def remove_top_candidate(src: Path, out: Path) -> int:
+def remove_top_candidate(src: Path, out: Path):
+    """Remove the top candidate; returns the writer's ``OutputResult``."""
     doc = app.open_source_pdf(src)
     try:
         candidates, _total = app.scan_watermark_candidates(doc)
@@ -108,8 +110,8 @@ def test_output_is_readable_by_an_independent_parser(tmp_path):
 def test_text_and_page_count_are_preserved(tmp_path):
     src = stamped_pdf(tmp_path / "src.pdf", pages=3, text="Confidential body")
     out = tmp_path / "out.pdf"
-    modified = remove_top_candidate(src, out)
-    assert modified == 3
+    result = remove_top_candidate(src, out)
+    assert result.count == 3
     assert "Confidential body" in page_text(out)
 
 
@@ -118,22 +120,57 @@ def test_text_and_page_count_are_preserved(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_watermark_painted_through_a_shared_form(tmp_path):
-    """One Form XObject shown on many pages: all pages must be cleaned once."""
-    src = tmp_path / "form.pdf"
+    """One Form XObject, nested and shared: every page must be cleaned once.
+
+    The image is reached only through ``page -> form -> form -> image``, and the
+    inner forms are the *same* objects on all four pages. A per-page copy would
+    make this pass by accident, so the fixture asserts both properties before
+    exercising removal.
+    """
+    data = rgb_png(size=(80, 40), color=(10, 90, 200))
+
+    inner = pymupdf.open()                       # the image itself
+    inner.new_page(width=80, height=40).insert_image(
+        pymupdf.Rect(0, 0, 80, 40), stream=data)
+    inner_path = tmp_path / "inner.pdf"
+    inner.save(str(inner_path))
+    inner.close()
+
+    inner_doc = pymupdf.open(str(inner_path))    # form #1 wraps the image
+    middle = pymupdf.open()
+    middle.new_page(width=100, height=60).show_pdf_page(
+        pymupdf.Rect(0, 0, 80, 40), inner_doc, 0)
+    middle_path = tmp_path / "middle.pdf"
+    middle.save(str(middle_path))
+    middle.close()
+    inner_doc.close()
+
+    middle_doc = pymupdf.open(str(middle_path))  # form #2 wraps form #1
     doc = pymupdf.open()
-    buf = io.BytesIO()
-    Image.new("RGB", (100, 60), (10, 90, 200)).save(buf, "PNG")
-    data = buf.getvalue()
     for _ in range(4):
         page = doc.new_page(width=300, height=400)
-        page.insert_image(pymupdf.Rect(20, 20, 120, 80), stream=data)
+        page.insert_text((20, 350), "keep this text")
+        page.show_pdf_page(pymupdf.Rect(20, 20, 120, 80), middle_doc, 0)
+    src = tmp_path / "form.pdf"
     doc.save(str(src))
     doc.close()
+    middle_doc.close()
+
+    check = pymupdf.open(str(src))
+    try:
+        per_page = [{entry[0] for entry in page.get_xobjects()} for page in check]
+        assert all(len(x) >= 2 for x in per_page), \
+            f"the fixture must nest Form XObjects: {per_page}"
+        shared = set.intersection(*per_page)
+        assert shared, f"no Form XObject is shared between pages: {per_page}"
+    finally:
+        check.close()
 
     out = tmp_path / "out.pdf"
-    modified = remove_top_candidate(src, out)
-    assert modified == 4, "the count must match the pages whose content changed"
+    result = remove_top_candidate(src, out)
+    assert result.count == 4, "the count must match the pages whose content changed"
     assert visible_images(out) == []
+    assert "keep this text" in page_text(out)
 
 
 def test_non_target_image_on_the_same_page_survives(tmp_path):
@@ -182,14 +219,20 @@ def test_placeholder_is_not_offered_as_a_new_candidate(tmp_path):
     assert candidates == [], f"a placeholder was offered as a watermark: {candidates}"
 
 
-def test_removing_an_unknown_signature_changes_nothing(tmp_path):
+def test_removing_an_unknown_signature_writes_nothing(tmp_path):
+    """A zero-match run is a no-op, and a no-op must not produce a file.
+
+    The earlier version of this test asserted the opposite - that an output
+    existed and was readable - which is exactly the defect: a run that removed
+    nothing handed the user a file at their chosen path (C-14).
+    """
     src = stamped_pdf(tmp_path / "src.pdf", pages=2, text="keep me")
     out = tmp_path / "out.pdf"
     doc = app.open_source_pdf(src)
     try:
-        modified = app.remove_watermark_images(doc, ["nosuch:1x1"], out)
+        with pytest.raises(ValueError):
+            app.remove_watermark_images(doc, ["nosuch:1x1"], out)
     finally:
         app.close_doc(doc)
-    assert modified == 0, "nothing matched, so no page was modified"
-    assert visible_images(out), "the original image must still be there"
-    assert "keep me" in page_text(out)
+    assert not out.exists(), "a no-op must not leave a file at the chosen path"
+    assert list(tmp_path.glob("*.pdf")) == [src], "a no-op must write nothing"

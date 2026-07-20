@@ -351,4 +351,7 @@ def _run_merge_with_sources(mode: str, sources: List[Path]) -> None:
     queue_task(
         f"Merge {len(sources)} PDF(s) -> {out_path.name}",
         _run,
+        # Identity of every source this task was configured against;
+        # the queue re-verifies it just before running (C-06).
+        sources=[capture_file_source(p) for p in sources],
     )

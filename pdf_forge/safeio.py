@@ -335,7 +335,10 @@ class FileLock:
                     ) from None
                 time.sleep(0.02)
             except OSError as exc:
-                self._fd = None
+                # Includes a write that failed after the open succeeded: drop
+                # the half-created lock rather than orphan it, since our own
+                # process is alive and no stale-owner probe would ever clear it.
+                self.__exit__()
                 raise LockUnavailable(
                     f"cannot create the lock file '{self.path}': {exc}") from exc
 

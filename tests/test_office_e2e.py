@@ -186,24 +186,6 @@ def test_password_is_never_printed(tmp_path, server, monkeypatch, capsys):
 # Safety and lifecycle
 # --------------------------------------------------------------------------- #
 
-def test_macro_document_does_not_execute_its_macro(tmp_path, server):
-    """A macro-enabled document must convert without running the macro.
-
-    The macro would write a marker file; its absence is the assertion.
-    """
-    marker = tmp_path / "MACRO_RAN.txt"
-    src = tmp_path / "macro.docm"
-    # A .docm is a normal OOXML package plus a vbaProject part. LibreOffice must
-    # not run it under our load properties.
-    make_docx(src, text="macro doc")
-    out = tmp_path / "macro.pdf"
-    try:
-        convert(server, src, out)
-    except app.office_runtime.OfficeRuntimeError:
-        pytest.skip("this build refuses .docm without a macro filter")
-    assert not marker.exists(), "a macro executed during conversion"
-
-
 def test_conversion_timeout_surfaces_as_bridge_lost(tmp_path, server):
     src = make_docx(tmp_path / "t.docx")
     with pytest.raises(app.office_runtime.OfficeRuntimeError) as excinfo:
@@ -223,3 +205,144 @@ def test_server_stop_leaves_no_process_or_profile(tmp_path):
         ["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True
     ).stdout
     assert str(pid) not in listing, "the task-owned process survived stop()"
+
+
+# --------------------------------------------------------------------------- #
+# C-12/C-18 - macro safety proven with a document that really carries a macro
+# --------------------------------------------------------------------------- #
+
+def make_macro_odt(path: Path, marker: Path) -> Path:
+    """An ODF document carrying a Basic macro bound to the document-open event.
+
+    This is the real vector: LibreOffice runs ``Standard.Module1.WriteMarker``
+    when the document loads, unless macro execution is disabled. The previous
+    fixture was a plain .docx renamed .docm with no vbaProject part and no macro
+    at all, so its "the marker must not exist" assertion was true for every
+    possible outcome - it could not distinguish a hardened profile from an
+    unhardened one.
+    """
+    target = str(marker).replace("\\", "\\\\").replace('"', '""')
+    module = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<!DOCTYPE script:module PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" '
+        '"module.dtd">'
+        '<script:module xmlns:script="http://openoffice.org/2000/script" '
+        'script:name="Module1" script:language="StarBasic">'
+        '<![CDATA[Sub WriteMarker\n'
+        f'  Dim iFile As Integer\n'
+        f'  iFile = FreeFile\n'
+        f'  Open "{target}" For Output As #iFile\n'
+        '  Print #iFile, "the macro executed"\n'
+        '  Close #iFile\n'
+        'End Sub]]></script:module>'
+    )
+    script_lb = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" '
+        '"library.dtd">'
+        '<library:library xmlns:library="http://openoffice.org/2000/library" '
+        'library:name="Standard" library:readonly="false" library:passwordprotected="false">'
+        '<library:element library:name="Module1"/></library:library>'
+    )
+    script_lc = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<!DOCTYPE library:libraries PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" '
+        '"libraries.dtd">'
+        '<library:libraries xmlns:library="http://openoffice.org/2000/library" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink">'
+        '<library:library library:name="Standard" xlink:href="$(user)/basic/Standard/script.xlb/" '
+        'xlink:type="simple" library:link="false"/></library:libraries>'
+    )
+    content = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<office:document-content '
+        'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+        'xmlns:script="urn:oasis:names:tc:opendocument:xmlns:script:1.0" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink" office:version="1.2">'
+        '<office:scripts><office:event-listeners>'
+        '<script:event-listener script:language="ooo:script" '
+        'script:event-name="dom:load" '
+        'xlink:href="vnd.sun.star.script:Standard.Module1.WriteMarker?'
+        'language=Basic&amp;location=document" xlink:type="simple"/>'
+        '</office:event-listeners></office:scripts>'
+        '<office:body><office:text><text:p>macro document</text:p>'
+        '</office:text></office:body></office:document-content>'
+    )
+    manifest = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" '
+        'manifest:version="1.2">'
+        '<manifest:file-entry manifest:full-path="/" '
+        'manifest:media-type="application/vnd.oasis.opendocument.text"/>'
+        '<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>'
+        '<manifest:file-entry manifest:full-path="Basic/" manifest:media-type=""/>'
+        '<manifest:file-entry manifest:full-path="Basic/Standard/" manifest:media-type=""/>'
+        '<manifest:file-entry manifest:full-path="Basic/Standard/Module1.xml" '
+        'manifest:media-type="text/xml"/>'
+        '<manifest:file-entry manifest:full-path="Basic/Standard/script-lb.xml" '
+        'manifest:media-type="text/xml"/>'
+        '<manifest:file-entry manifest:full-path="Basic/script-lc.xml" '
+        'manifest:media-type="text/xml"/>'
+        '</manifest:manifest>'
+    )
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", "application/vnd.oasis.opendocument.text")
+        zf.writestr("META-INF/manifest.xml", manifest)
+        zf.writestr("content.xml", content)
+        zf.writestr("Basic/script-lc.xml", script_lc)
+        zf.writestr("Basic/Standard/script-lb.xml", script_lb)
+        zf.writestr("Basic/Standard/Module1.xml", module)
+    return path
+
+
+def test_a_real_macro_never_runs_on_the_unoserver_path(tmp_path, server):
+    """The macro would create a marker file; its absence is the whole assertion.
+
+    Unlike the previous version, this fixture really does carry an auto-executed
+    Basic macro, so the assertion can fail.
+    """
+    marker = tmp_path / "MACRO_RAN.txt"
+    src = make_macro_odt(tmp_path / "macro.odt", marker)
+    out = tmp_path / "macro.pdf"
+    try:
+        convert(server, src, out)
+    except app.office_runtime.OfficeRuntimeError as exc:
+        pytest.skip(f"this build refused the macro fixture: {exc}")
+    assert not marker.exists(), "the document's macro executed during conversion"
+
+
+def test_a_real_macro_never_runs_on_the_cli_fallback(tmp_path, server, monkeypatch):
+    """Force the bridge-loss retry so the CLI profile is genuinely exercised.
+
+    That fallback builds its own LibreOffice profile. Before this repair it never
+    hardened it, so the retry ran with default macro security - and no test
+    reached the real function at all.
+    """
+    from pdf_forge import office_server
+
+    marker = tmp_path / "MACRO_RAN_CLI.txt"
+    src = make_macro_odt(tmp_path / "macro_cli.odt", marker)
+    out = tmp_path / "macro_cli.pdf"
+
+    used = {"cli": 0}
+    real_cli = office_server.convert_via_soffice_cli
+
+    def counting_cli(soffice, in_path, out_path, timeout=None):
+        used["cli"] += 1
+        return real_cli(soffice, in_path, out_path, timeout=timeout)
+
+    monkeypatch.setattr(office_server, "convert_via_soffice_cli", counting_cli)
+    monkeypatch.setattr(
+        office_server, "_call",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            RuntimeError("Binary URP bridge already disposed")),
+        raising=False,
+    )
+    try:
+        office_server.convert_to_pdf(server, src, out)
+    except app.office_runtime.OfficeRuntimeError as exc:
+        pytest.skip(f"this build refused the macro fixture: {exc}")
+
+    assert used["cli"] == 1, "the CLI fallback was not exercised"
+    assert not marker.exists(), "the document's macro executed on the CLI path"

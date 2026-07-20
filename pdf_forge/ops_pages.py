@@ -129,6 +129,9 @@ def _extract_single_file(ref, source: Path, total_pages: int, group: "PageGroup"
     queue_task(
         f"Extract pages {group.text} from {source.name} -> {out_path.name}",
         _run,
+        # Identity of every source this task was configured against;
+        # the queue re-verifies it just before running (C-06).
+        sources=[ref],
     )
 
 
@@ -218,6 +221,9 @@ def _extract_multiple_files(ref, source: Path, total_pages: int,
     queue_task(
         f"Extract {len(groups)} file(s) from {source.name} -> {out_dir.name}",
         _run,
+        # Identity of every source this task was configured against;
+        # the queue re-verifies it just before running (C-06).
+        sources=[ref],
     )
 
 
@@ -416,6 +422,9 @@ def operation_split_chunks() -> None:
         f"Split {source.name} into {len(chunks)} file(s) of {chunk_size} "
         f"-> {out_dir.name}",
         _run,
+        # Identity of every source this task was configured against;
+        # the queue re-verifies it just before running (C-06).
+        sources=[ref],
     )
 
 
@@ -550,6 +559,9 @@ def operation_delete_pages_single() -> None:
     queue_task(
         f"Delete pages {selection_text} from {source.name} -> {out_path.name}",
         _run,
+        # Identity of every source this task was configured against;
+        # the queue re-verifies it just before running (C-06).
+        sources=[ref],
     )
 
 
@@ -703,4 +715,7 @@ def operation_delete_pages_batch() -> None:
     queue_task(
         f"Delete pages {selection_text} in {len(pdfs)} file(s) of {folder.name}",
         _run,
+        # Identity of every source this task was configured against;
+        # the queue re-verifies it just before running (C-06).
+        sources=[capture_file_source(p) for p in pdfs],
     )

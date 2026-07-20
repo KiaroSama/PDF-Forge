@@ -294,7 +294,12 @@ def _build_jobs(files) -> JobPlan:
             csv_dialect = dialect
 
         out = reserve_unique_file(src.with_suffix(".pdf"))
+        # A job runs later than it is configured, so it carries an identity for
+        # its source - size, mtime, file id and a content digest - and the
+        # runner proves the file is still the one the user chose before handing
+        # it to a converter (C-06).
         plan.accepted.append({"src": src, "family": fam, "out": out,
+                              "ref": capture_file_source(src, family=fam),
                               "csv_dialect": csv_dialect})
     return plan
 
@@ -632,6 +637,17 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
     password: Optional[str] = None
     attempted = False
     try:
+        ref = job.get("ref")
+        if ref is not None:
+            # Before the first staging byte: a source edited or replaced since
+            # configuration must not be converted (C-06).
+            try:
+                ref.verify_unchanged()
+            except SourceChangedError as exc:
+                print_error(f"  Failed: {exc}")
+                logger.error("Convert source changed for '%s': %s", src, exc)
+                return "fail"
+
         # Ask for the password *before* converting when the container is visibly
         # encrypted, rather than relying on the converter's error path.
         if is_encrypted_office_file(src):
@@ -877,4 +893,7 @@ def _configure_and_queue(files, mode: str) -> None:
         f"Convert {len(jobs)} file(s) to PDF"
         + (f" in {files[0].parent.name}" if mode == "folder" else "")
     )
-    queue_task(label, _run)
+    # Each job re-verifies its own source before converting too; this
+    # check stops the batch early when one is already gone.
+    queue_task(label, _run,
+               sources=[j["ref"] for j in jobs if j.get("ref")])

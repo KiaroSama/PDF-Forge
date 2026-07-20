@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 import time
@@ -15,7 +16,8 @@ __all__ = ['_import_pymupdf', 'PdfOpenError', 'PdfPasswordCancelled',
            'open_source_pdf', 'source_password',
            'close_doc', '_authenticate_doc',
            'ProtectionPolicy', 'detect_protection',
-           'SourceRef', 'SourceChangedError', 'capture_source', 'source_fingerprint',
+           'SourceRef', 'SourceChangedError', 'capture_source', 'capture_file_source',
+           'source_fingerprint',
            'write_pages_to_pdf', '_validate_written_pdf', '_validate_merged_pdf',
            'validate_page_selection_output', 'validate_protection_postcondition',
            'validate_watermark_removed', '_page_fingerprints',
@@ -175,12 +177,26 @@ def open_source_pdf(path: Path, password_prompt=None, password=None):
     return doc
 
 
-def source_fingerprint(path: Path) -> dict:
+def _file_sha256(path: Path, chunk: int = 1 << 20) -> str:
+    """SHA-256 of a file, read in chunks so a large source stays bounded."""
+    digest = hashlib.sha256()
+    with open(str(path), "rb") as handle:
+        for block in iter(lambda: handle.read(chunk), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def source_fingerprint(path: Path, content: bool = True) -> dict:
     """Identity of a source file at configuration time.
 
-    Size plus nanosecond mtime plus the OS file id where available. Cheap to
-    take, and strong enough to notice a file that was replaced or edited between
-    configuring an operation and running it.
+    Size, nanosecond mtime, the OS file id where available - and a content
+    digest. Metadata alone is not enough: an in-place rewrite of the same length
+    keeps the inode, and a restored timestamp keeps ``mtime_ns``, so a source
+    edited between configuring an operation and running it would verify as
+    unchanged and be processed as if it were the file the user chose (C-06).
+
+    ``content=False`` skips the digest for callers that only need the cheap
+    metadata (a first-pass comparison before deciding to hash).
     """
     st = os.stat(str(path))
     fingerprint = {"size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
@@ -188,6 +204,8 @@ def source_fingerprint(path: Path) -> dict:
     if file_id:
         fingerprint["file_id"] = int(file_id)
         fingerprint["volume"] = int(getattr(st, "st_dev", 0))
+    if content:
+        fingerprint["sha256"] = _file_sha256(path)
     return fingerprint
 
 
@@ -209,11 +227,15 @@ class SourceRef:
     password: str = ""
     page_count: int = 0
     fingerprint: dict = field(default_factory=dict)
+    family: str = ""
 
     def verify_unchanged(self) -> None:
         """Raise :class:`SourceChangedError` when the file is not what we configured."""
         try:
-            current = source_fingerprint(self.path)
+            # Cheap metadata first; the digest is only computed when the
+            # metadata still matches, which is the only case where it can tell
+            # us anything new.
+            current = source_fingerprint(self.path, content=False)
         except OSError as exc:
             raise SourceChangedError(
                 f"'{self.path.name}' is no longer available: {exc}"
@@ -227,6 +249,19 @@ class SourceRef:
                         f"'{self.path.name}' changed after this task was "
                         "configured; nothing was written. Re-run the operation."
                     )
+        expected = self.fingerprint.get("sha256")
+        if expected:
+            try:
+                actual = _file_sha256(self.path)
+            except OSError as exc:
+                raise SourceChangedError(
+                    f"'{self.path.name}' could not be re-read: {exc}"
+                ) from exc
+            if actual != expected:
+                raise SourceChangedError(
+                    f"'{self.path.name}' was edited in place after this task "
+                    "was configured; nothing was written. Re-run the operation."
+                )
 
     def open(self):
         """Reopen the source for a runner: verify, authenticate silently, check pages."""
@@ -243,6 +278,23 @@ class SourceRef:
 
     def __repr__(self) -> str:  # never leak the password
         return f"SourceRef({self.path.name!r}, pages={self.page_count})"
+
+
+def capture_file_source(path: Path, family: str = "") -> SourceRef:
+    """Identity for a source PDF Forge does not open as a PDF.
+
+    Office documents and CSV files are handed to an external converter rather
+    than opened here, so there is no page count to capture - but they need the
+    same protection against being edited between configuration and execution.
+    ``family`` records what the file was classified as, so a source that is
+    later swapped for a different kind of document is rejected as well.
+    """
+    return SourceRef(
+        path=Path(path),
+        page_count=0,
+        fingerprint=source_fingerprint(path),
+        family=family,
+    )
 
 
 def capture_source(doc, path: Path) -> SourceRef:

@@ -68,17 +68,31 @@ def operation_remove_watermark() -> None:
 
     # Capture the working password so the queued runner reopens silently (A13).
     pw = source_password(doc)
+    protection = detect_protection(doc)
     total_pages = doc.page_count
     print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
     print_info("Scanning for repeated images (watermark candidates)...")
-    candidates, total = scan_watermark_candidates(doc)
+    candidates, total, skipped = scan_watermark_candidates(doc, with_skipped=True)
+
+    if skipped:
+        # Told, not silently dropped: these repeat like a watermark but live in
+        # the content stream, so no image object exists to replace (C-14).
+        print_warning(
+            f"{skipped} repeated inline image(s) were skipped: an inline image "
+            "is part of the page content stream, not a removable image object, "
+            "so this tool cannot remove it."
+        )
+        logger.info("Watermark scan skipped %d inline group(s) in '%s'.",
+                    skipped, source)
 
     if not candidates:
         print_warning(
-            "No repeated images were found. This tool only removes image-based "
-            "watermarks that repeat across pages (not text or flattened scans)."
+            "No removable repeated images were found. This tool only removes "
+            "image-based watermarks that repeat across pages (not text, inline "
+            "images, or flattened scans)."
         )
-        logger.info("Watermark scan found no repeated images in '%s'.", source)
+        logger.info("Watermark scan found no removable repeated images in '%s'.",
+                    source)
         doc.close()
         return
 
@@ -135,6 +149,14 @@ def operation_remove_watermark() -> None:
         for c in chosen:
             affected_pages |= c.pages
 
+        # Consent BEFORE any output is configured or written (C-13). The
+        # resolved policy is captured in the queued task and handed to the
+        # writer, so a run-time re-detection never decides it.
+        protection = resolve_protection(protection, context="watermark-free PDF")
+        if protection is None:
+            print_warning("Cancelled. Returning to menu.")
+            return
+
         default_path = unique_file_path(source.parent / f"{source.stem}_no_watermark.pdf")
         out_path = _choose_output_file(default_path, source)
         if out_path is None:
@@ -167,11 +189,12 @@ def operation_remove_watermark() -> None:
                 logger.error("Failed to reopen '%s': %s", source, exc)
                 return
             try:
-                modified = remove_watermark_images(
+                result = remove_watermark_images(
                     rdoc,
                     chosen_sigs,
                     out_path,
                     progress=lambda c, t: _print_progress("Cleaning pages", c, t),
+                    protection=protection,
                 )
             except Exception as exc:  # noqa: BLE001 - clean message, log details
                 print_error(f"Failed to remove the watermark: {exc}")
@@ -179,11 +202,15 @@ def operation_remove_watermark() -> None:
                 return
             finally:
                 rdoc.close()
+            # Report the path that was actually written: promotion may have
+            # allocated a sibling name if the requested one appeared meanwhile.
             print_success(
-                f"Done. Removed watermark from {modified} page(s):\n  {out_path}"
+                f"Done. Removed watermark from {result.count} page(s):"
+                f"\n  {result.path}"
             )
             logger.info(
-                "Watermark removal complete: pages=%d output='%s'", modified, out_path
+                "Watermark removal complete: pages=%d output='%s'",
+                result.count, result.path,
             )
 
         queue_task(
