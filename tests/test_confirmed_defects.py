@@ -31,6 +31,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pdf_forge as app  # noqa: E402
 from pdf_forge import msoffice, office_server  # noqa: E402
 
 
@@ -218,4 +219,58 @@ def test_powerpoint_does_not_call_the_update_action(tmp_path, monkeypatch):
     assert ("AutoUpdate", 2) in calls, (
         "linked shapes were left on automatic update; set "
         "LinkFormat.AutoUpdate = 2 (ppUpdateOptionManual) instead"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 4. A DOS-encoded CSV must not take the application down
+# --------------------------------------------------------------------------- #
+
+def test_a_cp1252_undefined_byte_does_not_crash_csv_detection(tmp_path):
+    """cp1252 leaves five bytes undefined; the fallback claimed it could not fail.
+
+    0x81, 0x8D, 0x8F, 0x90 and 0x9D are unmapped in cp1252 and appear routinely
+    in CP437/CP850 DOS exports. The resulting UnicodeDecodeError is a
+    ValueError, so it matched none of the OSError handlers upstream and exited
+    the application - taking the whole folder selection with it.
+    """
+    from pdf_forge import office
+
+    csv_path = tmp_path / "dos.csv"
+    # Valid CSV structure, one byte cp1252 cannot map.
+    csv_path.write_bytes(b"name;qty\r\nca\x81f\xe9;2\r\n")
+
+    dialect = office.detect_csv_dialect(csv_path)
+
+    assert dialect is not None, "detection returned nothing for a readable CSV"
+    assert dialect.encoding in ("windows-1252", "utf-8"), dialect.encoding
+
+
+# --------------------------------------------------------------------------- #
+# 5. A byte-corrupted manifest must be quarantined, not crash every folder tool
+# --------------------------------------------------------------------------- #
+
+def test_a_byte_corrupted_manifest_is_quarantined(tmp_path, monkeypatch):
+    """Corruption recovery only handled *text* damage.
+
+    load_generated_outputs read with read_text(), and a UnicodeDecodeError is a
+    ValueError - not the FileNotFoundError/OSError the reader catches, and
+    raised before the quarantine branch could ever run. Every folder tool then
+    crashed and stayed crashed, because record_generated_output's blanket
+    handler swallowed the same error and left the bytes in place.
+    """
+    monkeypatch.setenv("PDF_FORGE_STATE_DIR", str(tmp_path))
+    manifest = app.manifest_path()
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_bytes(b'\xff\xfe\x00{"outputs": []}')
+
+    entries = app.load_generated_outputs()
+
+    assert entries == set() or entries == [], (
+        "a corrupt manifest must read as empty, not raise"
+    )
+    backups = list(manifest.parent.glob("*.corrupt"))
+    assert backups, (
+        "the damaged manifest was neither quarantined nor replaced; the next "
+        "run will hit exactly the same bytes"
     )

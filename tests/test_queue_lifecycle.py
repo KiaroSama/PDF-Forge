@@ -181,7 +181,14 @@ def test_source_ref_repr_never_leaks_the_password(tmp_path):
     finally:
         app.close_doc(opened)
     assert "s3cret" not in repr(ref)
-    assert ref.open() is not None or True
+    # `ref.open() is not None or True` was unconditionally true and leaked the
+    # document it opened - in a module whose premise is that a leaked handle
+    # blocks the rename below.
+    reopened = ref.open()
+    try:
+        assert reopened.page_count == 1
+    finally:
+        app.close_doc(reopened)
 
 
 # --------------------------------------------------------------------------- #
@@ -237,10 +244,19 @@ def test_queue_cleanup_runs_even_on_base_exceptions(tmp_path, error):
     app.taskqueue._task_queue.append(
         app.taskqueue._QueuedTask("explodes", explode)
     )
-    try:
-        app.taskqueue._run_task_queue()
-    except BaseException as exc:  # SystemExit must keep propagating
-        assert isinstance(exc, SystemExit)
+    if isinstance(error, SystemExit):
+        # pytest.raises, not a shared try/except: with the assertion inside an
+        # `except BaseException` block, code that *swallowed* SystemExit simply
+        # never entered it and the test passed. Confirmed by mutating
+        # taskqueue's handler to `except BaseException` - all three
+        # parametrizations stayed green.
+        with pytest.raises(SystemExit):
+            app.taskqueue._run_task_queue()
+    else:
+        try:
+            app.taskqueue._run_task_queue()
+        except BaseException as exc:  # noqa: BLE001 - the point is what escapes
+            pytest.fail(f"{type(error).__name__} must not propagate: {exc!r}")
 
     assert app.taskqueue._task_queue == [], "queue must be cleared"
     # The reservation is released, so the same name is free again.

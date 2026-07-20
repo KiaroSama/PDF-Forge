@@ -103,9 +103,25 @@ def test_empty_queue_finalize_is_a_noop():
     assert app.finalize_queue() is False
 
 
-def test_password_never_appears_in_a_task_repr():
+def test_password_never_appears_in_a_task_repr(tmp_path):
+    # The task must carry a real SourceRef holding a real password. Built with
+    # sources=() and no password anywhere, both assertions below were
+    # tautologies - they could not have caught the actual leak vector, which is
+    # _QueuedTask's dataclass repr recursing into SourceRef.password.
+    src = tmp_path / "secret.pdf"
+    doc = pymupdf.open()
+    doc.new_page()
+    doc.save(str(src), encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="hunter2")
+    doc.close()
+    opened = app.open_source_pdf(src, password_prompt=lambda *_a: "hunter2")
+    try:
+        ref = app.capture_source(opened, src)
+    finally:
+        app.close_doc(opened)
+    assert ref.password == "hunter2", "the reference must actually hold it"
+
     task = app.taskqueue._QueuedTask("Protect secret.pdf -> secret_protected.pdf",
-                                     lambda: None)
+                                     lambda: None, sources=(ref,))
     assert "hunter2" not in repr(task)
     assert "user_pw" not in repr(task)
 

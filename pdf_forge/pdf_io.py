@@ -547,7 +547,12 @@ def validate_page_selection_output(out_path: Path, source_doc, pages_zero_based,
     against the source, in order (PF-035).
     """
     pymupdf = _import_pymupdf()
-    expected = [_page_fingerprints(source_doc)[i] for i in pages_zero_based]
+    # Hoisted: _page_fingerprints sweeps the whole document, so calling it
+    # inside the comprehension re-swept once per selected page. Measured on a
+    # 300-page source with 299 pages selected: 14.25s vs 0.04s, 364x, with no
+    # progress output - long enough to look like a hang.
+    source_prints = _page_fingerprints(source_doc)
+    expected = [source_prints[i] for i in pages_zero_based]
     check = pymupdf.open(str(out_path))
     try:
         if check.needs_pass and not check.authenticate(password or ""):

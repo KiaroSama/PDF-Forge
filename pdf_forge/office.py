@@ -418,8 +418,12 @@ def _decode_csv_sample(raw: bytes, complete: bool):
         text = decoder.decode(raw, complete)
         return text, encoding, had_bom
     except UnicodeDecodeError:
-        # Genuinely not UTF-8. cp1252 maps every byte, so this cannot raise.
-        return raw.decode("cp1252"), "windows-1252", had_bom
+        # Genuinely not UTF-8. cp1252 leaves five bytes undefined - 0x81, 0x8D,
+        # 0x8F, 0x90, 0x9D - which appear routinely in CP437/CP850 DOS exports,
+        # so this decode very much can raise; the previous comment asserting it
+        # could not was simply wrong, and the UnicodeDecodeError (a ValueError,
+        # not an OSError) escaped every caller and exited the application.
+        return raw.decode("cp1252", errors="replace"), "windows-1252", had_bom
 
 
 def detect_csv_dialect(path: Path, sample_bytes: int = 65536) -> CsvDialect:

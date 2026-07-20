@@ -177,7 +177,10 @@ def test_success_on_first_attempt_reports_no_restart(monkeypatch, capsys):
 
     monkeypatch.setattr(app.ops_office, "_convert_one", convert)
     result = app.ops_office._convert_with_restart(object(), {"src": Path("a.docx")})
-    assert result[0] if isinstance(result, tuple) else result == "ok"
+    # Not `result[0] if isinstance(result, tuple) else result == "ok"`: that
+    # parses as a conditional expression, so it only checked result[0] for
+    # truthiness - "fail" and "skip" satisfied it too.
+    assert result[0] == "ok", result
     assert calls["n"] == 1
     assert "restart" not in capsys.readouterr().out.lower()
 

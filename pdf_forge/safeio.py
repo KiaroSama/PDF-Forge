@@ -488,14 +488,19 @@ def _read_entries() -> List[dict]:
     """
     path = manifest_path()
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
     except FileNotFoundError:
         return []
     except OSError as exc:
         logger.warning("Could not read the generated-output manifest: %s", exc)
         return []
     try:
-        data = json.loads(raw)
+        # Decoded here, not above: a UnicodeDecodeError is a ValueError, so
+        # read_text() sent byte-level corruption straight past both handlers
+        # and out to the caller - every folder tool then crashed, permanently,
+        # because nothing quarantined the file. Inside this block it lands in
+        # the corruption branch like any other damage.
+        data = json.loads(raw.decode("utf-8"))
         entries = data["outputs"]
         if not isinstance(entries, list):
             raise ValueError("outputs is not a list")
