@@ -82,6 +82,21 @@ def _export_tracked_tree(destination: Path) -> Path:
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+
+    # Reproduce the runtime state, not just the tracked one. The app writes a
+    # git-ignored logs/ directory when it runs, and setuptools' flat-layout
+    # discovery counts any root directory with an identifier-legal name as a
+    # package - so logs/ alone was enough to fail the build with "Multiple
+    # top-level packages discovered". An export of tracked files never contains
+    # it, which is exactly why a wheel test built from one cannot notice the
+    # declaration being removed again. Creating it here is what makes that
+    # regression reachable.
+    logs = destination / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "pdf_forge_2026-07-20_00-00-00_UTC.log").write_text(
+        "[2026-07-20 00:00:00 UTC] [INFO] [TEST] runtime log placeholder\n",
+        encoding="utf-8",
+    )
     return destination
 
 
@@ -92,6 +107,29 @@ def _git_status() -> list:
     )
     assert result.returncode == 0, result.stderr
     return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def _attempt_build(source: Path, wheelhouse: Path, cwd: Path) -> tuple:
+    """Build a wheel from ``source``. Returns (succeeded, combined output).
+
+    Returns rather than asserts, because one caller needs a build to succeed
+    and another needs to inspect why one failed.
+    """
+    base = [sys.executable, "-m", "pip", "wheel", str(source),
+            "--no-deps", "--wheel-dir", str(wheelhouse)]
+    attempts = []
+    if importlib.util.find_spec("setuptools") is not None:
+        attempts.append(("no build isolation", base + ["--no-build-isolation"]))
+    attempts.append(("isolated build", base))
+
+    transcript = []
+    for label, command in attempts:
+        build = subprocess.run(command, capture_output=True, text=True,
+                               cwd=str(cwd), timeout=600)
+        transcript.append(f"--- {label} ---\n{build.stdout}{build.stderr}")
+        if build.returncode == 0:
+            return True, "\n".join(transcript)
+    return False, "\n".join(transcript)
 
 
 @pytest.fixture(scope="session")
@@ -124,22 +162,9 @@ def built_wheel(tmp_path_factory) -> dict:
     # costs seconds; guessing wrong costs a red build.
     #
     # --no-deps throughout: runtime requirements are irrelevant to metadata.
-    base = [sys.executable, "-m", "pip", "wheel", str(source),
-            "--no-deps", "--wheel-dir", str(wheelhouse)]
-    attempts = []
-    if importlib.util.find_spec("setuptools") is not None:
-        attempts.append(("no build isolation", base + ["--no-build-isolation"]))
-    attempts.append(("isolated build", base))
-
-    failures = []
-    for label, command in attempts:
-        build = subprocess.run(command, capture_output=True, text=True,
-                               cwd=str(workspace), timeout=600)
-        if build.returncode == 0:
-            break
-        failures.append(f"--- {label} ---\n{build.stdout}{build.stderr}")
-    else:
-        pytest.fail("no wheel build strategy worked:\n" + "\n".join(failures))
+    ok, output = _attempt_build(source, wheelhouse, workspace)
+    if not ok:
+        pytest.fail("no wheel build strategy worked:\n" + output)
 
     wheels = sorted(wheelhouse.glob("*.whl"))
     assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
@@ -225,6 +250,45 @@ def test_the_wheel_ships_the_package_and_nothing_else(built_wheel):
     assert not unexpected, (
         f"the wheel ships more than the package: {unexpected} "
         f"(all top-level entries: {built_wheel['top_level']})"
+    )
+
+
+def test_removing_the_package_declaration_brings_the_failure_back(tmp_path):
+    """The guard above only means something if the defect is reachable.
+
+    The other tests build from a source tree that now contains a runtime-like
+    logs/, so they would go red if the declaration disappeared. This proves
+    that directly, in the one direction assertions on a successful build cannot
+    reach: strip `packages = [...]` from pyproject, keep everything else, and
+    the build must fail the way it originally did.
+
+    Without this, a green suite would only show that *the current* pyproject
+    packages nothing extra - not that the guard notices the declaration being
+    removed, which is the regression being guarded against.
+    """
+    source = _export_tracked_tree(tmp_path / "src")
+    pyproject = source / "pyproject.toml"
+    stripped = re.sub(r'^packages = \[.*?\]\s*$', "",
+                      pyproject.read_text(encoding="utf-8"), flags=re.M)
+    assert stripped != pyproject.read_text(encoding="utf-8"), (
+        "the packages declaration was not found in pyproject.toml; this test "
+        "no longer removes what it claims to remove"
+    )
+    pyproject.write_text(stripped, encoding="utf-8")
+
+    ok, output = _attempt_build(source, tmp_path / "wheelhouse", tmp_path)
+
+    assert not ok, (
+        "the build succeeded without an explicit package declaration, so "
+        "auto-discovery no longer trips over logs/ and this guard is inert"
+    )
+    assert "Multiple top-level packages discovered" in output, (
+        "the build failed for some other reason than flat-layout discovery:\n"
+        + output[-2000:]
+    )
+    assert "logs" in output, (
+        "flat-layout discovery did not name logs/, so the exported tree is not "
+        "reproducing the runtime state this guard depends on:\n" + output[-2000:]
     )
 
 
