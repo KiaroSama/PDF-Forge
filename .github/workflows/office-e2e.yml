@@ -87,7 +87,10 @@ jobs:
         # test_office_links.py proves external-link suppression end to end
         # against a loopback recorder; it only counts as evidence if it runs
         # here, so it is named explicitly rather than left to a path filter.
-        run: python -m pytest tests/test_office_e2e.py tests/test_office_links.py -v -n auto
+        # -rs prints the reason for every skip. Without it a run reports only a
+        # count, and "3 skipped" cannot be told apart from a security assertion
+        # quietly not running.
+        run: python -m pytest tests/test_office_e2e.py tests/test_office_links.py -v -rs -n auto
 
       # C-18 gate 15: the full provisioning lifecycle, not just one setup. A
       # clean-then-reinstall proves removal really removes and that a second
