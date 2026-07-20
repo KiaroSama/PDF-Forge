@@ -424,7 +424,20 @@ def test_word_and_powerpoint_suppress_external_updates():
     assert "UpdateLinks" in word or "UpdateLinksAtOpen" in word, (
         "Word opens documents with no link/field update suppression"
     )
-    assert "Update" in powerpoint, (
+    # Not a bare "Update" substring: that is satisfied by the very call this
+    # must forbid. The refresh action is an argument-less method that performs
+    # the fetch rather than suppressing it, and the old assertion passed over it
+    # for exactly that reason. The behavioural check lives in
+    # test_confirmed_defects.py; this one keeps the call from coming back.
+    #
+    # Comments are stripped first - otherwise the guard trips on prose that
+    # merely names the call it forbids.
+    code = "\n".join(line.split("#", 1)[0] for line in powerpoint.splitlines())
+    assert "UpdateLinks()" not in code, (
+        "Presentation.UpdateLinks() performs the external fetch it is supposed "
+        "to prevent; set LinkFormat.AutoUpdate on the shapes instead"
+    )
+    assert "AutoUpdate" in code, (
         "PowerPoint opens presentations with no link update suppression"
     )
 

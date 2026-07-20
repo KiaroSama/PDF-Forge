@@ -127,9 +127,18 @@ def _kill_profile_owners(profile_dir: Path) -> None:
         subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True, timeout=30,
+            # Match the URI form, which is what is actually on the command
+            # line: we pass --user-installation a plain path, but unoserver
+            # converts it with Path(...).as_uri() before launching soffice.
+            # A glob built from the native path contains backslashes, which
+            # PowerShell's -like treats literally, so it can never match the
+            # forward-slash URI. Measured against a live process: the native
+            # form matched 0 processes, this one matched 2.
+            #
             # Through the environment, so a path containing backslashes,
             # spaces or quotes cannot be reinterpreted as PowerShell syntax.
-            env=dict(os.environ, PDFFORGE_PROFILE_GLOB=f"*{profile_dir}*"),
+            env=dict(os.environ,
+                     PDFFORGE_PROFILE_GLOB=f"*{profile_dir.resolve().as_uri()}*"),
         )
     except (OSError, subprocess.SubprocessError):
         pass

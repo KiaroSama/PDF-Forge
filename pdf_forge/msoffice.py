@@ -25,6 +25,7 @@ from __future__ import annotations
 import codecs
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Dict, Optional
@@ -45,6 +46,10 @@ __all__ = [
 # msoAutomationSecurityForceDisable: open with macros disabled regardless of the
 # user's trust-centre configuration.
 _MSO_FORCE_DISABLE = 3
+
+# ppUpdateOptionManual: a linked shape refreshes only when asked, never on its
+# own during open or export.
+_PP_UPDATE_MANUAL = 2
 
 # Chunk size for streaming file copies.
 _COPY_CHUNK = 1 << 20
@@ -338,7 +343,13 @@ class MsOfficeSession:
                     "file."
                 )
             out.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(str(produced), str(out))
+            # shutil.move, not os.replace: the scratch directory lives in %TEMP%
+            # and the destination is wherever the user's file is, so the two are
+            # routinely on different volumes - os.replace then raises "cannot
+            # move the file to a different disk drive" and the whole batch dies.
+            # Every test writes under tmp_path, which is on the same volume as
+            # %TEMP%, which is why the suite never saw it.
+            shutil.move(str(produced), str(out))
 
 
 # RPC_E_DISCONNECTED: after ExportAsFixedFormat, Office sometimes releases the
@@ -405,10 +416,18 @@ def _convert_powerpoint(app, src: Path, out: Path, secret: str) -> None:
             str(src), ReadOnly=True, Untitled=True, WithWindow=False,
         )
         # Stop linked pictures and OLE objects updating during export (C-12).
-        try:
-            presentation.UpdateLinks()
-        except Exception as exc:  # noqa: BLE001 - absent on some builds
-            logger.debug("PowerPoint link update could not be suppressed: %s", exc)
+        #
+        # NOT Presentation.UpdateLinks(): despite the name that is an
+        # argument-less *action* that refreshes every linked object, i.e. it
+        # performs the outbound fetch this is meant to prevent. Word and Excel
+        # take real suppression parameters (UpdateLinksAtOpen=False,
+        # UpdateLinks=0); PowerPoint's Open has no equivalent, so each linked
+        # shape is switched to manual updating instead.
+        for shape in presentation.Shapes:
+            try:
+                shape.LinkFormat.AutoUpdate = _PP_UPDATE_MANUAL
+            except Exception:  # noqa: BLE001 - unlinked shapes have no LinkFormat
+                continue
         presentation.SaveAs(str(out), 32)  # ppSaveAsPDF
     finally:
         _close_quietly(presentation, "presentation", lambda: presentation.Close())
