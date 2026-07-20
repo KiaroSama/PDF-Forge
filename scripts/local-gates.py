@@ -113,8 +113,11 @@ GATES: List[Gate] = [
           "import pdf_forge as a;s=a.office_runtime.runtime_status();"
           "print('LibreOffice',s['libreoffice_version'],'ready',s['ready']);"
           "raise SystemExit(0 if s['ready'] else 1)"]),
+    # Both files, because the workflow runs both: a local gate that covers less
+    # than CI reports green for a narrower thing than it claims.
     Gate("Real conversion end-to-end tests", "office-e2e.yml",
-         [PYTHON, "-m", "pytest", "tests/test_office_e2e.py", "-q", "-n", "auto"],
+         [PYTHON, "-m", "pytest", "tests/test_office_e2e.py",
+          "tests/test_office_links.py", "-q", "-n", "auto"],
          slow=True, env={"PDF_FORGE_E2E": "1"}),
 ]
 
