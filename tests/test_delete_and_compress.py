@@ -60,7 +60,7 @@ def test_delete_pages_end_to_end(tmp_path):
 
     _present, _missing, kept = app.compute_deletion(6, [2, 5])  # delete pages 2 and 5
     out = tmp_path / "trimmed.pdf"
-    written = app.write_pages_to_pdf(reader, kept, out)
+    written = app.write_pages_to_pdf(reader, kept, out).count
 
     assert written == 4
     assert len(PdfReader(str(out)).pages) == 4

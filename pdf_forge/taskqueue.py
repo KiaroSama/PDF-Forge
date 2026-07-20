@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, List
+from typing import Callable, List, Sequence
 
 from .constants import *  # noqa: F401,F403
 from .ui import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
+from .pdf_io import SourceChangedError, SourceRef
 
 __all__ = ['_TaskQueued', '_QueuedTask', 'queue_task', '_run_task_queue', 'finalize_queue']
 
@@ -21,22 +22,34 @@ class _TaskQueued(Exception):
 
 @dataclass
 class _QueuedTask:
-    """A configured-but-not-yet-run operation: a label plus a zero-arg runner."""
+    """A configured-but-not-yet-run operation.
+
+    ``sources`` holds the identity of every file the task was configured
+    against. The queue verifies them immediately before the runner starts, so
+    an operation can never write an output derived from a file that was edited
+    or replaced after the user configured it (C-06). Verification lives here,
+    once, rather than in each of a dozen runners that would each have to
+    remember it.
+    """
     summary: str
     run: Callable[[], None]
+    sources: Sequence["SourceRef"] = ()
 
 
 _task_queue: List[_QueuedTask] = []
 
 
-def queue_task(summary: str, run: Callable[[], None]) -> None:
+def queue_task(summary: str, run: Callable[[], None], sources=()) -> None:
     """Add a configured operation to the batch queue, then unwind to the main menu.
 
     Prints a short per-task line, appends the runner, and raises ``_TaskQueued``
     so nested submenus fall back to the main menu for the next choice. Output
     paths are resolved now, at queue time.
+
+    ``sources`` are the :class:`SourceRef` identities this task depends on; the
+    queue re-verifies them just before running it.
     """
-    _task_queue.append(_QueuedTask(summary, run))
+    _task_queue.append(_QueuedTask(summary, run, tuple(sources)))
     print_success(f"\nAdded to queue (#{len(_task_queue)}): {summary}")
     logger.info("Task queued (#%d): %s", len(_task_queue), summary)
     raise _TaskQueued()
@@ -50,6 +63,12 @@ def _discard_queue() -> None:
     """
     _task_queue.clear()
     clear_reservations()
+
+
+def _verify_sources(task: _QueuedTask) -> None:
+    """Prove every configured source is still the file the user chose."""
+    for ref in task.sources:
+        ref.verify_unchanged()
 
 
 def _run_task_queue() -> None:
@@ -72,7 +91,11 @@ def _run_task_queue() -> None:
                 Color.BOLD + Color.LIGHT_BLUE,
             ))
             try:
+                _verify_sources(task)
                 task.run()
+            except SourceChangedError as exc:
+                print_error(f"Task {index} skipped: {exc}")
+                logger.error("Queued task %d skipped: %s", index, exc)
             except KeyboardInterrupt:
                 print_warning("\nTask interrupted; continuing with the next one.")
                 logger.warning("Queued task %d interrupted.", index)

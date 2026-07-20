@@ -92,7 +92,8 @@ def operation_protect_open_password() -> None:
         )
         logger.info("Protect (open password) complete: output='%s'", out_path)
 
-    queue_task(f"Protect (open password) {source.name} -> {out_path.name}", _run)
+    queue_task(f"Protect (open password) {source.name} -> {out_path.name}", _run,
+               sources=[capture_file_source(source)])
 
 
 def _prompt_blocked_actions():
@@ -210,4 +211,5 @@ def operation_protect_restrict() -> None:
         )
         logger.info("Protect (restrict) complete: output='%s'", out_path)
 
-    queue_task(f"Protect (restrict) {source.name} -> {out_path.name}", _run)
+    queue_task(f"Protect (restrict) {source.name} -> {out_path.name}", _run,
+               sources=[capture_file_source(source)])

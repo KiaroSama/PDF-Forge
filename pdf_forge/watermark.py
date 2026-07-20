@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Set
 
 from .constants import *  # noqa: F401,F403
-from .safeio import promote_atomically
+from .safeio import OutputResult, promote_atomically
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
@@ -76,12 +76,21 @@ def _painted_images(doc, page_index: int) -> List[dict]:
 _MIN_WATERMARK_SIDE = 8
 
 
-def scan_watermark_candidates(doc, min_pages: int = 2, max_candidates: int = 10):
+def scan_watermark_candidates(doc, min_pages: int = 2, max_candidates: int = 10,
+                              with_skipped: bool = False):
     """Find images that repeat across pages (watermark candidates).
 
     Returns ``(candidates, total_pages)`` where candidates are sorted by page
     coverage (descending) and then by image area. Only images painted on at
     least ``min_pages`` pages are returned.
+
+    A repeated image that is *inline* (``BI ... ID ... EI``) lives in the
+    content stream, not in the object graph: MuPDF reports it with ``xref == 0``
+    and there is no image object to replace, so removal could never touch it.
+    Such an identity is never offered - a candidate the user cannot act on is
+    worse than none - and is counted instead. ``with_skipped=True`` returns
+    ``(candidates, total_pages, skipped)`` so the caller can tell the user how
+    many repeated images were left out (C-14).
     """
     groups: Dict[str, dict] = defaultdict(
         lambda: {"pages": set(), "w": 0, "h": 0, "xref": None}
@@ -101,22 +110,27 @@ def scan_watermark_candidates(doc, min_pages: int = 2, max_candidates: int = 10)
             if xref and group["xref"] is None:
                 group["xref"] = xref
 
+    repeated = [(identity, g) for identity, g in groups.items()
+                if len(g["pages"]) >= min_pages]
+    skipped = sum(1 for _identity, g in repeated if not g["xref"])
     candidates = [
         WatermarkCandidate(
             signature=identity,
             pages=g["pages"],
             width=g["w"],
             height=g["h"],
-            sample_xref=g["xref"] or 0,
+            sample_xref=g["xref"],
         )
-        for identity, g in groups.items()
-        if len(g["pages"]) >= min_pages
+        for identity, g in repeated
+        if g["xref"]
     ]
     candidates.sort(key=lambda c: (len(c.pages), c.width * c.height), reverse=True)
     logger.debug(
-        "Watermark scan: %d repeated painted image group(s) over %d page(s).",
-        len(candidates), total,
+        "Watermark scan: %d repeated painted image group(s) over %d page(s); "
+        "%d inline group(s) skipped.", len(candidates), total, skipped,
     )
+    if with_skipped:
+        return candidates[:max_candidates], total, skipped
     return candidates[:max_candidates], total
 
 
@@ -149,7 +163,7 @@ _XOBJ_ENTRY_RE = re.compile(rb"/([^\s/\[\]<>()]+)\s+(\d+)\s+0\s+R")
 
 
 def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
-                            progress=None, protection=None) -> int:
+                            progress=None, protection=None) -> OutputResult:
     """Remove the chosen repeated images from every page and save a new PDF.
 
     Removal works on the **object graph**, not on content-stream text: each
@@ -166,9 +180,16 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
     traversal is required and no paint call is touched, so surrounding text,
     vector graphics, and other images are left exactly as they were.
 
-    Returns the number of pages whose visible content actually changed - counted
-    from painted occurrences before mutation, not from the number of objects
-    written (PF-025).
+    Returns an :class:`OutputResult` whose ``count`` is the number of pages
+    whose visible content actually changed - counted from painted occurrences
+    before mutation, not from the number of objects written (PF-025) - and whose
+    ``path`` is the file actually written, which differs from ``out_path`` when
+    the requested name was taken between configuration and execution.
+
+    Raises ``ValueError`` **before writing anything** when the selection resolves
+    to no removable image object (an inline image, or a signature that matches
+    nothing). Such a run cannot change the document, so producing a file at the
+    user's chosen path would hand them an unchanged "cleaned" PDF (C-14).
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -190,6 +211,15 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
                     affected_pages.add(page_index)
 
     modified = len(affected_pages)
+
+    # Nothing removable: fail here, before a temp file exists, so no output is
+    # written, promoted, or recorded (C-14).
+    if not target_xrefs or not affected_pages:
+        raise ValueError(
+            "The selected watermark could not be removed: it matches no "
+            "removable image object (an inline image cannot be removed). "
+            "No file was written."
+        )
 
     # Replace each target image object once per page that references it.
     for page_index in range(total):
@@ -228,9 +258,15 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
         # keeps the output as compact as the original.
         doc.save(str(tmp_path), garbage=4, deflate=True, use_objstms=1,
                  **protect_kwargs)
-        _validate_written_pdf(tmp_path, expected_pages=total,
-                              password=policy.password if protect_kwargs else None)
-        out_path = promote_atomically(tmp_path, out_path)
+        password = policy.password if protect_kwargs else None
+        _validate_written_pdf(tmp_path, expected_pages=total, password=password)
+        # Postcondition on the STAGING bytes: prove the chosen watermark is
+        # really gone before any user-visible name exists, rather than trusting
+        # the modified count (PF-013/PF-035). Validating after promotion would
+        # leave the rejected file on disk, at the user's chosen path, and in the
+        # generated-output manifest (C-14).
+        validate_watermark_removed(tmp_path, targets, password=password)
+        written = promote_atomically(tmp_path, out_path)
     except Exception:
         try:
             if tmp_path.exists():
@@ -239,15 +275,9 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
             logger.warning("Failed to remove temporary file: %s", tmp_path)
         raise
 
-    # Postcondition: prove the chosen watermark is really gone from the file we
-    # just wrote, rather than trusting the modified count (PF-013/PF-035).
-    validate_watermark_removed(
-        out_path, targets, password=getattr(policy, "password", "") or None
-    )
-
     elapsed = time.perf_counter() - started
     logger.info(
         "Watermark removal: modified=%d page(s), output='%s' in %.2fs.",
-        modified, out_path, elapsed,
+        modified, written, elapsed,
     )
-    return modified
+    return OutputResult(path=written, count=modified)

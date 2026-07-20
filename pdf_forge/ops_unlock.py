@@ -105,4 +105,5 @@ def operation_unlock_pdf() -> None:
         print_success(f"Done. Unlocked {written} page(s):\n  {out_path}")
         logger.info("Unlock complete: output='%s' pages=%d", out_path, written)
 
-    queue_task(f"Unlock {source.name} -> {out_path.name}", _run)
+    queue_task(f"Unlock {source.name} -> {out_path.name}", _run,
+               sources=[capture_file_source(source)])

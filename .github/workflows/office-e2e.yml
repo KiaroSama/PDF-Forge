@@ -81,6 +81,23 @@ jobs:
           PDF_FORGE_E2E: '1'
         run: python -m pytest tests/test_office_e2e.py -v
 
+      # C-18 gate 15: the full provisioning lifecycle, not just one setup. A
+      # clean-then-reinstall proves removal really removes and that a second
+      # provisioning of the same pinned build succeeds from scratch.
+      - name: Office runtime lifecycle (status -> clean -> setup -> status)
+        shell: pwsh
+        run: |
+          python -m pdf_forge --diagnose
+          python -m pdf_forge --clean-office
+          if (Test-Path '.tools/libreoffice') {
+            throw 'clean-office left the runtime directory behind.'
+          }
+          python -m pdf_forge --setup-office
+          python -m pdf_forge --diagnose
+          $status = python -c "import json,pdf_forge as a;print(json.dumps(a.office_runtime.runtime_status()))" | ConvertFrom-Json
+          if (-not $status.ready) { throw 'runtime is not ready after re-provisioning.' }
+          Write-Host "Runtime ready again: $($status.libreoffice_version)"
+
       - name: No task-owned process or profile may survive
         shell: pwsh
         run: |

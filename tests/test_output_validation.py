@@ -201,5 +201,5 @@ def test_watermark_removal_passes_its_own_postcondition(tmp_path):
         modified = app.remove_watermark_images(opened, [candidates[0].signature], out)
     finally:
         app.close_doc(opened)
-    assert modified == 3
+    assert modified.count == 3
     app.validate_watermark_removed(out, [candidates[0].signature])

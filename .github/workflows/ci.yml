@@ -135,3 +135,36 @@ jobs:
             throw "PSScriptAnalyzer reported $($results.Count) error(s)."
           }
           Write-Host 'PSScriptAnalyzer: no errors.'
+
+  cli-smoke:
+    name: CLI entry points (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      # The non-interactive entry points are the ones a user reaches before any
+      # menu, so a failure here is a failure to start at all. They are checked
+      # on both platforms because the Windows console path differs.
+      - name: Version
+        run: python -m pdf_forge --version
+      - name: Version agrees with the package constant
+        shell: python
+        run: |
+          import subprocess, sys
+          import pdf_forge
+          out = subprocess.run([sys.executable, "-m", "pdf_forge", "--version"],
+                               capture_output=True, text=True, check=True).stdout
+          assert pdf_forge.APP_VERSION in out, (pdf_forge.APP_VERSION, out)
+          print("version reported:", pdf_forge.APP_VERSION)
+      - name: Diagnose
+        run: python -m pdf_forge --diagnose

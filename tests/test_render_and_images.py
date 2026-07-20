@@ -152,7 +152,7 @@ def test_remove_watermark_images(tmp_path):
     finally:
         doc.close()
 
-    assert modified == 3
+    assert modified.count == 3
     result = PdfReader(str(out))
     assert len(result.pages) == 3
     assert result.is_encrypted is False

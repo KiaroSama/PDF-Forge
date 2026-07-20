@@ -93,7 +93,7 @@ def test_watermark_in_form_xobject_detected_and_removed(tmp_path):
         assert len(target.pages) == 3
         out = tmp_path / "clean.pdf"
         modified = app.remove_watermark_images(doc, [target.signature], out)
-        assert modified > 0, "modified==0 would be a misleading success message"
+        assert modified.count > 0, "modified==0 would be a misleading success message"
     finally:
         app.close_doc(doc)
 

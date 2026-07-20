@@ -98,6 +98,9 @@ def operation_images_all_pages() -> None:
             f"PDF to PNG (all {total_pages} page(s)) of {source.name} "
             f"-> {out_dir.name}",
             _run,
+            # Identity of every source this task was configured against;
+            # the queue re-verifies it just before running (C-06).
+            sources=[capture_file_source(source)],
         )
     finally:
         pdf.close()
@@ -190,6 +193,9 @@ def operation_images_selected_pages() -> None:
         queue_task(
             f"PDF to PNG ({selection_label}) of {source.name} -> {out_dir.name}",
             _run,
+            # Identity of every source this task was configured against;
+            # the queue re-verifies it just before running (C-06).
+            sources=[capture_file_source(source)],
         )
     finally:
         pdf.close()
@@ -296,6 +302,9 @@ def operation_images_batch_folder() -> None:
     queue_task(
         f"PDF to PNG (batch: {len(pdfs)} file(s) in {folder.name})",
         _run,
+        # Identity of every source this task was configured against;
+        # the queue re-verifies it just before running (C-06).
+        sources=[capture_file_source(p) for p in pdfs],
     )
 
 
@@ -387,6 +396,9 @@ def operation_pdf_to_image_pdf() -> None:
         queue_task(
             f"Image-only PDF of {source.name} -> {out_path.name}",
             _run,
+            # Identity of every source this task was configured against;
+            # the queue re-verifies it just before running (C-06).
+            sources=[capture_file_source(source)],
         )
     finally:
         pdf.close()
@@ -485,6 +497,9 @@ def operation_image_pdf_batch_folder() -> None:
     queue_task(
         f"Image-only PDF (batch: {len(pdfs)} file(s) in {folder.name})",
         _run,
+        # Identity of every source this task was configured against;
+        # the queue re-verifies it just before running (C-06).
+        sources=[capture_file_source(p) for p in pdfs],
     )
 
 
@@ -647,6 +662,9 @@ def operation_extract_images() -> None:
             f"Extract {image_count} image(s) ({label}) from {source.name} "
             f"-> {out_dir.name}",
             _run,
+            # Identity of every source this task was configured against;
+            # the queue re-verifies it just before running (C-06).
+            sources=[capture_file_source(source)],
         )
     finally:
         pdf.close()

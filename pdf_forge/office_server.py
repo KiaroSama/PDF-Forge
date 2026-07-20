@@ -495,6 +495,20 @@ def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="pdfforge_cliprof_"))
     outdir = Path(tempfile.mkdtemp(prefix="pdfforge_cliout_"))
+    # This fallback runs automatically on bridge loss, so it must carry exactly
+    # the same macro and link-update lockdown as the server path. A fresh empty
+    # profile means LibreOffice defaults, i.e. macros enabled - the retry would
+    # open the very document the bridge just died on, unprotected (C-12). Fail
+    # closed: an unhardened profile is not an acceptable degraded mode.
+    try:
+        _harden_profile(profile)
+    except Exception as exc:  # noqa: BLE001 - surfaced, never ignored
+        shutil.rmtree(profile, ignore_errors=True)
+        shutil.rmtree(outdir, ignore_errors=True)
+        raise OfficeRuntimeError(
+            f"The conversion profile could not be hardened ({exc}); the "
+            "document was not opened."
+        ) from exc
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     cmd = [
         str(soffice), "--headless", "--invisible", "--nologo", "--nofirststartwizard",

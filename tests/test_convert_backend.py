@@ -17,6 +17,7 @@ from pdf_forge import office_decrypt
 from pdf_forge import office_provision as ort_provision
 from pdf_forge import office_runtime as ort
 from pdf_forge import ops_office
+from test_office_validation import make_ooxml
 
 windows_only = pytest.mark.skipif(os.name != "nt", reason="Windows/COM only")
 
@@ -283,9 +284,9 @@ def test_libreoffice_path_never_forwards_a_password(tmp_path, monkeypatch):
 
     def fake_decrypt(path, password, temp_dir):
         seen["password"] = password
-        plain = Path(temp_dir) / "decrypted.xlsx"
-        plain.write_bytes(b"plain")
-        return plain
+        # A real package: the decrypted plaintext is validated against the
+        # job's family before it reaches any converter (C-11).
+        return make_ooxml(Path(temp_dir) / "decrypted.xlsx", "excel")
 
     def fake_convert(_server, src, out, **kwargs):
         seen["convert_kwargs"] = kwargs
@@ -321,9 +322,7 @@ def test_a_decrypt_failure_reprompts_instead_of_failing(tmp_path, monkeypatch):
     def fake_decrypt(path, password, temp_dir):
         if password != "right":
             raise office_decrypt.DecryptPasswordError("wrong password")
-        plain = Path(temp_dir) / "decrypted.xlsx"
-        plain.write_bytes(b"plain")
-        return plain
+        return make_ooxml(Path(temp_dir) / "decrypted.xlsx", "excel")
 
     monkeypatch.setattr(ops_office, "decrypt_to_temp", fake_decrypt)
     monkeypatch.setattr(ops_office.ort, "convert_to_pdf",

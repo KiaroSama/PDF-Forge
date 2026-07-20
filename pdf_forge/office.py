@@ -195,10 +195,17 @@ def _validate_plain_ooxml(path: Path, family: str) -> tuple:
     return True, ""
 
 
-def validate_office_file(path: Path) -> tuple:
+def validate_office_file(path: Path,
+                        expected_family: Optional[str] = None) -> tuple:
     """Confirm a file's real container matches its extension.
 
     Returns ``(ok, reason)``; ``reason`` is empty when ``ok`` is True.
+
+    ``expected_family`` states the family the caller planned for. Pass it
+    whenever the filename is not trustworthy evidence - notably for a
+    package that has just been decrypted, where every encrypted container
+    looked alike beforehand and only the (renameable) extension suggested a
+    family. Without it the extension decides, as before.
 
     An OOXML extension is accepted in exactly two shapes:
       * a plain ZIP package whose content types and parts match the family, or
@@ -223,6 +230,13 @@ def validate_office_file(path: Path) -> tuple:
         return False, "file is empty"
 
     family = OFFICE_FAMILIES[ext]
+    if expected_family is not None and family != expected_family:
+        return False, (
+            f"extension {ext!r} is a {family} file but a "
+            f"{expected_family} file was expected"
+        )
+    if expected_family is not None:
+        family = expected_family
 
     if ext in _OOXML_EXTS:
         if zipfile.is_zipfile(str(path)):
@@ -297,7 +311,7 @@ def normalize_csv_for_import(path: Path, dialect: "CsvDialect", out_path: Path) 
     and Unicode are preserved by the csv module. The *source is only read* -
     never modified - and the copy lives in a temporary location.
     """
-    encoding = _python_encoding(dialect.encoding)
+    encoding = _python_encoding(dialect.encoding, dialect.had_bom)
     with open(path, "r", encoding=encoding, newline="") as source, \
             open(out_path, "w", encoding="utf-8", newline="") as target:
         reader = csv.reader(source, delimiter=dialect.delimiter)
@@ -307,7 +321,13 @@ def normalize_csv_for_import(path: Path, dialect: "CsvDialect", out_path: Path) 
     return out_path
 
 
-def _python_encoding(label: str) -> str:
+def _python_encoding(label: str, had_bom: bool = False) -> str:
+    if label == "UTF-8" and had_bom:
+        # A BOM is an encoding marker, never cell data. Plain "utf-8" reads it
+        # back as U+FEFF glued to the front of the first field, which also hides
+        # that field's opening quote from csv.reader.
+        return "utf-8-sig"
+    # "utf-16" consumes its own BOM already.
     return {"UTF-8": "utf-8", "windows-1252": "cp1252",
             "UTF-16": "utf-16"}.get(label, "utf-8")
 
@@ -349,6 +369,7 @@ class CsvDialect:
     has_header: bool
     confidence: str = "high"          # "high" | "low"
     notes: List[str] = field(default_factory=list)
+    had_bom: bool = False             # so normalization can strip it, not read it
 
     @property
     def delimiter_label(self) -> str:
@@ -378,9 +399,15 @@ def _decode_csv_sample(raw: bytes, complete: bool):
         raw = raw[len(codecs.BOM_UTF8):]
         had_bom = True
     elif raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
-        # UTF-16 is decoded whole; the BOM selects the byte order.
+        # The BOM selects the byte order. Decode incrementally for the same
+        # reason as UTF-8 below: a sample boundary can fall inside a code unit
+        # or between the two halves of a surrogate pair, and a one-shot decode
+        # rejected that - demoting a perfectly valid UTF-16 file all the way to
+        # windows-1252 mojibake.
         try:
-            return raw.decode("utf-16"), "UTF-16", True
+            text = codecs.getincrementaldecoder("utf-16")(errors="strict").decode(
+                raw, complete)
+            return text, "UTF-16", True
         except UnicodeDecodeError:
             pass
 
@@ -449,6 +476,7 @@ def detect_csv_dialect(path: Path, sample_bytes: int = 65536) -> CsvDialect:
         has_header=has_header,
         confidence=confidence,
         notes=notes,
+        had_bom=had_bom,
     )
 
 

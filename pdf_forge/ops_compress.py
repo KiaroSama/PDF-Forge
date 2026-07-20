@@ -224,6 +224,9 @@ def operation_compress_pdf() -> None:
     queue_task(
         f"Compress {source.name} ({label}) -> {out_path.name}",
         _run,
+        # Identity of every source this task was configured against; the
+        # queue re-verifies it just before running (C-06).
+        sources=[capture_file_source(source)],
     )
 
 
@@ -513,4 +516,7 @@ def operation_compress_pdf_batch() -> None:
     queue_task(
         f"Compress batch: {len(pdfs)} file(s) in {folder.name} ({label})",
         _run,
+        # Identity of every source this task was configured against; the
+        # queue re-verifies it just before running (C-06).
+        sources=[capture_file_source(p) for p in pdfs],
     )
