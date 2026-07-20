@@ -207,6 +207,11 @@ def test_wedged_conversion_times_out_and_is_abandoned(monkeypatch):
     class FakeServer:
         port = 1
 
+        # convert_to_pdf asks whether the server is still running so a
+        # dead one costs nothing; a double must answer honestly too.
+        def is_alive(self):
+            return True
+
     fake = types.ModuleType("unoserver.client")
 
     class UnoClient:
@@ -237,6 +242,11 @@ def test_convert_worker_thread_is_daemon(monkeypatch):
 
     class FakeServer:
         port = 1
+
+        # convert_to_pdf asks whether the server is still running so a
+        # dead one costs nothing; a double must answer honestly too.
+        def is_alive(self):
+            return True
 
     created = {}
     real_thread = threading.Thread

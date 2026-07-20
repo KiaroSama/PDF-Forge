@@ -365,6 +365,11 @@ def test_bridge_loss_without_password_falls_back_to_the_cli(tmp_path, monkeypatc
         port = 1
         soffice = Path("soffice.exe")
 
+        # convert_to_pdf asks whether the server is still running so a
+        # dead one costs nothing; a double must answer honestly too.
+        def is_alive(self):
+            return True
+
     def exploding_client(**_kw):
         raise RuntimeError("Binary URP bridge already disposed")
 
@@ -404,6 +409,11 @@ def test_bridge_loss_with_a_password_does_not_fall_back(tmp_path, monkeypatch):
     class FakeServer:
         port = 1
         soffice = Path("soffice.exe")
+
+        # convert_to_pdf asks whether the server is still running so a
+        # dead one costs nothing; a double must answer honestly too.
+        def is_alive(self):
+            return True
 
     class FakeUnoClient:
         def __init__(self, **_kw):

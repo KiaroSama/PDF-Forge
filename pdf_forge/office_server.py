@@ -75,6 +75,10 @@ class ConversionServer:
         except (OSError, TypeError):
             return ""
 
+    def is_alive(self) -> bool:
+        """Whether the unoserver process this handle owns is still running."""
+        return self.process.poll() is None
+
     def stop(self) -> None:
         _terminate(self.process)
         # Close our end of the log before the profile (which holds it) is removed.
@@ -398,19 +402,54 @@ def convert_to_pdf(
         except BaseException as exc:  # noqa: BLE001 - reported via `outcome`
             outcome["error"] = exc
 
-    worker = threading.Thread(
-        target=_call, name=f"pdfforge-convert-{Path(in_path).name}", daemon=True
-    )
-    worker.start()
-    worker.join(timeout)
-    if worker.is_alive():
+    # A server whose process has exited cannot answer, but the XMLRPC client
+    # still spends ~50 seconds retrying the closed port before giving up - paid
+    # again on every file in a batch. Check first and report the loss straight
+    # away; the caller either restarts the runtime or takes the CLI fallback.
+    if not server.is_alive():
+        logger.info(
+            "The conversion server is no longer running; not attempting the "
+            "in-process path for '%s'.", Path(in_path).name,
+        )
+        outcome["error"] = OfficeRuntimeError(BRIDGE_LOST_SENTINEL)
+        worker = None
+    else:
+        worker = threading.Thread(
+            target=_call, name=f"pdfforge-convert-{Path(in_path).name}",
+            daemon=True,
+        )
+        worker.start()
+        # Wait in short slices and watch the process, rather than blocking for
+        # the whole timeout. When LibreOffice dies mid-export the XMLRPC client
+        # keeps retrying the now-closed port for ~50 seconds before raising -
+        # time spent learning something the exit code already told us. Noticing
+        # the exit ends the wait immediately and lets the caller fall back.
+        deadline = time.monotonic() + timeout
+        while worker.is_alive() and time.monotonic() < deadline:
+            worker.join(0.25)
+            if not worker.is_alive():
+                break
+            if not server.is_alive():
+                logger.info(
+                    "LibreOffice exited while converting '%s'; abandoning the "
+                    "in-process attempt.", Path(in_path).name,
+                )
+                outcome["error"] = OfficeRuntimeError(BRIDGE_LOST_SENTINEL)
+                worker = None
+                break
+    if worker is not None and worker.is_alive():
         logger.error("Conversion of '%s' timed out after %ss.", in_path, timeout)
         # Abandon the thread; the caller replaces the runtime, which kills the
         # LibreOffice process the call is blocked on.
         raise OfficeRuntimeError(BRIDGE_LOST_SENTINEL)
     error = outcome.get("error")
     if error is not None:
-        classified = _classify_convert_error(error)
+        classified = (
+            BRIDGE_LOST_SENTINEL
+            if isinstance(error, OfficeRuntimeError)
+            and str(error) == BRIDGE_LOST_SENTINEL
+            else _classify_convert_error(error)
+        )
         # A lost bridge with no password involved is recoverable: the same
         # document converts through the command line with the same runtime.
         if classified == BRIDGE_LOST_SENTINEL and password is None:
@@ -423,8 +462,11 @@ def convert_to_pdf(
                                         timeout=timeout)
                 return
             except OfficeRuntimeError as cli_exc:
+                # Report the bridge loss, not the rescue attempt's own failure:
+                # the caller's recovery keys on "the runtime is gone, replace
+                # it", and swapping in the fallback's error would hide that.
                 logger.error("CLI fallback also failed: %s", cli_exc)
-                raise
+                raise OfficeRuntimeError(BRIDGE_LOST_SENTINEL) from cli_exc
         # Never include the password in the message.
         raise OfficeRuntimeError(classified) from error
 
@@ -456,7 +498,27 @@ def warm_up(server: "ConversionServer") -> "ConversionServer":
             probe = scratch / "warmup.txt"
             probe.write_text("warmup\n", encoding="utf-8")
             convert_to_pdf(server, probe, scratch / "warmup.pdf", timeout=120)
-            logger.info("Conversion runtime warmed up.")
+            # Success is not proof the server survived. The cold-start crash
+            # this function exists to absorb kills the process, and the CLI
+            # fallback inside convert_to_pdf then completes the job - so no
+            # exception arrives here and a DEAD server used to be returned.
+            # Every later conversion then spent ~50s discovering the corpse
+            # before falling back again, which is where the whole runtime cost
+            # of a conversion batch came from.
+            if server.is_alive():
+                logger.info("Conversion runtime warmed up.")
+            else:
+                # The warm-up conversion succeeded, but through the CLI fallback
+                # after LibreOffice exited. Restarting is not worth it: on a
+                # runtime where the export always kills the server, a fresh one
+                # dies the same way and costs another ~50s of startup for
+                # nothing. Returning the dead handle is now cheap and honest -
+                # convert_to_pdf sees is_alive() == False and goes straight to
+                # the command-line path instead of waiting out a closed port.
+                logger.info(
+                    "LibreOffice exited during warm-up; conversions will use "
+                    "the command-line path."
+                )
             return server
         except OfficeRuntimeError as exc:
             if not is_bridge_lost(exc) or attempt == 1:
