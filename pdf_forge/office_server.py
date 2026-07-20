@@ -80,6 +80,11 @@ class ConversionServer:
         return self.process.poll() is None
 
     def stop(self) -> None:
+        # If the unoserver parent has already exited - a lost bridge or a
+        # cold-start crash, both routine here - then taskkill /T has no tree
+        # left to walk and its soffice.bin child is orphaned. Decide that
+        # before terminating, because afterwards the two cases look identical.
+        orphaned = self.process.poll() is not None
         _terminate(self.process)
         # Close our end of the log before the profile (which holds it) is removed.
         try:
@@ -87,8 +92,68 @@ class ConversionServer:
                 self.log_handle.close()
         except Exception:  # noqa: BLE001 - teardown must never raise
             pass
-        shutil.rmtree(self.profile_dir, ignore_errors=True)
+        if orphaned:
+            _kill_profile_owners(self.profile_dir)
+        _remove_profile(self.profile_dir)
 
+
+
+def _kill_profile_owners(profile_dir: Path) -> None:
+    """Kill LibreOffice processes still using *our* profile, and only ours.
+
+    ``_terminate`` takes down the whole process tree, but only while the
+    unoserver parent is alive to define it. Once that parent has exited, its
+    soffice.bin child is orphaned: nothing reaps it, it recreates the
+    user-installation directory moments after ``stop()`` deleted it, and it sits
+    on hundreds of megabytes. Measured: two survivors after one suite run, and a
+    later server refusing to start.
+
+    Matching on the profile path is what makes this safe. That directory is a
+    fresh ``mkdtemp`` owned by this process, so a LibreOffice the user has open
+    cannot match it - the promise of "task-owned processes, nothing else" holds.
+    """
+    if os.name != "nt":
+        # POSIX orphans are not addressed here; the measured failure and the
+        # runtime this ships against are Windows.
+        return
+    script = (
+        "Get-CimInstance Win32_Process -Filter "
+        "\"Name='soffice.bin' or Name='soffice.exe'\" | "
+        "Where-Object { $_.CommandLine -like $env:PDFFORGE_PROFILE_GLOB } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+        "-ErrorAction SilentlyContinue }"
+    )
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, timeout=30,
+            # Through the environment, so a path containing backslashes,
+            # spaces or quotes cannot be reinterpreted as PowerShell syntax.
+            env=dict(os.environ, PDFFORGE_PROFILE_GLOB=f"*{profile_dir}*"),
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _remove_profile(path: Path, attempts: int = 12, delay: float = 0.25) -> None:
+    """Remove a conversion profile, tolerating a child that is still exiting.
+
+    Terminating the unoserver process does not instantly reap the soffice.bin
+    it started, and on Windows that grandchild keeps handles open inside the
+    profile for a moment afterwards. A single ``rmtree(ignore_errors=True)``
+    then silently gives up and leaves the whole directory behind - the E2E
+    leak gate caught exactly one such profile per run, and the docstring
+    claiming profiles are "removed on teardown" was simply not true.
+
+    Retrying briefly is enough; if it still cannot be removed the failure is
+    logged rather than swallowed, because teardown must not raise.
+    """
+    for _ in range(attempts):
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            return
+        time.sleep(delay)
+    logger.warning("Could not remove the conversion profile '%s'.", path)
 
 
 def _profile_argument(profile_dir: Path) -> str:
@@ -275,7 +340,16 @@ def start_conversion_server(
     # safety it enforces, disabling link/index updates is what keeps Writer
     # exports from crashing the UNO bridge in this runtime (measured).
     if os.environ.get("PDF_FORGE_HARDEN_PROFILE") != "0":
-        _harden_profile(profile_dir)
+        # Hardening writes into the profile and may fail (read-only or full
+        # temp). Every later failure path below removes the directory; this one
+        # has to as well, or a refused start silently leaves a profile behind.
+        try:
+            _harden_profile(profile_dir)
+        except OSError as exc:
+            shutil.rmtree(profile_dir, ignore_errors=True)
+            raise OfficeRuntimeError(
+                f"The conversion profile could not be hardened ({exc})."
+            ) from exc
 
     env = dict(os.environ)
     # Let LibreOffice's bundled Python import the venv-installed unoserver.

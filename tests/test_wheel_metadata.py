@@ -27,6 +27,7 @@ leftovers.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
@@ -105,17 +106,40 @@ def built_wheel(tmp_path_factory) -> dict:
     source = _export_tracked_tree(workspace / "src")
     wheelhouse = workspace / "wheelhouse"
 
-    # --no-build-isolation: pyproject declares no [build-system], so pip would
-    # otherwise provision a fresh setuptools into an overlay environment, which
-    # needs the network. The venv already has setuptools and wheel, and using
-    # them keeps this gate runnable offline. --no-deps because the runtime
-    # requirements are irrelevant to the metadata under test.
-    build = subprocess.run(
-        [sys.executable, "-m", "pip", "wheel", str(source),
-         "--no-deps", "--no-build-isolation", "--wheel-dir", str(wheelhouse)],
-        capture_output=True, text=True, cwd=str(workspace), timeout=600,
-    )
-    assert build.returncode == 0, build.stdout + build.stderr
+    # pyproject declares no [build-system], so pip falls back to setuptools and
+    # can get it two ways. Neither works everywhere, so both are tried:
+    #
+    #   --no-build-isolation  builds with the setuptools already here, so it
+    #                         works offline. Not always possible: Python 3.12
+    #                         dropped setuptools from the bundled environment,
+    #                         and a runner can have setuptools too old to build
+    #                         a wheel by itself ("invalid command 'bdist_wheel'").
+    #                         Both failures showed up on CI.
+    #   isolated (default)    pip provisions its own backend - works on any
+    #                         interpreter, but needs the network.
+    #
+    # Tried in that order rather than predicted, because "can setuptools build a
+    # wheel here" is not answerable by an import check: the first CI attempt
+    # guessed from `find_spec` and was wrong on Windows. A failed first attempt
+    # costs seconds; guessing wrong costs a red build.
+    #
+    # --no-deps throughout: runtime requirements are irrelevant to metadata.
+    base = [sys.executable, "-m", "pip", "wheel", str(source),
+            "--no-deps", "--wheel-dir", str(wheelhouse)]
+    attempts = []
+    if importlib.util.find_spec("setuptools") is not None:
+        attempts.append(("no build isolation", base + ["--no-build-isolation"]))
+    attempts.append(("isolated build", base))
+
+    failures = []
+    for label, command in attempts:
+        build = subprocess.run(command, capture_output=True, text=True,
+                               cwd=str(workspace), timeout=600)
+        if build.returncode == 0:
+            break
+        failures.append(f"--- {label} ---\n{build.stdout}{build.stderr}")
+    else:
+        pytest.fail("no wheel build strategy worked:\n" + "\n".join(failures))
 
     wheels = sorted(wheelhouse.glob("*.whl"))
     assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"

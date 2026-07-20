@@ -35,8 +35,10 @@ def server():
     errors in every later test.
     """
     srv = app.office_runtime.start_conversion_server()
-    srv = app.office_runtime.warm_up(srv)
     try:
+        # warm_up must be inside the try: if it raises, the server started
+        # above would never be stopped and its profile would leak.
+        srv = app.office_runtime.warm_up(srv)
         yield srv
     finally:
         srv.stop()
@@ -333,12 +335,22 @@ def test_a_real_macro_never_runs_on_the_cli_fallback(tmp_path, server, monkeypat
         return real_cli(soffice, in_path, out_path, timeout=timeout)
 
     monkeypatch.setattr(office_server, "convert_via_soffice_cli", counting_cli)
-    monkeypatch.setattr(
-        office_server, "_call",
-        lambda *_a, **_k: (_ for _ in ()).throw(
-            RuntimeError("Binary URP bridge already disposed")),
-        raising=False,
-    )
+    # Kill the server so convert_to_pdf's liveness check reports a lost bridge
+    # and takes the fallback (no password, so the recovery path is allowed).
+    #
+    # This used to monkeypatch office_server._call, which did nothing at all:
+    # _call is a closure inside convert_to_pdf, not a module attribute, so
+    # setattr(..., raising=False) merely created an attribute nobody reads. The
+    # test passed only when LibreOffice happened to lose the bridge by itself,
+    # and reported "the CLI fallback was exercised" on runs where it had not
+    # been forced at all.
+    # Take the whole tree down, not just the Python parent: killing only the
+    # parent orphans the soffice.bin it started, and that survivor recreates
+    # its user-installation directory *after* stop() removed it - which the
+    # E2E "no profile may survive" gate then reports as a leak. A genuine
+    # bridge loss takes LibreOffice with it, so this matches reality too.
+    office_server._terminate(server.process)
+    assert not server.is_alive(), "the server must be down to force the retry"
     try:
         office_server.convert_to_pdf(server, src, out)
     except app.office_runtime.OfficeRuntimeError as exc:

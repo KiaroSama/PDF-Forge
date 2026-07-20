@@ -45,16 +45,15 @@ e2e_only = pytest.mark.skipif(
     reason="requires PDF_FORGE_E2E=1 and a provisioned LibreOffice runtime",
 )
 
-#: Measured on this runtime (LibreOffice 25.8.7.3): the hardened profile does
-#: NOT stop a linked graphic being fetched at load time. See the module report
-#: and ``test_positive_control_the_fixture_really_fetches``.
-PRODUCTION_GAP = (
-    "PRODUCTION GAP F-04: _harden_profile suppresses macros and Writer/Calc "
-    "link *updating*, but a linked graphic (docx r:link with TargetMode="
-    "External, or ODF draw:image xlink:href) is still fetched over HTTP while "
-    "the document loads. Measured 1 request on both hardened paths. Remove "
-    "this xfail marker once the profile blocks it."
-)
+# History, because it explains why these tests exist in this shape: on
+# LibreOffice 25.8.7.3 the hardened profile suppressed macros and Writer/Calc
+# link *updating*, yet a linked graphic (docx r:link with TargetMode=External,
+# or ODF draw:image xlink:href) was still fetched over HTTP while the document
+# loaded - 1 request on both hardened paths, the same count as an unhardened
+# profile. BlockUntrustedRefererLinks closed it. These tests are the standing
+# proof, and they only mean anything while the positive control below still
+# fires: if the fixture ever stops being able to fetch, a zero count proves
+# nothing at all.
 
 # A 1x1 transparent PNG - a real image so LibreOffice accepts the response.
 _PNG = base64.b64decode(
@@ -228,8 +227,11 @@ def convert_with_bare_profile(soffice: Path, src: Path, out_dir: Path) -> bool:
 def server():
     """A task-owned, warmed conversion server, stopped on every path."""
     srv = app.office_runtime.start_conversion_server()
-    srv = app.office_runtime.warm_up(srv)
     try:
+        # Inside the try: warm_up can raise, and a server started but never
+        # stopped leaves its profile directory behind. The E2E job fails on
+        # exactly that, which is how this was found.
+        srv = app.office_runtime.warm_up(srv)
         yield srv
     finally:
         srv.stop()
