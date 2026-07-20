@@ -6,6 +6,10 @@
 -r requirements.txt
 
 pytest==9.0.3
+# Runs the real-conversion end-to-end tests in parallel. Each test owns a
+# LibreOffice server on a random port with an isolated profile, so they do
+# not contend; serially the suite took ~30 minutes, in parallel ~3.
+pytest-xdist==3.8.0
 pytest-cov==7.1.0
 
 # Test-only: an independent PDF reader used to cross-verify PyMuPDF output

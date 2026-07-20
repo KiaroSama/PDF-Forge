@@ -79,7 +79,11 @@ jobs:
       - name: Real conversion end-to-end tests
         env:
           PDF_FORGE_E2E: '1'
-        run: python -m pytest tests/test_office_e2e.py -v
+        # One worker per test: each owns its own LibreOffice server on a
+        # random localhost port with an isolated profile, so they cannot
+        # contend. Serially this suite took ~30 minutes; the wall time is
+        # now the slowest single test rather than the sum of all of them.
+        run: python -m pytest tests/test_office_e2e.py -v -n auto
 
       # C-18 gate 15: the full provisioning lifecycle, not just one setup. A
       # clean-then-reinstall proves removal really removes and that a second

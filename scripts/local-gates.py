@@ -111,7 +111,7 @@ GATES: List[Gate] = [
           "print('LibreOffice',s['libreoffice_version'],'ready',s['ready']);"
           "raise SystemExit(0 if s['ready'] else 1)"]),
     Gate("Real conversion end-to-end tests", "office-e2e.yml",
-         [PYTHON, "-m", "pytest", "tests/test_office_e2e.py", "-q"],
+         [PYTHON, "-m", "pytest", "tests/test_office_e2e.py", "-q", "-n", "auto"],
          slow=True, env={"PDF_FORGE_E2E": "1"}),
 ]
 
