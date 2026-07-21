@@ -814,36 +814,61 @@ def operation_convert_folder() -> None:
     _configure_and_queue(files, mode="folder")
 
 
-def _resolve_backend():
-    """Pick the conversion backend, offering to install LibreOffice only if needed.
+def _resolve_backend(families=()):
+    """Ensure a backend exists for the batch's families, installing LibreOffice
+    only if needed. Returns a truthy ``BackendChoice`` when at least one family
+    can convert, falsy when nothing can.
 
-    Two steps, in this order:
-
-    1. If Microsoft Office is installed, use it and say so. It is the native
-       renderer for these formats and needs no download at all.
-    2. Otherwise offer the project-local LibreOffice. It is *not* a startup
-       prerequisite: nothing is downloaded until the user actually converts
-       something and agrees here.
-
-    Returns a ``BackendChoice`` (falsy when no backend is available).
+    Decided against the ACTUAL families, not "is any Office installed": a
+    Word-only Office does not cover an Excel file, so choosing Office globally
+    would silently skip the spreadsheet and never offer LibreOffice, which does
+    convert it. The per-family routing is done later by ``plan_batch``; this
+    only guarantees every family has some backend and triggers the one install
+    prompt when the uncovered families need LibreOffice.
     """
-    choice = cb.detect_backend()
-    if choice.kind == cb.MSOFFICE:
-        print_success(
-            f"Using the Microsoft Office already installed on this PC "
-            f"({choice.detail}). No download or extra disk space is needed."
-        )
-        logger.info("Convert backend: Microsoft Office (%s).", choice.detail)
-        return choice
-    if choice.kind == cb.LIBREOFFICE:
-        logger.info("Convert backend: project-local LibreOffice %s.", choice.detail)
-        return choice
+    office = cb.msoffice_backend()
+    libre = cb.libreoffice_backend()
+    families = list(families)
+    # Families no currently-available backend can convert.
+    uncovered = [f for f in families
+                 if not office.handles(f) and not libre.handles(f)]
 
+    if not uncovered:
+        if office and all(office.handles(f) for f in families):
+            print_success(
+                f"Using the Microsoft Office already installed on this PC "
+                f"({office.detail}). No download or extra disk space is needed."
+            )
+            logger.info("Convert backend: Microsoft Office (%s) covers all "
+                        "families.", office.detail)
+            return office
+        if office and libre:
+            print_success(
+                f"Using Microsoft Office ({office.detail}) for the formats it "
+                f"handles and the project-local LibreOffice {libre.detail} for "
+                "the rest."
+            )
+        else:
+            print_success(
+                f"Using the project-local LibreOffice {libre.detail}."
+            )
+        logger.info("Convert backend: office=%s libreoffice=%s.",
+                    bool(office), libre.detail if libre else None)
+        return office if office else libre
+
+    # Some families need LibreOffice and it is not ready: offer to install it.
     size = cb.runtime_download_size_mb()
-    print_warning(
-        "Microsoft Office was not found on this PC, so PDF Forge needs its own "
-        "converter for this tool."
-    )
+    if office:
+        labels = ", ".join(sorted({_family_label(f) for f in uncovered}))
+        print_warning(
+            f"Microsoft Office ({office.detail}) is installed but cannot convert "
+            f"{labels}; PDF Forge needs its own converter for those."
+        )
+    else:
+        print_warning(
+            "Microsoft Office was not found on this PC, so PDF Forge needs its "
+            "own converter for this tool."
+        )
     print_note(
         "It installs a trimmed, CLI-only LibreOffice into this project folder "
         f"only{f' (about {size} MB to download)' if size else ''}: no system "
@@ -853,8 +878,16 @@ def _resolve_backend():
         "other tool in PDF Forge works without it."
     )
     if not ask_yes_no("Install the converter now?", default_yes=True):
-        print_warning("Nothing was installed; returning to menu.")
         logger.info("User declined the LibreOffice install.")
+        if office:
+            # Office still handles some families; convert those and skip the
+            # rest (reported per family at run time) rather than aborting all.
+            print_warning(
+                "Nothing was installed; the formats Microsoft Office cannot "
+                "convert will be skipped."
+            )
+            return office
+        print_warning("Nothing was installed; returning to menu.")
         return cb.BackendChoice("none")
 
     try:
@@ -875,10 +908,10 @@ def _resolve_backend():
 
 
 def _configure_and_queue(files, mode: str) -> None:
-    backend = _resolve_backend()
-    if not backend:
-        return
-
+    # Build jobs first so the backend decision knows the actual families - a
+    # Word-only Office must still trigger the LibreOffice offer for a spreadsheet
+    # in the batch. It also means we never prompt to install anything when there
+    # is nothing convertible to begin with.
     plan = _build_jobs(files)
     if plan.skipped:
         # Report exactly why each file was rejected, before anything is queued.
@@ -891,6 +924,11 @@ def _configure_and_queue(files, mode: str) -> None:
             "No convertible files remained; nothing was queued and LibreOffice "
             "was not started. Returning to menu."
         )
+        return
+
+    families = sorted({job["family"] for job in jobs})
+    backend = _resolve_backend(families)
+    if not backend:
         return
 
     print_heading("\nSummary")

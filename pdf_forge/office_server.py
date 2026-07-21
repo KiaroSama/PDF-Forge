@@ -323,6 +323,12 @@ def start_conversion_server(
 
     port = random_localhost_port()
     uno_port = random_localhost_port()
+    # unoserver needs two *distinct* ports; ephemeral allocation can hand back
+    # the same number twice. (The bind-then-close TOCTOU against another process
+    # remains a documented ceiling: unoserver takes port numbers, not inherited
+    # sockets, and fails cleanly at startup if one is already taken.)
+    while uno_port == port:
+        uno_port = random_localhost_port()
     profile_dir = Path(tempfile.mkdtemp(prefix="pdfforge_loprofile_"))
     # Always hardened unless explicitly disabled for debugging. Beyond the
     # safety it enforces, disabling link/index updates is what keeps Writer
@@ -652,23 +658,58 @@ def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
         f"-env:UserInstallation={profile.resolve().as_uri()}",
         "--convert-to", "pdf", "--outdir", str(outdir), str(in_path),
     ]
+    # Popen + a log file, not subprocess.run(capture_output=True): soffice
+    # launches a separate soffice.bin child, and subprocess.run's timeout kills
+    # only the launcher, orphaning that child (holding the profile open) exactly
+    # as the server path did before it was reaped. A pipe can also fill and hang
+    # the child (PF-014), so the child's output goes to a file in the profile.
+    log_path = profile / "cli.log"
+    proc = None
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                timeout=timeout, creationflags=creationflags)
+        log_handle = open(log_path, "wb")
+    except OSError as exc:
+        shutil.rmtree(profile, ignore_errors=True)
+        shutil.rmtree(outdir, ignore_errors=True)
+        raise OfficeRuntimeError(f"Could not open the CLI log: {exc}") from exc
+    try:
+        proc = subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT,
+                                creationflags=creationflags)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            # Take the whole tree down - the launcher AND the soffice.bin child
+            # that carries this profile on its command line - then remove the
+            # profile only after nothing owns it.
+            _terminate(proc)
+            _kill_profile_owners(profile)
+            raise OfficeRuntimeError(
+                f"LibreOffice timed out converting this document after {timeout}s."
+            ) from exc
         produced = list(outdir.glob("*.pdf"))
         if not produced:
-            detail = (result.stderr or result.stdout or "").strip()[:300]
+            try:
+                detail = log_path.read_text("utf-8", "replace").strip()[:300]
+            except OSError:
+                detail = ""
             raise OfficeRuntimeError(
                 "LibreOffice produced no PDF for this document"
                 + (f": {detail}" if detail else ".")
             )
         shutil.move(str(produced[0]), str(out_path))
-    except subprocess.TimeoutExpired as exc:
-        raise OfficeRuntimeError(
-            f"LibreOffice timed out converting this document after {timeout}s."
-        ) from exc
     finally:
-        shutil.rmtree(profile, ignore_errors=True)
+        try:
+            log_handle.close()
+        except Exception:  # noqa: BLE001 - teardown must not raise
+            pass
+        # A launcher still alive here means an error path that did not already
+        # reap it; take it and its profile-owning child down. The timeout path
+        # already reaped, so on success/normal-error this is a no-op and no
+        # per-conversion PowerShell cost is paid. _remove_profile retries, which
+        # absorbs a child that is a few milliseconds from exiting on its own.
+        if proc is not None and proc.poll() is None:
+            _terminate(proc)
+            _kill_profile_owners(profile)
+        _remove_profile(profile)
         shutil.rmtree(outdir, ignore_errors=True)
 
 

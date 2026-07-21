@@ -499,19 +499,26 @@ def _convert_powerpoint(app, src: Path, out: Path, secret: str) -> None:
         presentation = app.Presentations.Open(
             guarded, ReadOnly=True, Untitled=True, WithWindow=False,
         )
-        # Stop linked pictures and OLE objects updating during export (C-12).
+        # Switch linked shapes to manual updating. Shapes live on each *Slide*,
+        # not on the Presentation - Presentation has no Shapes collection, so
+        # the previous `presentation.Shapes` raised AttributeError on real COM
+        # and aborted every .pptx conversion (the unit test faked a Shapes
+        # attribute and hid it).
         #
-        # NOT Presentation.UpdateLinks(): despite the name that is an
-        # argument-less *action* that refreshes every linked object, i.e. it
-        # performs the outbound fetch this is meant to prevent. Word and Excel
-        # take real suppression parameters (UpdateLinksAtOpen=False,
-        # UpdateLinks=0); PowerPoint's Open has no equivalent, so each linked
-        # shape is switched to manual updating instead.
-        for shape in presentation.Shapes:
-            try:
-                shape.LinkFormat.AutoUpdate = _PP_UPDATE_MANUAL
-            except Exception:  # noqa: BLE001 - unlinked shapes have no LinkFormat
-                continue
+        # Honest scope: this is best-effort and does NOT make PowerPoint safe
+        # against a linked-image web-bug. Unlike Word (UpdateLinksAtOpen=False)
+        # and Excel (UpdateLinks=0), PowerPoint's Open takes no link-suppression
+        # parameter, and a linked picture is fetched while the file is *opened*,
+        # before this loop can run - setting AutoUpdate afterwards cannot undo
+        # that. Guaranteed external-link suppression is available only on the
+        # LibreOffice backend (BlockUntrustedRefererLinks); see
+        # tests/test_office_links.py.
+        for slide in presentation.Slides:
+            for shape in slide.Shapes:
+                try:
+                    shape.LinkFormat.AutoUpdate = _PP_UPDATE_MANUAL
+                except Exception:  # noqa: BLE001 - unlinked shapes have no LinkFormat
+                    continue
         presentation.SaveAs(str(out), 32)  # ppSaveAsPDF
     finally:
         _close_quietly(presentation, "presentation", lambda: presentation.Close())

@@ -10,7 +10,7 @@ from .pdf_io import *  # noqa: F401,F403
 from .render import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
-from .batch_protection import _batch_protection_preflight
+from .batch_protection import _batch_protection_preflight, runner_file_policy
 
 __all__ = ['operation_images_all_pages', 'operation_images_selected_pages', '_render_pngs_and_report', 'operation_images_batch_folder', 'operation_pdf_to_image_pdf', 'operation_image_pdf_batch_folder', '_warn_if_dpi_exceeds_source', '_prompt_extract_quality', 'operation_extract_images']
 
@@ -474,13 +474,18 @@ def operation_image_pdf_batch_folder() -> None:
             try:
                 out_path = unique_file_path(default_image_pdf_output(src))
                 # Per-file policy decided by the batch preflight, never prompted
-                # here. A file the preflight could not read (needs an open
-                # password) has no stored policy; the runner authenticated it
-                # just now, so preserve its own policy faithfully.
+                # here. A file the preflight could not inspect has no stored
+                # policy: a reproducible one is preserved, but a restricted one
+                # is skipped rather than written unprotected without consent.
                 decided = decisions.get(normalized_path_key(src))
                 detected = detect_protection(pdf)
-                file_policy = (decided if isinstance(decided, ProtectionPolicy)
-                               else detected)
+                file_policy, skip_reason = runner_file_policy(decided, detected)
+                if skip_reason is not None:
+                    print_warning(f"  Skipped {src.name}: {skip_reason}.")
+                    logger.info("Batch image-only PDF: skipped '%s' - %s",
+                                src, skip_reason)
+                    failed += 1
+                    continue
                 was_restricted = detected.kind == "restricted"
                 result = render_pdf_to_image_pdf(
                     pdf, page_count, out_path, dpi,

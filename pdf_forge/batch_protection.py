@@ -6,7 +6,35 @@ from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 
-__all__ = ['_batch_protection_preflight']
+__all__ = ['_batch_protection_preflight', 'runner_file_policy']
+
+
+def runner_file_policy(decided, detected):
+    """The per-file protection policy at run time, or a skip signal.
+
+    ``decided`` is this file's preflight decision. When it is a real
+    ``ProtectionPolicy`` the batch already obtained consent for it - use it.
+    When it is not (the file could not be inspected up front - it needed a
+    password, or briefly failed to open), fall back to what the runner detects
+    now:
+
+      * a reproducible policy (``none``/``password``) is applied faithfully;
+      * a ``restricted`` policy must NOT be silently written to an unprotected
+        output - consent for dropping owner restrictions was never obtained -
+        so the file is skipped instead (fail closed, PF-008).
+
+    Returns ``(policy, skip_reason)``; ``skip_reason`` is ``None`` when the
+    runner may write.
+    """
+    if isinstance(decided, ProtectionPolicy):
+        return decided, None
+    if detected.kind == "restricted":
+        return None, (
+            "it carries owner restrictions but could not be inspected before "
+            "the batch, so writing it would drop those restrictions without "
+            "your consent"
+        )
+    return detected, None
 
 
 def _batch_protection_preflight(pdfs):

@@ -257,6 +257,22 @@ def validate_office_file(path: Path,
             return False, "cannot read file: " + str(exc)
         if head != _CFB_MAGIC:
             return False, "not a valid legacy Office file (bad signature)"
+        # The OLE2 magic proves the container, not the family - a renamed .xls
+        # or .ppt has the same 8 bytes as a .doc. Check the family's marker
+        # stream so a renamed legacy file is not sent to the wrong application,
+        # mirroring the OOXML cross-family rejection above.
+        streams = _ole_stream_names(path)
+        if streams is not None:
+            marker = {
+                "word": ("worddocument",),
+                "excel": ("workbook", "book"),
+                "powerpoint": ("powerpoint document",),
+            }.get(family, ())
+            if marker and not any(m in streams for m in marker):
+                return False, (
+                    f"the file is an OLE2 container but not a {family} document "
+                    "(a legacy .doc/.xls/.ppt renamed to another extension?)"
+                )
         return True, ""
 
     # CSV: must be text, not a binary file renamed to .csv.

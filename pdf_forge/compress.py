@@ -47,6 +47,18 @@ def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
         # (PF-006). `protection=None` means "caller made no decision": fall back
         # to preserving what the source carries rather than dropping it.
         policy = protection if protection is not None else detect_protection(doc)
+        # Fail closed: an owner-restricted source with no explicit decision
+        # cannot be reproduced (the owner password is unrecoverable), and
+        # save_kwargs() would return {} - writing it UNPROTECTED without consent
+        # (PF-008). The interactive flows always pass an explicit, consented
+        # policy; only a batch file that could not be inspected up front reaches
+        # here with protection=None, and it must be skipped, not downgraded.
+        if protection is None and policy.kind == "restricted":
+            raise PdfOpenError(
+                "this file carries owner restrictions that cannot be reproduced "
+                "without your consent; compress it individually to choose how to "
+                "handle its protection"
+            )
         protect_kwargs = policy.save_kwargs()
 
         if jpeg_quality is not None:

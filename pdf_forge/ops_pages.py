@@ -10,7 +10,7 @@ from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
-from .batch_protection import _batch_protection_preflight
+from .batch_protection import _batch_protection_preflight, runner_file_policy
 
 __all__ = ['operation_extract_pages', '_extract_single_file', '_extract_multiple_files', 'operation_split_chunks', '_report_created', '_prompt_delete_selection', 'operation_delete_pages_single', 'operation_delete_pages_batch']
 
@@ -680,12 +680,17 @@ def operation_delete_pages_batch() -> None:
         if resolves_to_same_file(out_path, src):
             out_path = unique_file_path(src.parent / f"{src.stem}_pages_deleted.pdf")
         # Per-file policy decided by the batch preflight, never prompted here.
-        # A file the preflight could not read (needs an open password) has no
-        # stored policy; the runner authenticated it just now, so preserve its
-        # own policy faithfully instead of dropping it.
+        # A file the preflight could not inspect has no stored policy: a
+        # reproducible one is preserved, but a restricted one is skipped rather
+        # than written unprotected without consent (PF-008).
         decided = decisions.get(normalized_path_key(src))
         detected = detect_protection(reader)
-        file_policy = decided if isinstance(decided, ProtectionPolicy) else detected
+        file_policy, skip_reason = runner_file_policy(decided, detected)
+        if skip_reason is not None:
+            print_warning(f"  Skipped {src.name}: {skip_reason}.")
+            logger.info("Delete-pages batch: skipped '%s' - %s", src, skip_reason)
+            result["skipped"] = 1
+            return result
         was_restricted = detected.kind == "restricted"
         try:
             written_result = write_pages_to_pdf(reader, kept, out_path,

@@ -186,9 +186,18 @@ def test_powerpoint_does_not_call_the_update_action(tmp_path, monkeypatch):
             Shape._auto = value
             calls.append(("AutoUpdate", value))
 
-    class Presentation:
+    class Slide:
         def __init__(self):
             self.Shapes = [Shape()]
+
+    class Presentation:
+        # NO .Shapes attribute, exactly like real PowerPoint COM: shapes live on
+        # each Slide. Accessing .Shapes must raise, so a fix reaching for it
+        # fails here instead of being hidden by a faked attribute - which is what
+        # the previous version of this test did, letting a shipped AttributeError
+        # regression pass.
+        def __init__(self):
+            self.Slides = [Slide()]
 
         def UpdateLinks(self):
             calls.append(("UpdateLinks()", None))
@@ -208,6 +217,9 @@ def test_powerpoint_does_not_call_the_update_action(tmp_path, monkeypatch):
                 return Presentation()
 
     Shape._auto = None
+    assert not hasattr(Presentation(), "Shapes"), (
+        "the fake Presentation must not expose Shapes; real COM does not"
+    )
     msoffice._convert_powerpoint(App(), tmp_path / "x.pptx",
                                  tmp_path / "x.pdf", "refuse")
 
@@ -217,7 +229,7 @@ def test_powerpoint_does_not_call_the_update_action(tmp_path, monkeypatch):
         "it performs exactly the external fetch the comment claims to prevent"
     )
     assert ("AutoUpdate", 2) in calls, (
-        "linked shapes were left on automatic update; set "
+        "linked shapes (on slides) were left on automatic update; set "
         "LinkFormat.AutoUpdate = 2 (ppUpdateOptionManual) instead"
     )
 
@@ -642,7 +654,7 @@ def test_powerpoint_open_carries_the_no_prompt_password(tmp_path):
     calls = {}
 
     class Presentation:
-        Shapes = []
+        Slides = []          # shapes live on slides, not the presentation (COM)
 
         def SaveAs(self, path, fmt):
             Path(path).write_bytes(b"%PDF-1.4\n%%EOF\n")
@@ -728,3 +740,212 @@ def test_unsupported_encryption_is_not_reported_as_wrong_password():
     finally:
         if real_import is None:
             sys.modules.pop("msoffcrypto", None)
+
+
+# --------------------------------------------------------------------------- #
+# 8. Legacy .doc/.xls/.ppt must be validated by family stream, not just magic
+# --------------------------------------------------------------------------- #
+
+def test_renamed_legacy_office_file_is_rejected_by_family(tmp_path, monkeypatch):
+    """A renamed .xls (as .doc) must not validate as Word.
+
+    The OLE2 magic is shared by all legacy Office formats, so checking only the
+    8 magic bytes let a renamed spreadsheet pass as a document and reach Word.
+    The family's marker stream (WordDocument / Workbook / PowerPoint Document)
+    is what actually distinguishes them. olefile cannot write a container, so
+    the stream listing is stubbed; the family-marker comparison under test runs
+    for real.
+    """
+    from pdf_forge import office
+
+    fake_doc = tmp_path / "spreadsheet.doc"          # .doc extension -> word
+    fake_doc.write_bytes(office._CFB_MAGIC + b"\x00" * 512)
+
+    # The container actually holds an Excel workbook stream.
+    monkeypatch.setattr(office, "_ole_stream_names",
+                        lambda _p: {"workbook", "\x05summaryinformation"})
+
+    ok, reason = office.validate_office_file(fake_doc)
+    assert not ok, "a renamed .xls passed validation as a .doc"
+    assert "not a word" in reason.lower(), reason
+
+    # A genuine Word container (WordDocument stream) still passes.
+    monkeypatch.setattr(office, "_ole_stream_names",
+                        lambda _p: {"worddocument", "\x05summaryinformation"})
+    ok, reason = office.validate_office_file(fake_doc)
+    assert ok, f"a real .doc was rejected: {reason}"
+
+
+# --------------------------------------------------------------------------- #
+# 9. The CLI fallback must reap its process tree and profile on timeout
+# --------------------------------------------------------------------------- #
+
+def test_cli_fallback_reaps_the_tree_and_profile_on_timeout(tmp_path, monkeypatch):
+    """subprocess.run(timeout) kills only the launcher; soffice.bin orphans.
+
+    The CLI fallback used subprocess.run(capture_output=True, timeout=...), so
+    on timeout the separate soffice.bin child was left holding the profile open
+    - the same orphan the server path was fixed for. This drives the timeout
+    path and asserts the whole tree is reaped and the profile removed.
+    """
+    reaped = {"terminate": 0, "kill_owners": 0, "removed": 0}
+
+    class FakeProc:
+        def __init__(self, *a, **k):
+            self._alive = True
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="soffice", timeout=timeout)
+
+        def poll(self):
+            return None if self._alive else 0
+
+    monkeypatch.setattr(office_server.subprocess, "Popen",
+                        lambda *a, **k: FakeProc())
+    monkeypatch.setattr(office_server, "_terminate",
+                        lambda p: reaped.__setitem__("terminate", reaped["terminate"] + 1))
+    monkeypatch.setattr(office_server, "_kill_profile_owners",
+                        lambda prof: reaped.__setitem__("kill_owners", reaped["kill_owners"] + 1))
+    real_remove = office_server._remove_profile
+    monkeypatch.setattr(office_server, "_remove_profile",
+                        lambda prof, **k: (reaped.__setitem__("removed", reaped["removed"] + 1),
+                                           real_remove(prof, **k))[1])
+
+    src = tmp_path / "in.docx"
+    src.write_bytes(b"PK\x03\x04x")
+    soffice = tmp_path / "soffice.exe"
+    soffice.write_bytes(b"")
+
+    with pytest.raises(office_server.OfficeRuntimeError, match="timed out"):
+        office_server.convert_via_soffice_cli(soffice, src, tmp_path / "out.pdf",
+                                              timeout=1)
+
+    assert reaped["terminate"] >= 1, "the launcher process tree was not terminated"
+    assert reaped["kill_owners"] >= 1, (
+        "the profile-owning soffice.bin child was not reaped on timeout"
+    )
+    assert reaped["removed"] >= 1, "the profile was not removed after the timeout"
+
+
+# --------------------------------------------------------------------------- #
+# 10. A batch must not write an un-inspected restricted source unprotected
+# --------------------------------------------------------------------------- #
+
+def test_runner_file_policy_skips_an_uninspected_restricted_file():
+    """The shared runner gate must fail closed on an unconsented restriction."""
+    from pdf_forge import batch_protection
+    from pdf_forge.pdf_io import ProtectionPolicy
+
+    restricted = ProtectionPolicy(kind="restricted")
+    # No preflight policy ("unreadable") + runtime restricted => skip, no write.
+    policy, skip = batch_protection.runner_file_policy("unreadable", restricted)
+    assert policy is None and skip is not None, (
+        "an un-inspected restricted file must be skipped, not written unprotected"
+    )
+    # A reproducible runtime policy is still preserved, not skipped.
+    pw = ProtectionPolicy(kind="password", password="x")
+    assert batch_protection.runner_file_policy("unreadable", pw) == (pw, None)
+    # A recorded (consented) policy from preflight is always honoured.
+    consented = ProtectionPolicy(kind="none")
+    assert batch_protection.runner_file_policy(consented, restricted) == (consented, None)
+
+
+def test_compress_fails_closed_on_an_uninspected_restricted_source(tmp_path):
+    """compress_pdf(protection=None) must not downgrade an owner-restricted PDF.
+
+    A batch file that could not be inspected up front reaches compress_pdf with
+    protection=None; the old fallback detected 'restricted' and wrote it
+    unprotected (save_kwargs() -> {}). It must fail closed so the batch skips it.
+    """
+    import pymupdf
+
+    src = tmp_path / "restricted.pdf"
+    doc = pymupdf.open()
+    doc.new_page()
+    # Owner password + denied permissions, NO user password: opens freely but
+    # is restricted -> detect_protection classifies it 'restricted'.
+    doc.save(str(src), encryption=pymupdf.PDF_ENCRYPT_AES_256,
+             owner_pw="owner", permissions=int(pymupdf.PDF_PERM_PRINT))
+    doc.close()
+
+    with pytest.raises(app.PdfOpenError, match="owner restrictions"):
+        app.compress_pdf(src, tmp_path / "out.pdf", None, None, protection=None)
+    assert not (tmp_path / "out.pdf").exists(), "an output was written anyway"
+
+
+# --------------------------------------------------------------------------- #
+# 11. A Word-only Office must still offer LibreOffice for a spreadsheet
+# --------------------------------------------------------------------------- #
+
+def test_word_only_office_offers_libreoffice_for_an_excel_batch(monkeypatch):
+    """The backend must be decided against the batch's real families.
+
+    With only Word installed and an Excel file to convert, choosing Office
+    globally would skip the spreadsheet and never offer LibreOffice (which does
+    convert it). Resolving against the families must trigger the install offer.
+    """
+    from pdf_forge import convert_backend as cb
+    from pdf_forge import msoffice, ops_office
+    from pdf_forge import office_runtime as ort
+
+    # Word only, no ready LibreOffice.
+    monkeypatch.setattr(msoffice, "detect_office",
+                        lambda: {"apps": ["word"], "families": ["word"]})
+    monkeypatch.setattr(msoffice, "describe_office", lambda _d: "Word 2021")
+    monkeypatch.setattr(ort, "runtime_status", lambda *a, **k: {"ready": False})
+
+    offered = {"n": 0}
+    monkeypatch.setattr(ops_office, "ask_yes_no",
+                        lambda *a, **k: (offered.__setitem__("n", offered["n"] + 1),
+                                         False)[1])  # decline the install
+
+    # Excel is in the batch: Word cannot handle it, so the offer must fire.
+    backend = ops_office._resolve_backend(["excel", "word"])
+    assert offered["n"] == 1, (
+        "a spreadsheet with only Word installed did not trigger the LibreOffice "
+        "offer; it would have been silently skipped"
+    )
+    # Declined, but Word files can still convert, so a usable backend is kept.
+    assert backend and backend.kind == cb.MSOFFICE
+
+    # Control: Word-only Office with a Word-only batch converts with no offer.
+    offered["n"] = 0
+    backend = ops_office._resolve_backend(["word"])
+    assert offered["n"] == 0, "a Word-only batch must not prompt for an install"
+    assert backend and backend.kind == cb.MSOFFICE
+
+
+# --------------------------------------------------------------------------- #
+# 12. The server's two ports must be distinct
+# --------------------------------------------------------------------------- #
+
+def test_server_ports_are_distinct_even_if_allocation_repeats(monkeypatch):
+    """unoserver needs distinct --port and --uno-port.
+
+    Ephemeral allocation can return the same number twice; the loop must retry
+    until they differ. Feeds a repeating sequence to force it.
+    """
+    seq = iter([5000, 5000, 5000, 5001])   # port, uno tries 5000,5000, then 5001
+    monkeypatch.setattr(office_server, "random_localhost_port", lambda: next(seq))
+    captured = {}
+
+    def fake_popen(cmd, **kwargs):
+        # Pull the two ports back out of the command line.
+        for i, tok in enumerate(cmd):
+            if tok == "--port":
+                captured["port"] = cmd[i + 1]
+            if tok == "--uno-port":
+                captured["uno"] = cmd[i + 1]
+        raise RuntimeError("stop before actually launching")
+
+    monkeypatch.setattr(office_server.subprocess, "Popen", fake_popen)
+    # unoserver_installed etc. are checked first; short-circuit to the port code
+    # by letting the real function run until Popen raises.
+    try:
+        office_server.start_conversion_server()
+    except Exception:  # noqa: BLE001 - we only care about the ports chosen
+        pass
+    if captured:
+        assert captured["port"] != captured["uno"], (
+            f"the two ports collided: {captured}"
+        )

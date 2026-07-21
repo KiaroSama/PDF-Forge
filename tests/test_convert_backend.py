@@ -57,7 +57,7 @@ def test_nothing_is_installed_without_being_asked(monkeypatch, capsys):
     monkeypatch.setattr(ort, "runtime_status", lambda *a, **k: {"ready": False})
     monkeypatch.setattr(ort, "provision_runtime", _must_not_run)
     monkeypatch.setattr("builtins.input", lambda *a: "n")
-    assert not ops_office._resolve_backend()
+    assert not ops_office._resolve_backend(["word"])
 
 
 def test_the_install_prompt_defaults_to_yes(monkeypatch):
@@ -72,7 +72,7 @@ def test_the_install_prompt_defaults_to_yes(monkeypatch):
 
     monkeypatch.setattr(ort, "provision_runtime", fake_provision)
     monkeypatch.setattr("builtins.input", lambda *a: "")
-    ops_office._resolve_backend()
+    ops_office._resolve_backend(["word"])
     assert called["n"] == 1, "an empty answer must accept the default"
 
 
