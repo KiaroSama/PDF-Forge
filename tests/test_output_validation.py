@@ -68,6 +68,57 @@ def test_wrong_pages_with_the_right_count_are_rejected(tmp_path):
     assert "does not match" in str(excinfo.value)
 
 
+# --------------------------------------------------------------------------- #
+# N-07 - page identity must not be length-only. Two textless vector pages whose
+# draw commands are the same byte length collide under a dimensions+text+length
+# fingerprint, so a swapped/wrong page slips past. Hashing the stream bytes
+# (plus rotation) distinguishes them.
+# --------------------------------------------------------------------------- #
+
+def textless_colored_pdf(path: Path, colors) -> Path:
+    """Same-size, textless pages differing only by fill colour - equal-length
+    draw ops, so a length-only fingerprint cannot tell them apart."""
+    doc = pymupdf.open()
+    for c in colors:
+        page = doc.new_page(width=200, height=200)
+        page.draw_rect(pymupdf.Rect(50, 50, 150, 150), color=c, fill=c)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_swapped_textless_pages_are_rejected(tmp_path):
+    src = textless_colored_pdf(tmp_path / "src.pdf", [(1, 0, 0), (0, 1, 0)])
+    out = build_from(src, tmp_path / "out.pdf", [1, 0])   # swapped; asked for [0, 1]
+    doc = app.open_source_pdf(src)
+    try:
+        with pytest.raises(app.PdfOpenError):
+            app.validate_page_selection_output(out, doc, [0, 1])
+    finally:
+        app.close_doc(doc)
+
+
+def test_wrong_textless_page_is_rejected(tmp_path):
+    src = textless_colored_pdf(tmp_path / "src.pdf", [(1, 0, 0), (0, 1, 0)])
+    out = build_from(src, tmp_path / "out.pdf", [1, 1])   # asked for [0, 1]
+    doc = app.open_source_pdf(src)
+    try:
+        with pytest.raises(app.PdfOpenError):
+            app.validate_page_selection_output(out, doc, [0, 1])
+    finally:
+        app.close_doc(doc)
+
+
+def test_correct_textless_selection_still_passes(tmp_path):
+    src = textless_colored_pdf(tmp_path / "src.pdf", [(1, 0, 0), (0, 1, 0)])
+    out = build_from(src, tmp_path / "out.pdf", [0, 1])
+    doc = app.open_source_pdf(src)
+    try:
+        app.validate_page_selection_output(out, doc, [0, 1])   # must not raise
+    finally:
+        app.close_doc(doc)
+
+
 def test_page_order_mismatch_is_rejected(tmp_path):
     src = distinct_pdf(tmp_path / "src.pdf")
     out = build_from(src, tmp_path / "out.pdf", [4, 2, 0])   # reversed

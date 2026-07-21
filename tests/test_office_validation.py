@@ -167,6 +167,56 @@ def _write_minimal_ole(path: Path, streams: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# N-08 - a legacy extension with the OLE2 magic but no readable directory must
+# be rejected, not accepted on the magic alone. Real fixtures, not monkeypatch.
+# --------------------------------------------------------------------------- #
+
+def test_legacy_magic_with_unparseable_body_is_rejected(tmp_path):
+    from pdf_forge import office
+    p = tmp_path / "corrupt.doc"
+    p.write_bytes(office._CFB_MAGIC + b"\x00" * 512)   # magic, no OLE directory
+    ok, reason = office.validate_office_file(p)
+    assert not ok, "a magic-only legacy file must not pass validation"
+    assert "OLE2" in reason
+
+
+def test_genuine_legacy_fixtures_are_accepted(tmp_path):
+    """Positive path: a real OLE2 directory with the family marker still passes."""
+    from pdf_forge import office
+    for ext, streams in ((".doc", {"WordDocument": b"\x00" * 32}),
+                         (".xls", {"Workbook": b"\x00" * 32}),
+                         (".ppt", {"PowerPoint Document": b"\x00" * 32})):
+        p = tmp_path / ("real" + ext)
+        _write_minimal_ole(p, streams)
+        ok, reason = office.validate_office_file(p)
+        assert ok, f"{ext} rejected: {reason}"
+
+
+@pytest.mark.parametrize("streams, ext, fam", [
+    ({"Workbook": b"\x00" * 32}, ".doc", "word"),
+    ({"Workbook": b"\x00" * 32}, ".ppt", "powerpoint"),
+    ({"WordDocument": b"\x00" * 32}, ".xls", "excel"),
+    ({"WordDocument": b"\x00" * 32}, ".ppt", "powerpoint"),
+    ({"PowerPoint Document": b"\x00" * 32}, ".doc", "word"),
+    ({"PowerPoint Document": b"\x00" * 32}, ".xls", "excel"),
+])
+def test_cross_family_legacy_rename_is_rejected(tmp_path, streams, ext, fam):
+    """A real legacy container carrying another family's marker is rejected."""
+    from pdf_forge import office
+    p = tmp_path / ("x" + ext)
+    _write_minimal_ole(p, streams)
+    ok, reason = office.validate_office_file(p)
+    assert not ok and fam in reason.lower()
+
+
+def test_valid_ole_without_a_family_marker_is_rejected(tmp_path):
+    from pdf_forge import office
+    p = tmp_path / "generic.doc"
+    _write_minimal_ole(p, {"RandomStream": b"\x00" * 32})
+    assert not office.validate_office_file(p)[0]
+
+
+# --------------------------------------------------------------------------- #
 # Fixture sanity: our hand-built OLE really is parseable
 # --------------------------------------------------------------------------- #
 

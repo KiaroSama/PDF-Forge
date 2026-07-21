@@ -24,7 +24,7 @@ __all__ = ['_import_pymupdf', 'PdfOpenError', 'PdfPasswordCancelled',
            'write_merged_pdfs_to_pdf', 'resolves_to_same_file',
            'scan_image_dpi_stats', 'has_meaningful_text',
            'permission_bits', 'all_permissions', 'denied_permissions',
-           'promote_atomically']
+           'permissions_match', 'promote_atomically']
 
 
 def _import_pymupdf():
@@ -383,6 +383,18 @@ def denied_permissions(doc) -> list:
             if not (doc.permissions & bit)]
 
 
+def permissions_match(observed: int, expected: int) -> bool:
+    """True when every supported permission bit agrees (bit-by-bit).
+
+    Compares only the eight ``PDF_PERM_*`` bits, never the raw signed permission
+    word: PDF permission integers carry required high bits set to 1, so an
+    int-equality compare would falsely reject a correct file (``doc.permissions``
+    reads negative for a normal restricted PDF).
+    """
+    return all(bool(observed & int(bit)) == bool(expected & int(bit))
+               for bit in permission_bits().values())
+
+
 def detect_protection(doc) -> ProtectionPolicy:
     """Classify an opened source document's protection into a policy.
 
@@ -515,9 +527,15 @@ def write_pages_to_pdf(doc, pages_zero_based: Sequence[int], out_path: Path,
 def _page_fingerprints(doc):
     """A cheap per-page identity used to verify page *order*, not just count.
 
-    Uses the page's media box plus a digest of its extracted text and the
-    content-stream length. Two different pages of a real document almost never
-    collide, and identical blank pages legitimately compare equal.
+    Uses the page's media box, its rotation, a digest of the content-stream
+    *bytes* (not merely their length), and its extracted text. Hashing the
+    length alone collided two visibly different pages whose draw commands were
+    the same byte length - e.g. two textless vector pages, one red and one green
+    - so a swapped/wrong page passed validation (N-07). Hashing the bytes tells
+    them apart; byte-identical blank pages still compare equal. Bytes rather than
+    a rendered pixmap keeps the check deterministic across platforms and pymupdf
+    builds (a raster digest can differ with anti-aliasing/font substitution and
+    would block a correct output).
     """
     import hashlib
 
@@ -529,12 +547,18 @@ def _page_fingerprints(doc):
         except Exception:  # noqa: BLE001 - a broken page must not kill validation
             text = ""
         try:
-            length = sum(len(doc.xref_stream(x) or b"") for x in page.get_contents())
+            stream = b"".join(doc.xref_stream(x) or b""
+                              for x in page.get_contents())
         except Exception:  # noqa: BLE001
-            length = 0
+            stream = b""
         rect = page.rect
-        raw = f"{round(rect.width, 2)}x{round(rect.height, 2)}|{length}|{text}"
-        prints.append(hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest())
+        digest = hashlib.sha256()
+        digest.update(
+            f"{round(rect.width, 2)}x{round(rect.height, 2)}|{page.rotation}|"
+            .encode("utf-8"))
+        digest.update(hashlib.sha256(stream).digest())
+        digest.update(text.encode("utf-8", "replace"))
+        prints.append(digest.hexdigest())
     return prints
 
 

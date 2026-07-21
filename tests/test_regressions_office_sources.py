@@ -71,9 +71,13 @@ def test_ooxml_validation_and_renamed_binaries(tmp_path):
     ok, reason = app.validate_office_file(binary_csv)
     assert not ok and "binary" in reason.lower()
 
+    # The OLE2 magic alone does not make a real .doc: with no readable OLE2
+    # directory the family marker cannot be checked, so it must be rejected
+    # rather than accepted on the 8 signature bytes (N-08).
     legacy = tmp_path / "old.doc"
     legacy.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 32)
-    assert app.validate_office_file(legacy)[0]
+    ok, reason = app.validate_office_file(legacy)
+    assert not ok and "OLE2" in reason
 
     bad_legacy = tmp_path / "bad.doc"
     bad_legacy.write_bytes(b"plain text pretending to be a doc")

@@ -13,6 +13,32 @@ from .pdf_io import *  # noqa: F401,F403
 __all__ = ['unlock_pdf_doc']  # permission helpers live in pdf_io
 
 
+def _verify_fully_unlocked(path: Path) -> None:
+    """Confirm an unlock output needs no password and forbids nothing.
+
+    The unlock contract is "remove the open password AND every restriction". A
+    page-count/openability check cannot see a writer that kept owner
+    restrictions, so this proves both postconditions on the staged file before
+    it is promoted.
+    """
+    pymupdf = _import_pymupdf()
+    check = pymupdf.open(str(path))
+    try:
+        if check.needs_pass:
+            raise PdfOpenError(
+                "Output validation failed: the unlocked PDF still requires a "
+                "password."
+            )
+        still_denied = denied_permissions(check)
+    finally:
+        check.close()
+    if still_denied:
+        raise PdfOpenError(
+            "Output validation failed: the unlocked PDF still forbids "
+            + ", ".join(still_denied) + "."
+        )
+
+
 def unlock_pdf_doc(doc, out_path: Path) -> OutputResult:
     """Save an already-opened (and authenticated) document with no encryption.
 
@@ -42,6 +68,7 @@ def unlock_pdf_doc(doc, out_path: Path) -> OutputResult:
             use_objstms=1,
         )
         _validate_written_pdf(tmp_path, expected_pages=total)
+        _verify_fully_unlocked(tmp_path)
         # Never rebind out_path: the caller must be told the written name.
         written = promote_atomically(tmp_path, out_path)
     except BaseException:  # incl. Ctrl+C: an orphaned temp can hold decrypted bytes

@@ -27,6 +27,80 @@ from helpers import (  # noqa: E402,F401
     zip_ooxml,
 )
 from pypdf import PdfWriter  # noqa: E402,F401
+from pdf_forge.render import _image_content_key  # noqa: E402
+from pdf_forge.watermark import _image_identity   # noqa: E402
+
+
+# --------------------------------------------------------------------------- #
+# N-03 - same RGB base, different soft-mask must stay DISTINCT identities.
+# MuPDF's get_image_info digest folds in the /SMask, so two images that share
+# their RGB pixels but differ only in alpha must never collapse to one identity
+# (which would extract them as one file and let removing one delete the other).
+# This is the persistent proof that the N-03 rejection holds on pymupdf 1.28.0.
+# --------------------------------------------------------------------------- #
+
+def _rgba_half(size=(60, 60), *, horizontal, color=(255, 0, 0)):
+    """Solid-``color`` RGB base; alpha = half opaque. ``horizontal`` splits
+    left/right, otherwise top/bottom - identical RGB, different soft mask."""
+    w, h = size
+    img = Image.new("RGBA", size, (*color, 0))
+    px = img.load()
+    for x in range(w):
+        for y in range(h):
+            opaque = (x < w // 2) if horizontal else (y < h // 2)
+            px[x, y] = (*color, 255 if opaque else 0)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_same_base_different_softmask_are_distinct_identities(tmp_path):
+    left = _rgba_half(horizontal=True)     # left half opaque
+    top = _rgba_half(horizontal=False)     # top half opaque, SAME RGB base
+
+    # Both images on both pages: each appears on 2 pages (watermark-eligible)
+    # and same-content grouping is exercised across pages, not just xrefs.
+    doc = pymupdf.open()
+    for _ in range(2):
+        page = doc.new_page(width=200, height=200)
+        page.insert_image(pymupdf.Rect(10, 10, 70, 70), stream=left)
+        page.insert_image(pymupdf.Rect(90, 10, 150, 70), stream=top)
+    src = tmp_path / "same_rgb_diff_mask.pdf"
+    doc.save(str(src), garbage=4, deflate=True, use_objstms=1)
+    doc.close()
+
+    doc = app.open_source_pdf(src)
+    try:
+        infos = doc[0].get_image_info(hashes=True, xrefs=True)
+        assert len(infos) == 2
+        digests = [it["digest"] for it in infos]
+        assert len(set(digests)) == 2, "MuPDF digest must fold in the soft mask"
+        assert len({_image_content_key(it) for it in infos}) == 2
+        assert len({_image_identity(it) for it in infos}) == 2
+
+        # Extraction: two distinct contents -> two outputs, never deduped to one.
+        assert app.count_embedded_images(doc) == 2
+        created = app.extract_embedded_images(doc, tmp_path / "imgs")
+        assert len(created) == 2, "same RGB / different alpha must extract twice"
+
+        # Watermark: two candidates; removing one must not remove the other.
+        cands, _ = app.scan_watermark_candidates(doc, min_pages=2)
+        assert len(cands) == 2
+        victim, survivor = cands[0].signature, cands[1].signature
+        assert victim != survivor
+        out = tmp_path / "removed_one.pdf"
+        app.remove_watermark_images(doc, [victim], out)
+    finally:
+        app.close_doc(doc)
+
+    check = app.open_source_pdf(out)
+    try:
+        after = {c.signature
+                 for c in app.scan_watermark_candidates(check, min_pages=2)[0]}
+        assert victim not in after, "the selected watermark must be gone"
+        assert survivor in after, "the other image must survive removal"
+    finally:
+        app.close_doc(check)
 
 
 # --------------------------------------------------------------------------- #

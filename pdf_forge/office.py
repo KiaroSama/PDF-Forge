@@ -262,17 +262,22 @@ def validate_office_file(path: Path,
         # stream so a renamed legacy file is not sent to the wrong application,
         # mirroring the OOXML cross-family rejection above.
         streams = _ole_stream_names(path)
-        if streams is not None:
-            marker = {
-                "word": ("worddocument",),
-                "excel": ("workbook", "book"),
-                "powerpoint": ("powerpoint document",),
-            }.get(family, ())
-            if marker and not any(m in streams for m in marker):
-                return False, (
-                    f"the file is an OLE2 container but not a {family} document "
-                    "(a legacy .doc/.xls/.ppt renamed to another extension?)"
-                )
+        if streams is None:
+            # Correct magic but no readable OLE2 directory (truncated, corrupt,
+            # or 8 magic bytes plus junk): the family marker cannot be checked,
+            # so this cannot be proven a genuine legacy document. Fail rather
+            # than fall through to accept on the signature alone (N-08).
+            return False, "not a valid legacy Office file (unreadable OLE2 directory)"
+        marker = {
+            "word": ("worddocument",),
+            "excel": ("workbook", "book"),
+            "powerpoint": ("powerpoint document",),
+        }.get(family, ())
+        if marker and not any(m in streams for m in marker):
+            return False, (
+                f"the file is an OLE2 container but not a {family} document "
+                "(a legacy .doc/.xls/.ppt renamed to another extension?)"
+            )
         return True, ""
 
     # CSV: must be text, not a binary file renamed to .csv.

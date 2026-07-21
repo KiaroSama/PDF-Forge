@@ -132,6 +132,27 @@ def _trim_runtime(base: Path) -> int:
     return freed
 
 
+def _version_compatible(reported: str, expected: str) -> bool:
+    """True when ``reported`` is the pinned version or a build refinement of it.
+
+    Numeric components are compared, and the pinned components must be an exact
+    prefix of the reported ones: pin ``25.8.7`` accepts ``25.8.7`` and the
+    4-component binary build ``25.8.7.3``, but rejects ``25.8.8``, ``25.9.x``,
+    ``25.2.x`` and ``26.x``. The old ``startswith(expected.split('.')[0])``
+    compared only the major number, so any same-major drift passed.
+    """
+    def parts(v: str):
+        out = []
+        for tok in str(v).split("."):
+            if not tok.strip().isdigit():
+                break
+            out.append(int(tok))
+        return out
+
+    exp = parts(expected)
+    return bool(exp) and parts(reported)[:len(exp)] == exp
+
+
 def verify_runtime_directory(base: Path, expect_version: str = None) -> "RuntimeCandidate":
     """Validate a runtime directory as a complete, self-consistent tuple.
 
@@ -163,7 +184,7 @@ def verify_runtime_directory(base: Path, expect_version: str = None) -> "Runtime
             source="runtime-dir", soffice=soffice, python=python,
             reason="the binary did not report a version",
         )
-    if expect_version and not version.startswith(expect_version.split(".")[0]):
+    if expect_version and not _version_compatible(version, expect_version):
         return RuntimeCandidate(
             source="runtime-dir", soffice=soffice, python=python, version=version,
             reason=f"version mismatch: expected {expect_version}, found {version}",
@@ -192,7 +213,9 @@ def provision_runtime(
     target = libreoffice_dir()
 
     if not force:
-        existing = verify_runtime_directory(target)
+        # Pass the pin: a complete-but-wrong-version runtime (e.g. left over from
+        # an earlier pin) must be rebuilt, not accepted as already-present.
+        existing = verify_runtime_directory(target, expect_version=meta.get("version"))
         if existing.complete:
             logger.info("Verified LibreOffice runtime already present at %s.", target)
             return {"status": "already-present", "soffice": str(existing.soffice),

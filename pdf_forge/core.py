@@ -568,11 +568,16 @@ def normalized_path_key(path) -> str:
 
 
 def _file_reserved_or_exists(path: Path) -> bool:
-    return path.exists() or normalized_path_key(path) in _reserved_files
+    # A path already reserved as a directory output is unavailable to a file
+    # output too: a file and a directory can never coexist at one path, so a
+    # single reservation of either kind blocks the other (N-05).
+    key = normalized_path_key(path)
+    return path.exists() or key in _reserved_files or key in _reserved_dirs
 
 
 def _dir_reserved_or_exists(path: Path) -> bool:
-    return path.exists() or normalized_path_key(path) in _reserved_dirs
+    key = normalized_path_key(path)
+    return path.exists() or key in _reserved_dirs or key in _reserved_files
 
 
 def reserve_unique_file(path: Path) -> Path:

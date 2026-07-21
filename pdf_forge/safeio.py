@@ -333,6 +333,14 @@ class FileLock:
                 f"cannot create the lock directory '{self.path.parent}': {exc}"
             ) from exc
 
+        if os.name != "nt":
+            # POSIX uses an advisory flock (see _acquire_posix): the kernel frees
+            # it when the holder dies, so there is no stale lock to break and
+            # none of the read-confirm-unlink race this Windows scheme guards
+            # against (N-04). Windows keeps the O_EXCL scheme below, which its
+            # mandatory share-delete already makes safe.
+            return self._acquire_posix()
+
         deadline = time.monotonic() + self.timeout
         while True:
             try:
@@ -404,17 +412,91 @@ class FileLock:
         except OSError:
             return False
 
+    def _acquire_posix(self) -> "FileLock":
+        """Acquire on POSIX via ``fcntl.flock`` on a persistent lock file.
+
+        flock is owned by the open file description, and the kernel releases it
+        the instant the holder dies - so a lock left by a killed process is free
+        with no stale file to read, confirm and unlink. That removes the POSIX
+        unlink race entirely (N-04) rather than narrowing it with another
+        re-read. The owner JSON is written for diagnostics only; the flock is the
+        real mutex. The lock file is intentionally persistent (never unlinked on
+        release), because unlinking a flocked file lets a third process create a
+        fresh one under the same name and hold it concurrently.
+        """
+        # sys.platform (not os.name) is the form a type checker narrows on, so
+        # the POSIX-only fcntl attributes below are not analysed when linting on
+        # Windows - where fcntl.flock genuinely does not exist. Unreachable at
+        # runtime: _acquire_posix is only called when os.name != "nt".
+        if sys.platform == "win32":  # pragma: no cover - POSIX-only path
+            raise LockUnavailable("the flock lock path is POSIX-only")
+        import fcntl
+
+        deadline = time.monotonic() + self.timeout
+        try:
+            fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError as exc:
+            raise LockUnavailable(
+                f"cannot create the lock file '{self.path}': {exc}") from exc
+        self._fd = fd
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                # Held by another *live* process; retry until the deadline.
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    self._fd = None
+                    raise LockTimeout(
+                        f"another process held '{self.path.name}' for the whole "
+                        f"{self.timeout:g}s wait") from None
+                time.sleep(0.02)
+                continue
+            try:
+                os.ftruncate(fd, 0)
+                os.write(fd, json.dumps({
+                    "pid": os.getpid(),
+                    "host": _HOST,
+                    "start": _process_start(os.getpid()),
+                }).encode("utf-8"))
+            except OSError:
+                pass  # diagnostics only; the flock is already held
+            return self
+
+    def _release_posix(self) -> None:
+        """Release the POSIX flock and close; leave the persistent lock file."""
+        if sys.platform == "win32":  # pragma: no cover - POSIX-only path
+            return
+        import fcntl
+
+        fd = self._fd
+        if fd is None:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        self._fd = None
+
     def __exit__(self, *exc) -> None:
-        if self._fd is not None:
-            try:
-                os.close(self._fd)
-            except OSError:
-                pass
-            try:
-                self.path.unlink()
-            except OSError:
-                pass
-            self._fd = None
+        if self._fd is None:
+            return
+        if os.name != "nt":
+            self._release_posix()
+            return
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+        self._fd = None
 
 
 # --------------------------------------------------------------------------- #

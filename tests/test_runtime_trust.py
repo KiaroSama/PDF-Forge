@@ -154,6 +154,71 @@ def test_real_runtime_reports_a_probed_version():
 
 
 # --------------------------------------------------------------------------- #
+# N-10 - the pinned project-local runtime version is enforced by numeric
+# components, not just the major number, and the already-present path checks it.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("reported, complete", [
+    ("25.8.7", True),      # exactly the pin
+    ("25.8.7.3", True),    # a binary build refinement of the pin
+    ("25.8.8", False),     # patch drift
+    ("25.9.1", False),     # minor drift
+    ("25.2.1", False),     # same major, different minor
+    ("26.2.1", False),     # major drift
+    ("25.8", False),       # a prefix of the pin is not the pin
+])
+def test_pinned_version_is_matched_by_components(tmp_path, monkeypatch, reported, complete):
+    """expect_version must compare numeric components, not just the major.
+
+    The old ``version.startswith(expect_version.split('.')[0])`` accepted any
+    same-major build (25.9.x, 25.2.x), so a runtime that drifted from the pin
+    was treated as the pinned one.
+    """
+    runtime = fake_runtime(tmp_path / "rt")
+    monkeypatch.setattr(ort_discovery, "probe_soffice_version",
+                        lambda *_a, **_k: reported)
+    result = ort.verify_runtime_directory(runtime, expect_version="25.8.7")
+    assert result.complete is complete, (
+        f"{reported} vs pin 25.8.7: expected complete={complete}, "
+        f"got {result.complete} ({result.reason})"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="Windows-only administrative-extraction path")
+def test_already_present_path_enforces_the_pin(tmp_path, monkeypatch):
+    """A complete runtime of the WRONG version must not report already-present.
+
+    The early acceptance path called ``verify_runtime_directory(target)`` with
+    no ``expect_version``, so a stale-version runtime bypassed the pin entirely
+    and was never rebuilt after a pin bump.
+    """
+    stale = fake_runtime(tmp_path / "rt")   # a complete tuple...
+    monkeypatch.setattr(ort_discovery, "libreoffice_dir", lambda: stale)
+    monkeypatch.setattr(ort_discovery, "runtime_root", lambda: tmp_path)
+    monkeypatch.setattr(ort_discovery, "load_runtime_meta", lambda: {
+        "version": "25.8.7",
+        "windows": {"url": "https://example.invalid/x.msi", "sha256": "00"},
+    })
+    # ...whose binary reports a version that does not match the pin.
+    monkeypatch.setattr(ort_discovery, "probe_soffice_version",
+                        lambda *_a, **_k: "25.2.1")
+    calls = {"download": 0}
+
+    def fake_download(_url, dest):
+        calls["download"] += 1
+        Path(dest).write_bytes(b"msi")
+
+    # Checksum verification skipped so the test stops at extraction; a rebuild is
+    # proven by the download being attempted rather than "already-present".
+    with pytest.raises(ort.OfficeRuntimeError):
+        ort.provision_runtime(download=fake_download, verify_checksum=False)
+    assert calls["download"] == 1, (
+        "a stale-version runtime must trigger a rebuild, not already-present"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # PF-015 - a partial extraction is never accepted as installed
 # --------------------------------------------------------------------------- #
 
