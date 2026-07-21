@@ -28,17 +28,25 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def server():
-    """A task-owned, warmed conversion server per test.
+    """A task-owned conversion server per test.
 
-    Deliberately function-scoped: a disposed UNO bridge is sticky, so a shared
-    server turns one real failure into a cascade of misleading BRIDGE_LOST
+    Function-scoped on purpose: a disposed UNO bridge is sticky, so a shared
+    server would turn one real failure into a cascade of misleading BRIDGE_LOST
     errors in every later test.
+
+    NOT warmed. warm_up() exists to make the first *production* conversion fast
+    when the server survives its cold-start export, but on this pinned
+    LibreOffice build the server reliably dies during that throwaway export
+    (measured: is_alive() is False right after warm_up), so warming here cost
+    ~15-30s per test - roughly half the whole E2E wall time - and returned a
+    dead server anyway, leaving every conversion to the CLI fallback exactly as
+    it would without warming. Dropping it here halved the suite (223s -> 108s at
+    -n 2) with every test still passing, because convert_to_pdf handles the
+    cold-start crash itself. warm_up's own behaviour is covered directly by
+    test_server_liveness.py, so this loses no coverage.
     """
     srv = app.office_runtime.start_conversion_server()
     try:
-        # warm_up must be inside the try: if it raises, the server started
-        # above would never be stopped and its profile would leak.
-        srv = app.office_runtime.warm_up(srv)
         yield srv
     finally:
         srv.stop()
