@@ -54,7 +54,7 @@ jobs:
 
       - name: Cache the project-local LibreOffice runtime
         id: lo-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .tools/libreoffice
           # The pinned version lives in tracked metadata, so the cache key
