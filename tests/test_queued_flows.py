@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pdf_forge as app  # noqa: E402
 import pymupdf  # noqa: E402
-from helpers import rgb_png  # noqa: E402
+from helpers import stamped_pdf  # noqa: E402
 
 windows_only = pytest.mark.skipif(
     os.name != "nt",
@@ -45,27 +45,6 @@ def numbered_pdf(path: Path, pages: int) -> Path:
         page.insert_text((20, 100), f"PAGE{number}")
     doc.save(str(path))
     doc.close()
-    return path
-
-
-def stamped_pdf(path: Path, pages: int = 3, pad: int = 0) -> Path:
-    """A PDF with the same image on every page (a stand-in watermark).
-
-    ``pad`` appends that many bytes of trailing PDF comment. Everything after
-    ``%%EOF`` is ignored by any reader, so the file stays completely valid while
-    giving a test a region it can rewrite in place without corrupting it.
-    """
-    doc = pymupdf.open()
-    data = rgb_png(size=(120, 90), color=(200, 30, 30))
-    for _ in range(pages):
-        page = doc.new_page(width=400, height=500)
-        page.insert_image(pymupdf.Rect(50, 50, 170, 140), stream=data)
-        page.insert_text((60, 300), "body text")
-    doc.save(str(path))
-    doc.close()
-    if pad:
-        with open(str(path), "ab") as handle:
-            handle.write(b"\n%" + b"A" * pad + b"\n")
     return path
 
 

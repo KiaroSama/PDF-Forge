@@ -318,13 +318,18 @@ def test_state_is_not_stored_in_the_repository_checkout(monkeypatch):
         "machine-local state must not live in the checkout"
 
 
-def test_unwritable_state_dir_warns_and_does_not_crash(tmp_path, monkeypatch):
+def test_unwritable_state_dir_warns_and_does_not_crash(tmp_path, monkeypatch,
+                                                       caplog):
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory", encoding="utf-8")  # mkdir will fail
     monkeypatch.setenv("PDF_FORGE_STATE_DIR", str(blocked / "state"))
-    warning = app.state_store_warning()
-    assert warning and "tracking is unavailable" in warning
-    # Recording must not raise, and discovery must still work.
-    app.record_generated_output(make_pdf(tmp_path / "x.pdf", 1))
+    # Reset the once-per-process warning latch so this run actually emits it.
+    monkeypatch.setattr(app.safeio, "_warning_shown", False, raising=False)
+    # Recording must not raise, must warn the user, and discovery must work.
+    with caplog.at_level("WARNING"):
+        app.record_generated_output(make_pdf(tmp_path / "x.pdf", 1))
+    assert any("tracking is unavailable" in r.message for r in caplog.records), (
+        "the user was not warned that output tracking is degraded"
+    )
     assert isinstance(app.load_generated_outputs(), set)
     assert app.discover_pdfs_in_folder(tmp_path)

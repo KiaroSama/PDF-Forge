@@ -18,23 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pdf_forge as app  # noqa: E402
 import pymupdf  # noqa: E402
 from PIL import Image  # noqa: E402
-from helpers import rgb_png  # noqa: E402
-
-
-def stamped_pdf(path: Path, pages: int = 3, text: str = "") -> Path:
-    """A PDF with the same image stamped on every page, plus optional text."""
-    doc = pymupdf.open()
-    buf = io.BytesIO()
-    Image.new("RGB", (120, 90), (200, 30, 30)).save(buf, "PNG")
-    data = buf.getvalue()
-    for _ in range(pages):
-        page = doc.new_page(width=400, height=500)
-        page.insert_image(pymupdf.Rect(50, 50, 170, 140), stream=data)
-        if text:
-            page.insert_text((60, 300), text, fontsize=12)
-    doc.save(str(path))
-    doc.close()
-    return path
+from helpers import rgb_png, stamped_pdf  # noqa: E402
 
 
 def remove_top_candidate(src: Path, out: Path):
@@ -82,7 +66,7 @@ def page_text(pdf: Path) -> str:
 ])
 def test_text_that_looks_like_a_paint_call_survives(tmp_path, payload):
     """Removal must not react to bytes that merely *look* like a paint call."""
-    src = stamped_pdf(tmp_path / "src.pdf", pages=2, text=payload)
+    src = stamped_pdf(tmp_path / "src.pdf", pages=2, text=payload, fontsize=12)
     out = tmp_path / "out.pdf"
     remove_top_candidate(src, out)
 
@@ -98,7 +82,7 @@ def test_text_that_looks_like_a_paint_call_survives(tmp_path, payload):
 def test_output_is_readable_by_an_independent_parser(tmp_path):
     from pypdf import PdfReader
 
-    src = stamped_pdf(tmp_path / "src.pdf", pages=3, text="body text")
+    src = stamped_pdf(tmp_path / "src.pdf", pages=3, text="body text", fontsize=12)
     out = tmp_path / "out.pdf"
     remove_top_candidate(src, out)
 
@@ -108,7 +92,8 @@ def test_output_is_readable_by_an_independent_parser(tmp_path):
 
 
 def test_text_and_page_count_are_preserved(tmp_path):
-    src = stamped_pdf(tmp_path / "src.pdf", pages=3, text="Confidential body")
+    src = stamped_pdf(tmp_path / "src.pdf", pages=3, text="Confidential body",
+                      fontsize=12)
     out = tmp_path / "out.pdf"
     result = remove_top_candidate(src, out)
     assert result.count == 3
@@ -207,7 +192,7 @@ def test_non_target_image_on_the_same_page_survives(tmp_path):
 
 def test_placeholder_is_not_offered_as_a_new_candidate(tmp_path):
     """After removal a re-scan must not present the transparent placeholder."""
-    src = stamped_pdf(tmp_path / "src.pdf", pages=3)
+    src = stamped_pdf(tmp_path / "src.pdf", pages=3, text="")
     out = tmp_path / "out.pdf"
     remove_top_candidate(src, out)
 
@@ -226,7 +211,7 @@ def test_removing_an_unknown_signature_writes_nothing(tmp_path):
     existed and was readable - which is exactly the defect: a run that removed
     nothing handed the user a file at their chosen path (C-14).
     """
-    src = stamped_pdf(tmp_path / "src.pdf", pages=2, text="keep me")
+    src = stamped_pdf(tmp_path / "src.pdf", pages=2, text="keep me", fontsize=12)
     out = tmp_path / "out.pdf"
     doc = app.open_source_pdf(src)
     try:

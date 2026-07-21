@@ -21,7 +21,7 @@ from pypdf import PdfWriter  # noqa: E402
 
 __all__ = [
     "make_pdf", "make_encrypted", "file_hash", "rgb_png", "rgba_png",
-    "repeated_image_pdf", "label_of", "zip_ooxml",
+    "repeated_image_pdf", "stamped_pdf", "label_of", "zip_ooxml",
 ]
 
 
@@ -77,6 +77,36 @@ def repeated_image_pdf(path: Path, pages: int, size=(120, 80),
     """A PDF carrying the same image on every page (a stand-in watermark)."""
     images = [Image.new("RGB", size, color) for _ in range(pages)]
     images[0].save(path, "PDF", save_all=True, append_images=images[1:])
+    return path
+
+
+def stamped_pdf(path: Path, pages: int = 3, text: str = "body text",
+                pad: int = 0, fontsize=None, **save_kwargs) -> Path:
+    """A 400x500-page PDF with the same 120x90 red image stamped on every page.
+
+    ``text`` is written on each page when non-empty; ``fontsize`` overrides the
+    default face size only when given (so callers that never set it keep the
+    library default byte-for-byte). ``pad`` appends that many bytes of trailing
+    PDF comment after ``%%EOF`` - ignored by every reader, so the file stays
+    valid while giving a test a region it can rewrite in place. ``save_kwargs``
+    flow straight to ``Document.save`` for encrypted / owner-restricted
+    fixtures.
+    """
+    doc = pymupdf.open()
+    data = rgb_png(size=(120, 90), color=(200, 30, 30))
+    for _ in range(pages):
+        page = doc.new_page(width=400, height=500)
+        page.insert_image(pymupdf.Rect(50, 50, 170, 140), stream=data)
+        if text:
+            if fontsize is None:
+                page.insert_text((60, 300), text)
+            else:
+                page.insert_text((60, 300), text, fontsize=fontsize)
+    doc.save(str(path), **save_kwargs)
+    doc.close()
+    if pad:
+        with open(str(path), "ab") as handle:
+            handle.write(b"\n%" + b"A" * pad + b"\n")
     return path
 
 

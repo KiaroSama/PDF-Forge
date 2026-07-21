@@ -78,22 +78,8 @@ def render_pages_to_pngs(doc, pages_zero_based: Sequence[int], out_dir: Path,
         pixmap = doc[page_index].get_pixmap(dpi=dpi)
         final_path = unique_file_path(out_dir / build_page_image_name(page_number))
 
-        tmp_fd, tmp_name = tempfile.mkstemp(
-            suffix=".tmp", prefix=".pdfforge_", dir=str(out_dir)
-        )
-        os.close(tmp_fd)
-        tmp_path = Path(tmp_name)
         try:
-            pixmap.save(str(tmp_path), output="png")
-            _validate_image_file(tmp_path)
-            final_path = promote_atomically(tmp_path, final_path, record=False)
-        except BaseException:  # incl. Ctrl+C: leaked temp survives otherwise
-            try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-            except OSError:
-                logger.warning("Failed to remove temporary file: %s", tmp_path)
-            raise
+            final_path = _atomic_pixmap_save(pixmap, out_dir, final_path, "png")
         finally:
             del pixmap
 
@@ -441,22 +427,9 @@ def extract_embedded_images(doc, out_dir: Path, jpeg_quality=None,
             final_path = unique_file_path(
                 out_dir / f"p{page_number}_{per_page}.jpg"
             )
-            tmp_fd, tmp_name = tempfile.mkstemp(
-                suffix=".tmp", prefix=".pdfforge_", dir=str(out_dir)
-            )
-            os.close(tmp_fd)
-            tmp_path = Path(tmp_name)
             try:
-                pixmap.save(str(tmp_path), output="jpg", jpg_quality=jpeg_quality)
-                _validate_image_file(tmp_path)
-                final_path = promote_atomically(tmp_path, final_path, record=False)
-            except BaseException:  # incl. Ctrl+C: leaked temp survives otherwise
-                try:
-                    if tmp_path.exists():
-                        tmp_path.unlink()
-                except OSError:
-                    logger.warning("Failed to remove temporary file: %s", tmp_path)
-                raise
+                final_path = _atomic_pixmap_save(
+                    pixmap, out_dir, final_path, "jpg", jpg_quality=jpeg_quality)
             finally:
                 del pixmap
 

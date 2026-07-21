@@ -35,7 +35,7 @@ __all__ = [
     'state_dir', 'manifest_path', 'file_identity', 'FileLock',
     'LockError', 'LockTimeout', 'LockUnavailable',
     'load_generated_outputs', 'record_generated_output',
-    'forget_generated_outputs', 'state_store_warning',
+    'forget_generated_outputs',
 ]
 
 
@@ -199,22 +199,6 @@ def state_dir() -> Path:
 
 def manifest_path() -> Path:
     return state_dir() / "generated-outputs.json"
-
-
-def state_store_warning() -> Optional[str]:
-    """A user-visible warning when state cannot be persisted, else ``None``."""
-    try:
-        state_dir().mkdir(parents=True, exist_ok=True)
-        probe = state_dir() / ".write-probe"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink()
-        return None
-    except OSError as exc:
-        return (
-            f"Generated-output tracking is unavailable ({exc.strerror or exc}). "
-            "Folder tools cannot skip files this application created earlier, so "
-            "a repeated folder run may reprocess its own output."
-        )
 
 
 # --------------------------------------------------------------------------- #

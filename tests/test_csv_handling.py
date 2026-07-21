@@ -20,12 +20,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pdf_forge as app  # noqa: E402
+from helpers import file_hash as digest  # noqa: E402
 
 SAMPLE_LIMIT = 65536
-
-
-def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 # --------------------------------------------------------------------------- #

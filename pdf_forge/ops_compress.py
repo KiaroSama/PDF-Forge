@@ -67,45 +67,38 @@ def _prompt_compression_level() -> Optional[Tuple[str, Optional[int], Optional[i
         print_error("Invalid level. Please choose 1-7.")
 
 
+def _prompt_bounded_int(question: str, default: int, lo: int, hi: int,
+                        label: str) -> Optional[int]:
+    """Prompt for an integer in [lo, hi]. None on 0/back; raise on exit/quit."""
+    prompt = question_prompt(question, details=f"{lo}-{hi}", default=str(default))
+    while True:
+        raw = _input(prompt).strip().lower()
+        if raw == "":
+            raw = str(default)
+        if raw == "0":
+            return None
+        if raw in ("exit", "quit"):
+            raise _ExitRequested()
+        try:
+            value = int(raw)
+        except ValueError:
+            print_error(f"Please enter a whole number between {lo} and {hi}.")
+            continue
+        if not lo <= value <= hi:
+            print_error(f"{label} must be between {lo} and {hi}.")
+            continue
+        return value
+
+
 def _prompt_custom_compression() -> Optional[Tuple[int, int]]:
     """Ask for a custom (jpeg_quality, dpi_target). Returns None to go back."""
-    quality_prompt = question_prompt("JPEG quality", details="1-100", default="80")
-    while True:
-        raw = _input(quality_prompt).strip().lower()
-        if raw == "":
-            raw = "80"
-        if raw == "0":
-            return None
-        if raw in ("exit", "quit"):
-            raise _ExitRequested()
-        try:
-            quality = int(raw)
-        except ValueError:
-            print_error("Please enter a whole number between 1 and 100.")
-            continue
-        if not 1 <= quality <= 100:
-            print_error("Quality must be between 1 and 100.")
-            continue
-        break
-
-    dpi_prompt = question_prompt("Target image DPI", details="50-600", default="150")
-    while True:
-        raw = _input(dpi_prompt).strip().lower()
-        if raw == "":
-            raw = "150"
-        if raw == "0":
-            return None
-        if raw in ("exit", "quit"):
-            raise _ExitRequested()
-        try:
-            dpi = int(raw)
-        except ValueError:
-            print_error("Please enter a whole number between 50 and 600.")
-            continue
-        if not 50 <= dpi <= 600:
-            print_error("DPI must be between 50 and 600.")
-            continue
-        return quality, dpi
+    quality = _prompt_bounded_int("JPEG quality", 80, 1, 100, "Quality")
+    if quality is None:
+        return None
+    dpi = _prompt_bounded_int("Target image DPI", 150, 50, 600, "DPI")
+    if dpi is None:
+        return None
+    return quality, dpi
 
 
 def operation_compress_pdf() -> None:

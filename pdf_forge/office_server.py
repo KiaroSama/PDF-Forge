@@ -19,32 +19,11 @@ from pathlib import Path
 from typing import Optional
 
 from .constants import *  # noqa: F401,F403
-from . import office_discovery as _discovery
 from .office_discovery import (
     CONVERT_TIMEOUT_MAX, OfficeRuntimeError, SERVER_START_TIMEOUT,
-    conversion_timeout_for,
+    conversion_timeout_for, find_soffice, find_soffice_python,
+    random_localhost_port, unoserver_installed, venv_site_packages,
 )
-
-# Resolved through the module object rather than bound at import time, so a test
-# that patches ``office_discovery.<name>`` also affects the calls made here.
-def find_soffice():
-    return _discovery.find_soffice()
-
-
-def find_soffice_python():
-    return _discovery.find_soffice_python()
-
-
-def venv_site_packages():
-    return _discovery.venv_site_packages()
-
-
-def unoserver_installed():
-    return _discovery.unoserver_installed()
-
-
-def random_localhost_port():
-    return _discovery.random_localhost_port()
 
 
 # --------------------------------------------------------------------------- #

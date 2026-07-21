@@ -140,12 +140,6 @@ def test_csv_quoted_multiline_field(tmp_path):
     assert dialect.delimiter == ","
 
 
-def test_csv_header_detection(tmp_path):
-    path = tmp_path / "h.csv"
-    path.write_text("name,count\nalpha,1\nbeta,2\n", encoding="utf-8")
-    assert app.detect_csv_dialect(path).has_header is True
-
-
 def test_csv_non_utf8_uses_deterministic_fallback(tmp_path):
     path = tmp_path / "latin.csv"
     path.write_bytes("naive,cafe\n1,2\n".encode("cp1252") + b"\xe9\n")

@@ -7,7 +7,6 @@ conversion server, and the real job pipeline. They are skipped unless
 native-free; the dedicated Windows workflow sets that variable.
 """
 
-import hashlib
 import os
 import sys
 import zipfile
@@ -18,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pdf_forge as app  # noqa: E402
+from helpers import file_hash as digest  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PDF_FORGE_E2E") != "1"
@@ -42,10 +42,6 @@ def server():
         yield srv
     finally:
         srv.stop()
-
-
-def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def make_docx(path: Path, text: str = "Hello PDF Forge") -> Path:

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import csv
 import io
-import itertools
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -366,7 +365,6 @@ class CsvDialect:
 
     encoding: str
     delimiter: str
-    has_header: bool
     confidence: str = "high"          # "high" | "low"
     notes: List[str] = field(default_factory=list)
     had_bom: bool = False             # so normalization can strip it, not read it
@@ -445,7 +443,6 @@ def detect_csv_dialect(path: Path, sample_bytes: int = 65536) -> CsvDialect:
 
     delimiter = ","
     confidence = "high"
-    has_header = False
 
     # csv.Sniffer is treated as ONE signal, not as truth: it happily returns a
     # delimiter that shreds rows into ragged widths. Score every candidate on
@@ -469,15 +466,9 @@ def detect_csv_dialect(path: Path, sample_bytes: int = 65536) -> CsvDialect:
                 "csv.Sniffer suggested " + repr(sniffed) + "; kept the more "
                 "consistent " + repr(delimiter)
             )
-    try:
-        has_header = csv.Sniffer().has_header(text)
-    except (csv.Error, ValueError):
-        has_header = _guess_header(text, delimiter)
-
     return CsvDialect(
         encoding=encoding,
         delimiter=delimiter,
-        has_header=has_header,
         confidence=confidence,
         notes=notes,
         had_bom=had_bom,
@@ -535,31 +526,3 @@ def _score_delimiter(text: str) -> tuple:
     return best[0], best[2]
 
 
-def _guess_header(text: str, delimiter: str) -> bool:
-    """Heuristic: first row is a header when it is all-non-numeric and the
-    second row contains at least one numeric cell."""
-    try:
-        # Only the first two rows matter; do not build the whole list.
-        rows = list(itertools.islice(
-            csv.reader(io.StringIO(text), delimiter=delimiter), 2
-        ))
-    except (csv.Error, ValueError):
-        return False
-    rows = [r for r in rows if r]
-    if len(rows) < 2:
-        return False
-    first, second = rows[0], rows[1]
-
-    def _numeric(cell: str) -> bool:
-        cell = cell.strip().replace(",", "")
-        if not cell:
-            return False
-        try:
-            float(cell)
-            return True
-        except ValueError:
-            return False
-
-    first_numeric = any(_numeric(c) for c in first)
-    second_numeric = any(_numeric(c) for c in second)
-    return (not first_numeric) and second_numeric

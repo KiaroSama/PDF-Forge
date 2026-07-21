@@ -16,237 +16,143 @@ from .ops_office import *  # noqa: F401,F403
 
 __all__ = ['_show_pdf_to_images_menu', 'pdf_to_images_menu', '_show_image_pdf_menu', 'pdf_to_image_pdf_menu', '_show_delete_pages_menu', 'delete_pages_menu', '_show_compress_menu', 'compress_menu', '_show_protect_menu', 'protect_menu', 'show_menu', 'show_page_tools_menu', 'page_tools_menu', 'main_menu']
 
-def _show_pdf_to_images_menu() -> None:
-    """Render the PDF-to-images submenu in the Page tools submenu style."""
+# Six submenus share one loop. Each config is (title, debug-log tag, options),
+# where options is an ordered tuple of (label, operation-function NAME). Names,
+# not function objects, so dispatch resolves through the module namespace at
+# call time - the same late binding the original had when each loop called its
+# operations by name, and what lets a test monkeypatch an operation.
+_SUBMENUS = {
+    "page_tools": ("Page tools", "Page tools menu selection", (
+        ("Extract selected pages", "operation_extract_pages"),
+        ("Split PDF into fixed-size chunks", "operation_split_chunks"),
+    )),
+    "pdf_to_images": ("PDF to images", "PDF-to-images menu selection", (
+        ("All pages to PNG", "operation_images_all_pages"),
+        ("Selected pages to PNG", "operation_images_selected_pages"),
+        ("Batch: all PDFs in a folder to PNG", "operation_images_batch_folder"),
+    )),
+    "image_pdf": ("PDF to image-only PDF", "Image-only-PDF menu selection", (
+        ("Single PDF", "operation_pdf_to_image_pdf"),
+        ("Batch: all PDFs in a folder", "operation_image_pdf_batch_folder"),
+    )),
+    "delete_pages": ("Delete pages", "Delete-pages menu selection", (
+        ("Single PDF", "operation_delete_pages_single"),
+        ("Batch: all PDFs in a folder", "operation_delete_pages_batch"),
+    )),
+    "compress": ("Compress PDF", "Compress menu selection", (
+        ("Single PDF", "operation_compress_pdf"),
+        ("Batch: all PDFs in a folder", "operation_compress_pdf_batch"),
+    )),
+    "protect": ("Protect PDF", "Protect menu selection", (
+        ("Password to open (view)", "operation_protect_open_password"),
+        ("Restrict editing (owner password + permissions)",
+         "operation_protect_restrict"),
+    )),
+}
+
+
+def _render_submenu(key: str) -> None:
+    """Print one submenu in the shared Page-tools style."""
+    title, _log, options = _SUBMENUS[key]
     print()
-    print(colorize(f"{APP_NAME} PDF to images:", Color.BOLD + Color.LIGHT_BLUE))
-    print(f"  {colorize('1.', Color.LIGHT_BLUE)} All pages to PNG "
-          f"{colorize('[1]', Color.GREEN)}")
-    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Selected pages to PNG")
-    print(f"  {colorize('3.', Color.LIGHT_BLUE)} Batch: all PDFs in a folder to PNG")
+    print(colorize(f"{APP_NAME} {title}:", Color.BOLD + Color.LIGHT_BLUE))
+    for index, (label, _op) in enumerate(options, start=1):
+        marker = f" {colorize('[1]', Color.GREEN)}" if index == 1 else ""
+        print(f"  {colorize(f'{index}.', Color.LIGHT_BLUE)} {label}{marker}")
     print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
     print()
+
+
+def _run_submenu(key: str) -> None:
+    """Run one submenu loop. Returns on 0=Back; raises on exit/quit.
+
+    Dispatch is an exact-string match (like the original per-option ``if``
+    chain), so "01" or "1.0" are invalid, not option 1.
+    """
+    _title, log_tag, options = _SUBMENUS[key]
+    dispatch = {str(i): op for i, (_label, op) in enumerate(options, start=1)}
+    valid = ", ".join(str(i) for i in range(1, len(options) + 1))
+    while True:
+        _render_submenu(key)
+        choice = _input(
+            colorize("Select an option ", Color.BOLD)
+            + colorize("[1]", Color.GREEN)
+            + " "
+            + back_text("back=0, quit=exit")
+            + colorize(": ", Color.WHITE)
+        ).strip().lower()
+
+        if choice == "":
+            choice = "1"  # Enter selects option 1.
+
+        if choice == "0":
+            return
+        if choice in ("exit", "quit"):
+            raise _ExitRequested()
+
+        logger.debug("%s: '%s'", log_tag, choice)
+        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
+        try:
+            if choice in dispatch:
+                # Resolved now, not at table-build time, so a monkeypatched
+                # operation is honoured and the binding matches the original.
+                globals()[dispatch[choice]]()
+            else:
+                print_error(f"Invalid option. Please choose {valid}, or 0.")
+                continue
+        except KeyboardInterrupt:
+            print_warning("\nOperation interrupted. Returning to menu.")
+            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
+
+
+def _show_pdf_to_images_menu() -> None:
+    """Render the PDF-to-images submenu."""
+    _render_submenu("pdf_to_images")
 
 
 def pdf_to_images_menu() -> None:
-    """Run the PDF-to-images submenu loop (mirrors the Page tools submenu)."""
-    while True:
-        _show_pdf_to_images_menu()
-        choice = _input(
-            colorize("Select an option ", Color.BOLD)
-            + colorize("[1]", Color.GREEN)
-            + " "
-            + back_text("back=0, quit=exit")
-            + colorize(": ", Color.WHITE)
-        ).strip().lower()
-
-        if choice == "":
-            choice = "1"  # Enter selects option 1.
-
-        if choice == "0":
-            return
-        if choice in ("exit", "quit"):
-            raise _ExitRequested()
-
-        logger.debug("PDF-to-images menu selection: '%s'", choice)
-        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
-        try:
-            if choice == "1":
-                operation_images_all_pages()
-            elif choice == "2":
-                operation_images_selected_pages()
-            elif choice == "3":
-                operation_images_batch_folder()
-            else:
-                print_error("Invalid option. Please choose 1, 2, 3, or 0.")
-                continue
-        except KeyboardInterrupt:
-            print_warning("\nOperation interrupted. Returning to menu.")
-            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
+    """Run the PDF-to-images submenu loop."""
+    _run_submenu("pdf_to_images")
 
 
 def _show_image_pdf_menu() -> None:
-    """Render the image-only-PDF submenu in the Page tools submenu style."""
-    print()
-    print(colorize(f"{APP_NAME} PDF to image-only PDF:", Color.BOLD + Color.LIGHT_BLUE))
-    print(f"  {colorize('1.', Color.LIGHT_BLUE)} Single PDF "
-          f"{colorize('[1]', Color.GREEN)}")
-    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Batch: all PDFs in a folder")
-    print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
-    print()
+    """Render the image-only-PDF submenu."""
+    _render_submenu("image_pdf")
 
 
 def pdf_to_image_pdf_menu() -> None:
-    """Run the image-only-PDF submenu loop (mirrors the Page tools submenu)."""
-    while True:
-        _show_image_pdf_menu()
-        choice = _input(
-            colorize("Select an option ", Color.BOLD)
-            + colorize("[1]", Color.GREEN)
-            + " "
-            + back_text("back=0, quit=exit")
-            + colorize(": ", Color.WHITE)
-        ).strip().lower()
-
-        if choice == "":
-            choice = "1"  # Enter selects option 1.
-
-        if choice == "0":
-            return
-        if choice in ("exit", "quit"):
-            raise _ExitRequested()
-
-        logger.debug("Image-only-PDF menu selection: '%s'", choice)
-        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
-        try:
-            if choice == "1":
-                operation_pdf_to_image_pdf()
-            elif choice == "2":
-                operation_image_pdf_batch_folder()
-            else:
-                print_error("Invalid option. Please choose 1, 2, or 0.")
-                continue
-        except KeyboardInterrupt:
-            print_warning("\nOperation interrupted. Returning to menu.")
-            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
+    """Run the image-only-PDF submenu loop."""
+    _run_submenu("image_pdf")
 
 
 def _show_delete_pages_menu() -> None:
-    """Render the delete-pages submenu in the Page tools submenu style."""
-    print()
-    print(colorize(f"{APP_NAME} Delete pages:", Color.BOLD + Color.LIGHT_BLUE))
-    print(f"  {colorize('1.', Color.LIGHT_BLUE)} Single PDF "
-          f"{colorize('[1]', Color.GREEN)}")
-    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Batch: all PDFs in a folder")
-    print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
-    print()
+    """Render the delete-pages submenu."""
+    _render_submenu("delete_pages")
 
 
 def delete_pages_menu() -> None:
-    """Run the delete-pages submenu loop (mirrors the Page tools submenu)."""
-    while True:
-        _show_delete_pages_menu()
-        choice = _input(
-            colorize("Select an option ", Color.BOLD)
-            + colorize("[1]", Color.GREEN)
-            + " "
-            + back_text("back=0, quit=exit")
-            + colorize(": ", Color.WHITE)
-        ).strip().lower()
-
-        if choice == "":
-            choice = "1"  # Enter selects option 1.
-
-        if choice == "0":
-            return
-        if choice in ("exit", "quit"):
-            raise _ExitRequested()
-
-        logger.debug("Delete-pages menu selection: '%s'", choice)
-        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
-        try:
-            if choice == "1":
-                operation_delete_pages_single()
-            elif choice == "2":
-                operation_delete_pages_batch()
-            else:
-                print_error("Invalid option. Please choose 1, 2, or 0.")
-                continue
-        except KeyboardInterrupt:
-            print_warning("\nOperation interrupted. Returning to menu.")
-            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
+    """Run the delete-pages submenu loop."""
+    _run_submenu("delete_pages")
 
 
 def _show_compress_menu() -> None:
-    """Render the compress submenu in the Page tools submenu style."""
-    print()
-    print(colorize(f"{APP_NAME} Compress PDF:", Color.BOLD + Color.LIGHT_BLUE))
-    print(f"  {colorize('1.', Color.LIGHT_BLUE)} Single PDF "
-          f"{colorize('[1]', Color.GREEN)}")
-    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Batch: all PDFs in a folder")
-    print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
-    print()
+    """Render the compress submenu."""
+    _render_submenu("compress")
 
 
 def compress_menu() -> None:
-    """Run the compress submenu loop (mirrors the Page tools submenu)."""
-    while True:
-        _show_compress_menu()
-        choice = _input(
-            colorize("Select an option ", Color.BOLD)
-            + colorize("[1]", Color.GREEN)
-            + " "
-            + back_text("back=0, quit=exit")
-            + colorize(": ", Color.WHITE)
-        ).strip().lower()
-
-        if choice == "":
-            choice = "1"  # Enter selects option 1.
-
-        if choice == "0":
-            return
-        if choice in ("exit", "quit"):
-            raise _ExitRequested()
-
-        logger.debug("Compress menu selection: '%s'", choice)
-        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
-        try:
-            if choice == "1":
-                operation_compress_pdf()
-            elif choice == "2":
-                operation_compress_pdf_batch()
-            else:
-                print_error("Invalid option. Please choose 1, 2, or 0.")
-                continue
-        except KeyboardInterrupt:
-            print_warning("\nOperation interrupted. Returning to menu.")
-            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
+    """Run the compress submenu loop."""
+    _run_submenu("compress")
 
 
 def _show_protect_menu() -> None:
-    """Render the protect submenu in the Page tools submenu style."""
-    print()
-    print(colorize(f"{APP_NAME} Protect PDF:", Color.BOLD + Color.LIGHT_BLUE))
-    print(f"  {colorize('1.', Color.LIGHT_BLUE)} Password to open (view) "
-          f"{colorize('[1]', Color.GREEN)}")
-    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Restrict editing (owner password + permissions)")
-    print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
-    print()
+    """Render the protect submenu."""
+    _render_submenu("protect")
 
 
 def protect_menu() -> None:
-    """Run the protect submenu loop (mirrors the Page tools submenu)."""
-    while True:
-        _show_protect_menu()
-        choice = _input(
-            colorize("Select an option ", Color.BOLD)
-            + colorize("[1]", Color.GREEN)
-            + " "
-            + back_text("back=0, quit=exit")
-            + colorize(": ", Color.WHITE)
-        ).strip().lower()
-
-        if choice == "":
-            choice = "1"  # Enter selects option 1.
-
-        if choice == "0":
-            return
-        if choice in ("exit", "quit"):
-            raise _ExitRequested()
-
-        logger.debug("Protect menu selection: '%s'", choice)
-        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
-        try:
-            if choice == "1":
-                operation_protect_open_password()
-            elif choice == "2":
-                operation_protect_restrict()
-            else:
-                print_error("Invalid option. Please choose 1, 2, or 0.")
-                continue
-        except KeyboardInterrupt:
-            print_warning("\nOperation interrupted. Returning to menu.")
-            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
+    """Run the protect submenu loop."""
+    _run_submenu("protect")
 
 
 def show_menu() -> None:
@@ -270,14 +176,8 @@ def show_menu() -> None:
 
 
 def show_page_tools_menu() -> None:
-    """Render the Page tools submenu: light-blue header and numbered options."""
-    print()
-    print(colorize(f"{APP_NAME} Page tools:", Color.BOLD + Color.LIGHT_BLUE))
-    print(f"  {colorize('1.', Color.LIGHT_BLUE)} Extract selected pages "
-          f"{colorize('[1]', Color.GREEN)}")
-    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Split PDF into fixed-size chunks")
-    print(f"  {colorize('0.', Color.LIGHT_BLUE)} Back")
-    print()
+    """Render the Page tools submenu."""
+    _render_submenu("page_tools")
 
 
 def page_tools_menu() -> None:
@@ -286,37 +186,7 @@ def page_tools_menu() -> None:
     Returns when the user goes Back (option 0). Raises ``_ExitRequested`` when
     the user types 'exit'/'quit' to close the whole application.
     """
-    while True:
-        show_page_tools_menu()
-        choice = _input(
-            colorize("Select an option ", Color.BOLD)
-            + colorize("[1]", Color.GREEN)
-            + " "
-            + back_text("back=0, quit=exit")
-            + colorize(": ", Color.WHITE)
-        ).strip().lower()
-
-        if choice == "":
-            choice = "1"  # Enter selects option 1.
-
-        if choice == "0":
-            return  # Back to the main menu.
-        if choice in ("exit", "quit"):
-            raise _ExitRequested()
-
-        logger.debug("Page tools menu selection: '%s'", choice)
-        set_operation_prompt(choice)  # numbering prefix = selected submenu item.
-        try:
-            if choice == "1":
-                operation_extract_pages()
-            elif choice == "2":
-                operation_split_chunks()
-            else:
-                print_error("Invalid option. Please choose 1, 2, or 0.")
-                continue
-        except KeyboardInterrupt:
-            print_warning("\nOperation interrupted. Returning to menu.")
-            logger.warning("Operation interrupted by user (KeyboardInterrupt).")
+    _run_submenu("page_tools")
 
 
 def main_menu() -> int:

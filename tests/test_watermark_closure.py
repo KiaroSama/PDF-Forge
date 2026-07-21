@@ -20,25 +20,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pdf_forge as app  # noqa: E402
 import pymupdf  # noqa: E402
-from helpers import rgb_png  # noqa: E402
+from helpers import stamped_pdf  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
 # Fixtures
 # --------------------------------------------------------------------------- #
-
-def stamped_pdf(path: Path, pages: int = 3, **save_kwargs) -> Path:
-    """A PDF with the same image stamped on every page (optionally protected)."""
-    doc = pymupdf.open()
-    data = rgb_png(size=(120, 90), color=(200, 30, 30))
-    for _ in range(pages):
-        page = doc.new_page(width=400, height=500)
-        page.insert_image(pymupdf.Rect(50, 50, 170, 140), stream=data)
-        page.insert_text((60, 300), "body text")
-    doc.save(str(path), **save_kwargs)
-    doc.close()
-    return path
-
 
 def restricted_pdf(path: Path, pages: int = 3) -> Path:
     """Owner-restricted: opens without a password but forbids most actions."""
