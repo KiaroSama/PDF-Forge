@@ -771,14 +771,6 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
         password = None  # drop the source password as soon as this file ends
 
 
-def _safe_unlink(path: Path) -> None:
-    try:
-        if path.exists():
-            path.unlink()
-    except OSError:
-        logger.warning("Could not remove temp file: %s", path)
-
-
 def _missing_runtime(status: dict) -> str:
     missing = []
     if not status["unoserver_installed"]:
