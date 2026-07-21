@@ -1156,6 +1156,45 @@ def test_launch_once_removes_its_profile_on_startup_failure(monkeypatch, tmp_pat
 
 
 # --------------------------------------------------------------------------- #
+# N-11 (round 2) - answering server_info() is not proof of ownership; our own
+# log must show the post-bind marker, or a foreign listener on our port is
+# refused (it would otherwise run an un-hardened profile).
+# --------------------------------------------------------------------------- #
+
+def test_wait_until_ready_requires_the_ownership_marker(monkeypatch):
+    from unoserver.client import UnoClient
+
+    # server_info() always "succeeds" - exactly as a foreign listener would.
+    monkeypatch.setattr(UnoClient, "server_info", lambda self: {"api": "3"})
+
+    class AliveProc:
+        returncode = None
+
+        def poll(self):
+            return None    # our process stays alive throughout
+
+    class FakeServer:
+        def __init__(self, log_text):
+            self.process = AliveProc()
+            self.port = 2003
+            self._log = log_text
+
+        def read_log(self, limit=8000):
+            return self._log[-limit:]
+
+    # "Starting unoserver ..." is in BOTH logs on purpose: it is logged before
+    # the bind, so keying on it (instead of the real marker) would wrongly accept
+    # the impostor - this test would then fail on case (a).
+    foreign_log = ("INFO:unoserver:Starting unoserver 3.7.\n"
+                   "INFO:unoserver:Command: ...\n")   # our bind never reached
+    with pytest.raises(office_server.OfficeRuntimeError, match="did not become ready"):
+        office_server._wait_until_ready(FakeServer(foreign_log), timeout=1)
+
+    ours_log = foreign_log + "INFO:unoserver:Starting UnoConverter.\n"
+    office_server._wait_until_ready(FakeServer(ours_log), timeout=5)   # no raise
+
+
+# --------------------------------------------------------------------------- #
 # N-12 (round 2) - a child that outlives an already-exited launcher must still
 # be reaped via the process-group id captured at launch (POSIX).
 # --------------------------------------------------------------------------- #
