@@ -527,15 +527,24 @@ def write_pages_to_pdf(doc, pages_zero_based: Sequence[int], out_path: Path,
 def _page_fingerprints(doc):
     """A cheap per-page identity used to verify page *order*, not just count.
 
-    Uses the page's media box, its rotation, a digest of the content-stream
-    *bytes* (not merely their length), and its extracted text. Hashing the
-    length alone collided two visibly different pages whose draw commands were
-    the same byte length - e.g. two textless vector pages, one red and one green
-    - so a swapped/wrong page passed validation (N-07). Hashing the bytes tells
-    them apart; byte-identical blank pages still compare equal. Bytes rather than
-    a rendered pixmap keeps the check deterministic across platforms and pymupdf
-    builds (a raster digest can differ with anti-aliasing/font substitution and
-    would block a correct output).
+    Folds together the page's media box, rotation, extracted text, the
+    content-stream *bytes*, and the resources those bytes reference by name:
+
+      * the content stream is hashed as bytes, not by length - two textless
+        vector pages whose draw commands are the same byte length no longer
+        collide;
+      * a content stream references images and form XObjects by NAME (``/fzImg0
+        Do``), and two pages can carry byte-identical streams while that name
+        resolves to different objects, so the resolved resources are folded in
+        too: images by their decoded, mask-aware digest and form XObjects by
+        their raw stream bytes. Without this, a page drawing a red image and a
+        page drawing a green one through the same resource name fingerprinted
+        identically (N-07).
+
+    Byte-identical blank pages still compare equal, and the identity round-trips
+    through ``insert_pdf`` (an extracted page keeps the same resolved resources),
+    so a correct output is never falsely rejected. Bytes rather than a rendered
+    pixmap keep the check deterministic across platforms and pymupdf builds.
     """
     import hashlib
 
@@ -551,6 +560,21 @@ def _page_fingerprints(doc):
                               for x in page.get_contents())
         except Exception:  # noqa: BLE001
             stream = b""
+        # Resolve the resources the stream references by name. Sorted so the
+        # identity does not depend on enumeration order.
+        try:
+            image_digests = sorted(
+                bytes(info["digest"])
+                for info in page.get_image_info(hashes=True)
+                if info.get("digest") is not None)
+        except Exception:  # noqa: BLE001
+            image_digests = []
+        try:
+            form_digests = sorted(
+                hashlib.sha256(doc.xref_stream_raw(item[0]) or b"").digest()
+                for item in page.get_xobjects())
+        except Exception:  # noqa: BLE001
+            form_digests = []
         rect = page.rect
         digest = hashlib.sha256()
         digest.update(
@@ -558,6 +582,10 @@ def _page_fingerprints(doc):
             .encode("utf-8"))
         digest.update(hashlib.sha256(stream).digest())
         digest.update(text.encode("utf-8", "replace"))
+        for image_digest in image_digests:
+            digest.update(image_digest)
+        for form_digest in form_digests:
+            digest.update(form_digest)
         prints.append(digest.hexdigest())
     return prints
 

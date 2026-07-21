@@ -46,6 +46,10 @@ class ConversionServer:
     soffice: Path
     log_handle: object = None
     log_path: Optional[Path] = None
+    #: POSIX process-group id captured at launch. Stored (not read from the live
+    #: process) so the group can be reaped even after the launcher exits and
+    #: os.getpgid() would fail - the parent-exited/child-alive case (N-12).
+    pgid: Optional[int] = None
 
     def read_log(self, limit: int = 8000) -> str:
         """Tail of the child's diagnostics (empty when unavailable)."""
@@ -74,6 +78,10 @@ class ConversionServer:
             pass
         if orphaned:
             _kill_profile_owners(self.profile_dir)
+        # POSIX: reap the stored process group too. When the launcher has already
+        # exited, _terminate's os.getpgid(pid) fails and cannot reach a child
+        # that outlived it; the group id captured at launch still can (N-12).
+        _reap_process_group(self.pgid)
         _remove_profile(self.profile_dir)
 
 
@@ -122,6 +130,25 @@ def _kill_profile_owners(profile_dir: Path) -> None:
         )
     except (OSError, subprocess.SubprocessError):
         pass
+
+
+def _reap_process_group(pgid: Optional[int]) -> None:
+    """POSIX: kill a stored process group, even after its leader has exited.
+
+    A launcher started with ``start_new_session`` is its own group leader; the
+    group persists as long as any member is alive. Capturing the pgid at launch
+    (rather than reading ``os.getpgid`` of a possibly-dead leader) is what makes
+    the parent-exited/child-alive case reachable: the surviving ``soffice.bin``
+    is still in this group and is reaped here (N-12). No-op on Windows and when
+    no pgid was captured.
+    """
+    if pgid is None or os.name == "nt":
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            return  # the group is already gone (or not ours) - nothing to reap
 
 
 def _remove_profile(path: Path, attempts: int = 12, delay: float = 0.25) -> None:
@@ -343,13 +370,37 @@ def _allocate_distinct_port_pair(max_attempts: int = 100) -> "tuple[int, int]":
     )
 
 
+#: Substrings that identify a "port already taken" startup failure on either
+#: platform, so the bind-to-zero TOCTOU can be retried with a fresh pair while
+#: every other startup failure is reported immediately.
+_ADDRESS_IN_USE_SIGNS = (
+    "address already in use",                  # POSIX (errno 98)
+    "only one usage of each socket address",   # Windows (WSAEADDRINUSE)
+    "eaddrinuse", "wsaeaddrinuse",
+    "errno 98", "10048",
+)
+
+
+def _is_address_in_use(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(sign in text for sign in _ADDRESS_IN_USE_SIGNS)
+
+
 def start_conversion_server(
     start_timeout: int = SERVER_START_TIMEOUT,
+    max_attempts: int = 3,
 ) -> ConversionServer:
     """Start a dedicated headless conversion server on a random localhost port.
 
     Raises :class:`OfficeRuntimeError` when the runtime is incomplete or the
     server does not become ready within ``start_timeout`` seconds.
+
+    A startup failure caused *specifically* by the bind-to-zero TOCTOU (another
+    process grabbed the port between allocation and unoserver's bind) is retried
+    up to ``max_attempts`` times with a freshly allocated distinct port pair;
+    each failed attempt tears down its own process and profile first. Every other
+    startup failure - a broken runtime, a crash, a timeout - is reported
+    immediately rather than retried blindly (N-11).
     """
     soffice = find_soffice()
     if soffice is None:
@@ -368,7 +419,32 @@ def start_conversion_server(
             "The 'unoserver' package is not installed in the project .venv."
         )
 
-    port, uno_port = _allocate_distinct_port_pair()
+    for attempt in range(max_attempts):
+        port, uno_port = _allocate_distinct_port_pair()
+        try:
+            return _launch_conversion_server_once(
+                soffice, lo_python, port, uno_port, start_timeout)
+        except OfficeRuntimeError as exc:
+            # _launch_conversion_server_once has already torn down its own
+            # process and profile. Retry only a port collision, and only while
+            # attempts remain - never attach to an unrelated listener, and never
+            # retry a genuine runtime failure.
+            if _is_address_in_use(exc) and attempt < max_attempts - 1:
+                logger.warning(
+                    "The conversion server port was taken at startup; retrying "
+                    "with a fresh port pair (attempt %d of %d).",
+                    attempt + 1, max_attempts)
+                continue
+            raise
+    # Unreachable: the loop above always returns a server or raises.
+    raise OfficeRuntimeError("The conversion server could not be started.")
+
+
+def _launch_conversion_server_once(
+    soffice: Path, lo_python: Path, port: int, uno_port: int, start_timeout: int,
+) -> ConversionServer:
+    """One start attempt on the given ports; cleans up its own process and
+    profile on any failure before raising, so the caller can retry cleanly."""
     profile_dir = Path(tempfile.mkdtemp(prefix="pdfforge_loprofile_"))
     # Always hardened unless explicitly disabled for debugging. Beyond the
     # safety it enforces, disabling link/index updates is what keeps Writer
@@ -432,8 +508,18 @@ def start_conversion_server(
         shutil.rmtree(profile_dir, ignore_errors=True)
         raise OfficeRuntimeError(f"Could not start the conversion server: {exc}") from exc
 
+    # Capture the process-group id now, while the launcher is alive, so a child
+    # that outlives it can still be reaped (N-12). start_new_session made the
+    # launcher its own group leader, so its pgid is its pid.
+    pgid = None
+    if os.name != "nt":
+        try:
+            pgid = os.getpgid(process.pid)
+        except OSError:
+            pgid = None
+
     server = ConversionServer(process, port, profile_dir, soffice, log_handle,
-                              log_path)
+                              log_path, pgid=pgid)
     try:
         _wait_until_ready(server, start_timeout)
     except Exception:
@@ -708,6 +794,7 @@ def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
     # the child (PF-014), so the child's output goes to a file in the profile.
     log_path = profile / "cli.log"
     proc = None
+    cli_pgid = None
     try:
         log_handle = open(log_path, "wb")
     except OSError as exc:
@@ -720,6 +807,14 @@ def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
         cli_popen_kwargs["start_new_session"] = True   # enable killpg tree-kill
     try:
         proc = subprocess.Popen(cmd, **cli_popen_kwargs)
+        # Capture the group id while the launcher is alive, so a soffice.bin that
+        # outlives it can still be reaped on POSIX even after the launcher exits
+        # (N-12); os.getpgid on a dead launcher would fail.
+        if os.name != "nt":
+            try:
+                cli_pgid = os.getpgid(proc.pid)
+            except OSError:
+                cli_pgid = None
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
@@ -728,6 +823,7 @@ def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
             # profile only after nothing owns it.
             _terminate(proc)
             _kill_profile_owners(profile)
+            _reap_process_group(cli_pgid)
             raise OfficeRuntimeError(
                 f"LibreOffice timed out converting this document after {timeout}s."
             ) from exc
@@ -755,6 +851,10 @@ def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
         if proc is not None and proc.poll() is None:
             _terminate(proc)
             _kill_profile_owners(profile)
+        # POSIX: reap a child that outlived an already-exited launcher (the block
+        # above only fires while the launcher is still alive). No-op on Windows,
+        # where _remove_profile's own stuck-profile reap covers that case.
+        _reap_process_group(cli_pgid)
         _remove_profile(profile)
         shutil.rmtree(outdir, ignore_errors=True)
 

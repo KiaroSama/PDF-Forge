@@ -1055,3 +1055,153 @@ def test_remove_profile_reaps_owners_when_stuck(tmp_path, monkeypatch):
 
     assert reaped["n"] == 1, "a stuck profile must trigger the owner reap"
     assert not profile.exists(), "the profile must be removed after the reap"
+
+
+# --------------------------------------------------------------------------- #
+# N-11 (round 2) - a bind-to-zero address-in-use collision at startup must be
+# retried with a fresh distinct port pair; other startup errors must not retry.
+# --------------------------------------------------------------------------- #
+
+def _runtime_present(monkeypatch, tmp_path):
+    monkeypatch.setattr(office_server, "find_soffice", lambda: tmp_path / "soffice")
+    monkeypatch.setattr(office_server, "find_soffice_python",
+                        lambda: tmp_path / "python")
+    monkeypatch.setattr(office_server, "unoserver_installed", lambda: True)
+
+
+def test_startup_retries_on_address_in_use_with_a_fresh_pair(monkeypatch, tmp_path):
+    _runtime_present(monkeypatch, tmp_path)
+    pairs = iter([(5000, 5001), (5002, 5003)])
+    monkeypatch.setattr(office_server, "_allocate_distinct_port_pair",
+                        lambda *a, **k: next(pairs))
+    used = []
+
+    def fake_launch(soffice, lo_python, port, uno_port, timeout):
+        used.append((port, uno_port))
+        if len(used) == 1:
+            raise office_server.OfficeRuntimeError(
+                "The conversion server exited during startup (code 1).\n"
+                "OSError: [Errno 98] Address already in use")
+        return "SERVER"
+
+    monkeypatch.setattr(office_server, "_launch_conversion_server_once", fake_launch)
+    assert office_server.start_conversion_server() == "SERVER"
+    assert used == [(5000, 5001), (5002, 5003)], "retry must use a fresh port pair"
+
+
+def test_startup_does_not_retry_a_non_port_error(monkeypatch, tmp_path):
+    _runtime_present(monkeypatch, tmp_path)
+    monkeypatch.setattr(office_server, "_allocate_distinct_port_pair",
+                        lambda *a, **k: (5000, 5001))
+    calls = {"n": 0}
+
+    def fake_launch(*a):
+        calls["n"] += 1
+        raise office_server.OfficeRuntimeError("LibreOffice crashed on startup")
+
+    monkeypatch.setattr(office_server, "_launch_conversion_server_once", fake_launch)
+    with pytest.raises(office_server.OfficeRuntimeError, match="crashed"):
+        office_server.start_conversion_server()
+    assert calls["n"] == 1, "a non-port startup error must not retry"
+
+
+def test_startup_retry_is_bounded_on_repeated_address_in_use(monkeypatch, tmp_path):
+    _runtime_present(monkeypatch, tmp_path)
+    monkeypatch.setattr(office_server, "_allocate_distinct_port_pair",
+                        lambda *a, **k: (5000, 5001))
+    calls = {"n": 0}
+
+    def fake_launch(*a):
+        calls["n"] += 1
+        raise office_server.OfficeRuntimeError("Address already in use")
+
+    monkeypatch.setattr(office_server, "_launch_conversion_server_once", fake_launch)
+    with pytest.raises(office_server.OfficeRuntimeError):
+        office_server.start_conversion_server(max_attempts=3)
+    assert calls["n"] == 3, "retry must be bounded by max_attempts"
+
+
+def test_launch_once_removes_its_profile_on_startup_failure(monkeypatch, tmp_path):
+    """A failed attempt must remove its own process and profile, so the retry
+    starts clean (the cleanup half of the address-in-use retry)."""
+    monkeypatch.setattr(office_server, "_harden_profile", lambda p: p)
+    monkeypatch.setattr(office_server, "_kill_profile_owners", lambda p: None)
+    captured = {}
+
+    class ExitedProc:
+        pid = 999999
+
+        def poll(self):
+            return 1          # already exited: _terminate stays a no-op
+
+        def wait(self, timeout=None):
+            return 1
+
+    def fake_popen(cmd, **k):
+        captured["profile"] = Path(cmd[cmd.index("--user-installation") + 1])
+        return ExitedProc()
+
+    monkeypatch.setattr(office_server.subprocess, "Popen", fake_popen)
+
+    def fail_ready(*a, **k):
+        raise office_server.OfficeRuntimeError("OSError: Address already in use")
+
+    monkeypatch.setattr(office_server, "_wait_until_ready", fail_ready)
+    with pytest.raises(office_server.OfficeRuntimeError):
+        office_server._launch_conversion_server_once(
+            tmp_path / "soffice", tmp_path / "python", 5000, 5001, 1)
+    assert captured["profile"].exists() is False, (
+        "a failed startup attempt must remove its profile"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# N-12 (round 2) - a child that outlives an already-exited launcher must still
+# be reaped via the process-group id captured at launch (POSIX).
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group reaping")
+def test_reap_process_group_kills_a_child_after_the_launcher_exits(tmp_path):
+    import signal
+    import textwrap
+    import time
+
+    launcher = textwrap.dedent("""
+        import subprocess, sys
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import time; time.sleep(90)"])
+        print(child.pid, flush=True)
+        # the launcher exits immediately, orphaning the child in its group
+    """)
+    control = subprocess.Popen([sys.executable, "-c",
+                                "import time; time.sleep(90)"])
+    proc = subprocess.Popen([sys.executable, "-c", launcher],
+                            stdout=subprocess.PIPE, start_new_session=True)
+    pgid = os.getpgid(proc.pid)     # captured while the launcher is alive
+    try:
+        child_pid = int(proc.stdout.readline().decode().strip())
+        proc.wait(timeout=10)       # the launcher has now EXITED
+        assert proc.poll() is not None, "the launcher should have exited"
+        assert _pid_alive(child_pid), "the child should outlive the launcher"
+
+        office_server._reap_process_group(pgid)
+
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and _pid_alive(child_pid):
+            time.sleep(0.1)
+        assert not _pid_alive(child_pid), "the orphaned child was not reaped"
+        assert control.poll() is None, "an unrelated process was killed"
+    finally:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except Exception:  # noqa: BLE001
+            pass
+        for p in (control, proc):
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                p.wait(timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
