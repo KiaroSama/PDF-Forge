@@ -530,8 +530,27 @@ def _launch_conversion_server_once(
     return server
 
 
+#: Logged by unoserver only on the line immediately after its XMLRPC socket bind
+#: succeeds (unoserver 3.7 server.py:135-136), so its presence in OUR redirected
+#: log proves OUR process owns the port. It lands there ~5s before server_info()
+#: can answer, so requiring it adds no latency. NOT "Starting unoserver ..."
+#: (server.py:73) - that is logged *before* the bind and survives a bind failure.
+_SERVER_OWNERSHIP_MARKER = "Starting UnoConverter."
+
+
 def _wait_until_ready(server: ConversionServer, timeout: int) -> None:
-    """Block until the server answers ``server_info``, or raise on timeout/exit."""
+    """Block until the server answers ``server_info`` **and proves it is ours**.
+
+    Answering ``server_info`` alone is not enough: unoserver's reply carries only
+    versions and filter names - no PID, nonce or instance id - so a *foreign*
+    unoserver that grabbed our port in the bind-to-zero window would answer
+    identically, and we would accept a server that never applied our hardened
+    profile (N-11). unoserver sleeps before it binds, so during startup our own
+    process is alive while an impostor could answer. Requiring the post-bind
+    ownership marker in our own log closes that: if a foreign listener holds the
+    port, our bind fails and the marker never appears, so we keep waiting until
+    our process exits and the caller retries a fresh port pair.
+    """
     from unoserver.client import UnoClient
 
     deadline = time.monotonic() + timeout
@@ -552,10 +571,17 @@ def _wait_until_ready(server: ConversionServer, timeout: int) -> None:
             )
         try:
             client.server_info()
-            logger.info("Conversion server ready on 127.0.0.1:%d.", server.port)
-            return
         except Exception:  # noqa: BLE001 - not up yet; retry until the deadline
             time.sleep(0.5)
+            continue
+        # server_info() answered. Trust it only if OUR process bound the port:
+        # the marker is logged before the RPC server starts serving, so once
+        # server_info() succeeds a genuinely-ours server already has it in the
+        # log; its absence means a foreign listener answered on our port.
+        if _SERVER_OWNERSHIP_MARKER in server.read_log():
+            logger.info("Conversion server ready on 127.0.0.1:%d.", server.port)
+            return
+        time.sleep(0.5)
     raise OfficeRuntimeError(
         f"The conversion server did not become ready within {timeout}s."
     )
