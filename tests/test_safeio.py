@@ -303,7 +303,15 @@ def test_interrupted_write_leaves_previous_manifest_readable(tmp_path):
 # PF-028 - state lives outside the checkout and degrades visibly
 # --------------------------------------------------------------------------- #
 
-def test_state_is_not_stored_in_the_repository_checkout():
+def test_state_is_not_stored_in_the_repository_checkout(monkeypatch):
+    # Clear every override first. state_dir() honours PDF_FORGE_STATE_DIR (and
+    # the LOCALAPPDATA/APPDATA/XDG_STATE_HOME fallbacks), so with those set the
+    # assertion measured the env var, not the fallback it exists to check - a
+    # mutation making the fallback return the checkout still passed. Cleared,
+    # the real default is exercised.
+    for var in ("PDF_FORGE_STATE_DIR", "LOCALAPPDATA", "APPDATA",
+                "XDG_STATE_HOME"):
+        monkeypatch.delenv(var, raising=False)
     checkout = Path(app.__file__).resolve().parent.parent
     store = app.state_dir().resolve()
     assert checkout not in store.parents and store != checkout, \

@@ -95,7 +95,7 @@ def save_encrypted_pdf(doc, out_path: Path, user_pw: Optional[str] = None,
         _validate_encrypted(tmp_path, total, user_pw or owner_pw)
         # Never rebind out_path: the caller must be told the written name.
         written = promote_atomically(tmp_path, out_path)
-    except Exception:
+    except BaseException:  # incl. Ctrl+C: an orphaned temp can hold decrypted bytes
         try:
             if tmp_path.exists():
                 tmp_path.unlink()

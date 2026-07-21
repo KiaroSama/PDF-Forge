@@ -10,6 +10,7 @@ from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
+from .batch_protection import _batch_protection_preflight
 
 __all__ = ['operation_extract_pages', '_extract_single_file', '_extract_multiple_files', 'operation_split_chunks', '_report_created', '_prompt_delete_selection', 'operation_delete_pages_single', 'operation_delete_pages_batch']
 
@@ -590,6 +591,16 @@ def operation_delete_pages_batch() -> None:
     folder = pdfs[0].parent
     selection_text = summarize_ranges(requested)
 
+    # Decide protection ONCE, before anything is queued or written (PF-008).
+    decisions, cancelled = _batch_protection_preflight(pdfs)
+    if cancelled:
+        print_warning("Cancelled. Returning to menu.")
+        return
+    pdfs = [p for p in pdfs if decisions.get(normalized_path_key(p)) is not None]
+    if not pdfs:
+        print_warning("No files remain after the protection decision.")
+        return
+
     print_heading("\nSummary")
     print_kv("Folder", folder, Color.CYAN)
     print_kv("PDF files", len(pdfs), Color.MAGENTA)
@@ -669,10 +680,13 @@ def operation_delete_pages_batch() -> None:
         if resolves_to_same_file(out_path, src):
             out_path = unique_file_path(src.parent / f"{src.stem}_pages_deleted.pdf")
         # Per-file policy decided by the batch preflight, never prompted here.
-        file_policy = detect_protection(reader)
-        if file_policy.kind == "restricted":
-            file_policy = None
-            result["unprotected"] = True
+        # A file the preflight could not read (needs an open password) has no
+        # stored policy; the runner authenticated it just now, so preserve its
+        # own policy faithfully instead of dropping it.
+        decided = decisions.get(normalized_path_key(src))
+        detected = detect_protection(reader)
+        file_policy = decided if isinstance(decided, ProtectionPolicy) else detected
+        was_restricted = detected.kind == "restricted"
         try:
             written_result = write_pages_to_pdf(reader, kept, out_path,
                                                 protection=file_policy)
@@ -685,6 +699,11 @@ def operation_delete_pages_batch() -> None:
 
         result["deleted"] = len(present)
         result["processed"] = 1
+        # Only a source that WAS restricted and whose output was actually
+        # written (the consented "write unprotected" choice) is reported as
+        # unprotected - after the write, so a failed write is never named (PF-031).
+        if was_restricted:
+            result["unprotected"] = True
         print_success(
             f"  -> deleted {len(present)} page(s) [{summarize_ranges(present)}]; "
             f"kept {written} -> {written_path.name}"

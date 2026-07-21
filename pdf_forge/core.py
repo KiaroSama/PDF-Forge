@@ -135,7 +135,7 @@ def parse_page_selection(expression: str, total_pages: int) -> PageSelectionResu
                     f"Invalid range '{element}'. Use the form START-END (e.g. 10-20)."
                 )
             start_text, end_text = parts[0].strip(), parts[1].strip()
-            if not (start_text.isdigit() and end_text.isdigit()):
+            if not (start_text.isdecimal() and end_text.isdecimal()):
                 raise PageSelectionError(
                     f"Invalid range '{element}'. Both ends must be positive whole numbers."
                 )
@@ -155,7 +155,7 @@ def parse_page_selection(expression: str, total_pages: int) -> PageSelectionResu
                 )
             ordered.extend(range(start, end + 1))
         else:
-            if not element.isdigit():
+            if not element.isdecimal():
                 raise PageSelectionError(
                     f"Invalid page '{element}'. Use positive whole numbers only."
                 )
@@ -285,7 +285,7 @@ def parse_delete_pages(expression: str, max_page: Optional[int] = None) -> List[
                     f"Invalid range '{element}'. Use the form START-END (e.g. 10-20)."
                 )
             start_text, end_text = parts[0].strip(), parts[1].strip()
-            if not (start_text.isdigit() and end_text.isdigit()):
+            if not (start_text.isdecimal() and end_text.isdecimal()):
                 raise PageSelectionError(
                     f"Invalid range '{element}'. Both ends must be positive whole numbers."
                 )
@@ -302,7 +302,7 @@ def parse_delete_pages(expression: str, max_page: Optional[int] = None) -> List[
             _reject_too_large(end, element)
             pages.update(range(start, end + 1))
         else:
-            if not element.isdigit():
+            if not element.isdecimal():
                 raise PageSelectionError(
                     f"Invalid page '{element}'. Use positive whole numbers only."
                 )
@@ -399,7 +399,7 @@ def parse_page_number(text: str, default: int, total_pages: int, label: str) -> 
     value = text.strip()
     if "." in value:
         raise ChunkSizeError(f"The {label} must be a whole number, not a decimal.")
-    if value.startswith("-") or not value.isdigit():
+    if value.startswith("-") or not value.isdecimal():
         raise ChunkSizeError(f"The {label} must be a positive whole number.")
     number = int(value)
     if number < 1:
@@ -420,12 +420,12 @@ def parse_chunk_size(text: str) -> int:
     if text is None or text.strip() == "":
         raise ChunkSizeError("No chunk size was entered.")
     value = text.strip()
-    # Reject decimals explicitly for a clearer message than isdigit alone.
+    # Reject decimals explicitly for a clearer message than isdecimal alone.
     if re.fullmatch(r"-?\d+\.\d+", value) or "." in value:
         raise ChunkSizeError("The chunk size must be a whole number, not a decimal.")
     if value.startswith("-"):
         raise ChunkSizeError("The chunk size must be a positive whole number.")
-    if not value.isdigit():
+    if not value.isdecimal():
         raise ChunkSizeError("The chunk size must be a positive whole number.")
     number = int(value)
     if number < 1:
@@ -449,7 +449,7 @@ def parse_index_list(expression: str, count: int) -> List[int]:
         token = raw.strip()
         if token == "":
             raise ValueError("Empty value between commas.")
-        if not token.isdigit():
+        if not token.isdecimal():
             raise ValueError(f"Invalid number '{token}'. Use whole numbers only.")
         value = int(token)
         if value < 1 or value > count:

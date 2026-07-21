@@ -129,13 +129,24 @@ def test_clean_runtime_only_touches_the_project_local_copy(tmp_path, monkeypatch
 
 
 def test_setup_makes_no_global_changes():
-    """Provisioning must never touch PATH, the registry, or create shortcuts."""
-    source = (Path(app.__file__).resolve().parent / "office_runtime.py").read_text(
-        encoding="utf-8"
-    )
+    """Provisioning must never touch PATH, the registry, or create shortcuts.
+
+    Scans every office_*.py, not just office_runtime.py. That file is a thin
+    re-export facade - the provisioning logic lives in office_provision.py and
+    office_discovery.py - so reading only the facade matched nothing (0 hits)
+    and a winreg write added to office_provision.py would have gone unnoticed.
+    Scoped to office_* so msoffice.py's legitimate read-only HKEY_CLASSES_ROOT
+    probe (COM detection) is not swept in as a false positive.
+    """
+    package = Path(app.__file__).resolve().parent
+    sources = sorted(package.glob("office_*.py"))
+    assert sources, "no office_*.py modules were found to scan"
+    combined = "\n".join(p.read_text(encoding="utf-8") for p in sources)
     for forbidden in ("winreg", "SetEnvironmentVariable", "CreateShortcut",
                       "setx", "HKEY_"):
-        assert forbidden not in source, forbidden
+        assert forbidden not in combined, (
+            f"{forbidden} appears in an office_*.py provisioning module"
+        )
 
 
 def test_conversion_output_validation(tmp_path):

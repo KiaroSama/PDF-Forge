@@ -451,7 +451,7 @@ def _save_doc_to_path_safely(out_doc, out_path: Path, expected_pages: int,
         # Atomic promotion, and the manifest entry, happen only once every
         # check has passed against the bytes that will become the output.
         return promote_atomically(tmp_path, out_path)
-    except Exception:
+    except BaseException:  # incl. Ctrl+C: a leaked temp survives otherwise
         try:
             if tmp_path.exists():
                 tmp_path.unlink()

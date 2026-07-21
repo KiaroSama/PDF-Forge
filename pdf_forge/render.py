@@ -87,7 +87,7 @@ def render_pages_to_pngs(doc, pages_zero_based: Sequence[int], out_dir: Path,
             pixmap.save(str(tmp_path), output="png")
             _validate_image_file(tmp_path)
             final_path = promote_atomically(tmp_path, final_path, record=False)
-        except Exception:
+        except BaseException:  # incl. Ctrl+C: leaked temp survives otherwise
             try:
                 if tmp_path.exists():
                     tmp_path.unlink()
@@ -160,7 +160,7 @@ def render_pdf_to_image_pdf(doc, page_count: int, out_path: Path, dpi: int,
             # Never rebind out_path: the requested and the written name must
             # stay distinguishable all the way back to the caller.
             written = promote_atomically(tmp_path, out_path)
-        except Exception:
+        except BaseException:  # incl. Ctrl+C: leaked temp survives otherwise
             try:
                 if tmp_path.exists():
                     tmp_path.unlink()
@@ -261,7 +261,18 @@ def _write_image_with_alpha(doc, xref: int, smask_xref: int, out_dir: Path,
         if base.alpha:  # already carries alpha; the mask would be redundant
             combined = base
         else:
-            combined = pymupdf.Pixmap(base, mask)
+            try:
+                combined = pymupdf.Pixmap(base, mask)
+            except Exception as exc:  # noqa: BLE001 - degrade, do not abort
+                # A /SMask may legally be a different resolution than its image;
+                # Pixmap(base, mask) then raises "must be same size". Without
+                # this the whole extraction aborted and every image already
+                # written was orphaned. Fall back to the base pixels, matching
+                # how the JPEG path degrades-and-warns for the same case.
+                logger.warning(
+                    "Soft mask for xref %d could not be applied (%s); writing "
+                    "the image without rebuilt transparency.", xref, exc)
+                combined = base
         return _atomic_pixmap_save(combined, out_dir, final_path, "png")
     finally:
         base = mask = None
@@ -312,7 +323,7 @@ def _atomic_pixmap_save(pixmap, out_dir: Path, final_path: Path, fmt: str,
             pixmap.save(str(tmp_path), output=fmt, jpg_quality=jpg_quality)
         _validate_image_file(tmp_path)
         return promote_atomically(tmp_path, final_path, record=False)
-    except Exception:
+    except BaseException:  # incl. Ctrl+C: leaked temp survives otherwise
         try:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -406,7 +417,7 @@ def extract_embedded_images(doc, out_dir: Path, jpeg_quality=None,
                 if tmp_path.stat().st_size <= 0:
                     raise PdfOpenError("Extracted image is empty.")
                 final_path = promote_atomically(tmp_path, final_path, record=False)
-            except Exception:
+            except BaseException:  # incl. Ctrl+C: leaked temp survives otherwise
                 try:
                     if tmp_path.exists():
                         tmp_path.unlink()
@@ -439,7 +450,7 @@ def extract_embedded_images(doc, out_dir: Path, jpeg_quality=None,
                 pixmap.save(str(tmp_path), output="jpg", jpg_quality=jpeg_quality)
                 _validate_image_file(tmp_path)
                 final_path = promote_atomically(tmp_path, final_path, record=False)
-            except Exception:
+            except BaseException:  # incl. Ctrl+C: leaked temp survives otherwise
                 try:
                     if tmp_path.exists():
                         tmp_path.unlink()

@@ -267,7 +267,7 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
         # generated-output manifest (C-14).
         validate_watermark_removed(tmp_path, targets, password=password)
         written = promote_atomically(tmp_path, out_path)
-    except Exception:
+    except BaseException:  # incl. Ctrl+C: an orphaned temp can hold decrypted bytes
         try:
             if tmp_path.exists():
                 tmp_path.unlink()

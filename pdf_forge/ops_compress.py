@@ -9,6 +9,7 @@ from .pdf_io import *  # noqa: F401,F403
 from .compress import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
+from .batch_protection import _batch_protection_preflight
 
 __all__ = ['operation_compress_pdf', 'operation_compress_pdf_batch',
            '_prompt_compression_level', '_format_size', '_warn_if_cap_above_max',
@@ -166,7 +167,7 @@ def operation_compress_pdf() -> None:
         return
     label, jpeg_quality, dpi_target = level
 
-    _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats)
+    _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats, total_pages)
 
     # Consent BEFORE any output is configured or written (PF-006).
     protection = resolve_protection(protection, context="compressed PDF")
@@ -233,23 +234,43 @@ def operation_compress_pdf() -> None:
     )
 
 
-def _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats) -> None:
+def _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats,
+                           total_pages=None) -> None:
     """Warn when the chosen DPI cap can't downsample anything.
 
     The DPI cap is the criterion: images above it come down (in
     quality-preserving steps, never below the cap), images at or below it are
     left as-is - so no image is ever enlarged. When the cap is at or above the
     document's own maximum image DPI, nothing needs downsampling.
+
+    The "no image will be downsampled" claim is only absolute when every page
+    was measured. scan_image_dpi_stats samples up to 40 pages, so on a longer
+    document its ``max`` is the maximum *of the pages scanned* - a higher-DPI
+    image on an unscanned page would still be downsampled, making the absolute
+    wording false. When the scan was partial (or its completeness is unknown,
+    as for a folder aggregate) the message is qualified to what was measured.
     """
     if jpeg_quality is None or dpi_stats is None or "max" not in dpi_stats:
         return
     if dpi_target >= dpi_stats["max"]:
-        print_warning(
-            f"Your {dpi_target} DPI cap is at or above the maximum image "
-            f"resolution present (~{dpi_stats['max']} DPI): no image will be "
-            "downsampled (none is above the cap). Only JPEG re-encoding "
-            f"(quality {jpeg_quality}) and the lossless optimizations apply."
-        )
+        scanned = dpi_stats.get("pages_scanned")
+        complete = total_pages is not None and scanned is not None \
+            and scanned >= total_pages
+        if complete:
+            print_warning(
+                f"Your {dpi_target} DPI cap is at or above the maximum image "
+                f"resolution present (~{dpi_stats['max']} DPI): no image will "
+                "be downsampled (none is above the cap). Only JPEG re-encoding "
+                f"(quality {jpeg_quality}) and the lossless optimizations apply."
+            )
+        else:
+            print_warning(
+                f"Your {dpi_target} DPI cap is at or above the highest image "
+                f"resolution found while sampling (~{dpi_stats['max']} DPI). "
+                "An image above the cap on an unsampled page would still be "
+                f"downsampled; JPEG re-encoding (quality {jpeg_quality}) and "
+                "the lossless optimizations always apply."
+            )
 
 
 def _folder_dpi_stats(pdfs) -> dict:
@@ -298,84 +319,6 @@ def _folder_dpi_stats(pdfs) -> dict:
         result["max"] = all_dpis[-1]
         result["median"] = all_dpis[len(all_dpis) // 2]
     return result
-
-
-def _batch_protection_preflight(pdfs):
-    """Inspect every source and decide ONE protection policy before queueing.
-
-    PF-008: a batch must never create a downgraded file and warn afterwards.
-    Every readable file is classified up front; if any source carries owner
-    restrictions that cannot be reproduced, the user chooses once - skip those
-    files, cancel, or knowingly write them unprotected. The decision is stored
-    per file, so execution never prompts and never re-decides.
-
-    Returns ``(decisions, cancelled)`` where ``decisions`` maps a normalized
-    path to a policy (or ``None`` meaning "skip this file").
-    """
-    restricted, unreadable = [], []
-    decisions = {}
-    for src in pdfs:
-        try:
-            doc = open_source_pdf(src)
-        except (PdfOpenError, RuntimeError):
-            unreadable.append(src)
-            decisions[normalized_path_key(src)] = "unreadable"
-            continue
-        try:
-            policy = detect_protection(doc)
-        finally:
-            close_doc(doc)
-        if policy.kind == "restricted":
-            restricted.append(src)
-        decisions[normalized_path_key(src)] = policy
-
-    if unreadable:
-        print_warning(
-            f"{len(unreadable)} file(s) could not be inspected (encrypted or "
-            "unreadable); they will be attempted individually and may ask for a "
-            "password while the queue runs."
-        )
-    if not restricted:
-        return decisions, False
-
-    print_warning(
-        f"{len(restricted)} file(s) open freely but restrict actions that "
-        "cannot be reproduced (the owner password is not recoverable):"
-    )
-    for src in restricted[:5]:
-        print(colorize(f"    - {src.name}", Color.YELLOW))
-    if len(restricted) > 5:
-        print(colorize(f"    ... (+{len(restricted) - 5} more)", Color.DIM))
-
-    prompt = question_prompt(
-        "Restricted files",
-        details="1=skip them, 2=cancel the batch, 3=write them unprotected",
-        default="1",
-    )
-    while True:
-        raw = _input(prompt).strip().lower()
-        if raw in ("", "1"):
-            for src in restricted:
-                decisions[normalized_path_key(src)] = None   # skip
-            logger.info("Batch protection: skipping %d restricted file(s).",
-                        len(restricted))
-            return decisions, False
-        if raw == "2" or raw == "0":
-            logger.info("Batch cancelled at the protection decision.")
-            return decisions, True
-        if raw == "3":
-            for src in restricted:
-                decisions[normalized_path_key(src)] = ProtectionPolicy(kind="none")
-            print_warning(
-                "Their compressed copies will be UNPROTECTED. The originals are "
-                "unchanged."
-            )
-            logger.info("Batch protection: %d restricted file(s) -> unprotected.",
-                        len(restricted))
-            return decisions, False
-        if raw in ("exit", "quit"):
-            raise _ExitRequested()
-        print_error("Choose 1, 2, or 3.")
 
 
 def operation_compress_pdf_batch() -> None:
@@ -447,7 +390,9 @@ def operation_compress_pdf_batch() -> None:
         return
     label, jpeg_quality, dpi_target = level
 
-    _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats)
+    # Folder aggregate: completeness of each file scan is not tracked, so
+    # the absolute "nothing downsamples" claim is never made here.
+    _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats, None)
 
     print_kv("Level", label, Color.LIME)
     print_kv("Per-file output", "<name>_compressed.pdf beside each PDF", Color.AQUA)

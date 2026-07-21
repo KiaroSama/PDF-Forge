@@ -176,7 +176,11 @@ def prompt_office_source_folder() -> Optional[List[Path]]:
         if not folder.exists() or not folder.is_dir():
             print_error(f"Not a folder: {cleaned}")
             continue
-        files = discover_office_files(folder)
+        try:
+            files = discover_office_files(folder)
+        except FolderScanError as exc:
+            print_error(str(exc))
+            continue
         if not files:
             print_error(
                 "No supported files found (non-recursive). Supported: "
@@ -229,7 +233,18 @@ def _validate_pdf_output(path: Path) -> None:
     pymupdf = _import_pymupdf()
     if not path.exists() or path.stat().st_size <= 0:
         raise PdfOpenError("the converted PDF is missing or empty.")
-    check = pymupdf.open(str(path))
+    # Map the low-level open failure to the promised type, as pdf_io does. A
+    # truncated or corrupt conversion makes pymupdf.open raise FileDataError,
+    # which is a RuntimeError but not a PdfOpenError - so it escaped every
+    # handler in the batch loop, aborted the run with a raw traceback, and left
+    # the staging dir (holding decrypted plaintext for an encrypted source)
+    # behind. Caught here it becomes an ordinary per-file validation failure.
+    try:
+        check = pymupdf.open(str(path))
+    except (pymupdf.FileDataError, RuntimeError, ValueError) as exc:
+        raise PdfOpenError(
+            f"the converted PDF is corrupted or unreadable: {exc}"
+        ) from exc
     try:
         if check.needs_pass:
             raise PdfOpenError("the converted PDF is unexpectedly encrypted.")

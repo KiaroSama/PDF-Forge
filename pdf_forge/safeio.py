@@ -364,6 +364,20 @@ class FileLock:
         if current is not None and (current == _ALIVE_UNKNOWN
                                     or current == recorded):
             return False  # still running, or running and unreadable
+        # Re-read immediately before unlinking. Between the read above and here,
+        # another waiter recovering the same dead lock could have unlinked it
+        # and acquired a fresh one under the same path - unlinking now would
+        # delete that live lock and put two writers in the critical section.
+        # Windows' mandatory sharing blocks the unlink so this is a POSIX race,
+        # but the guard is cheap and correct on both.
+        try:
+            confirm = json.loads(self.path.read_text(encoding="utf-8"))
+            if (confirm.get("pid") != pid
+                    or confirm.get("start") != recorded
+                    or confirm.get("host") != host):
+                return False  # a different owner now holds it; leave it alone
+        except (OSError, ValueError, KeyError, TypeError):
+            return False  # gone or unreadable: nothing safe to break
         try:
             self.path.unlink()
             logger.warning("Recovered a manifest lock left by dead process %d.",
@@ -392,8 +406,22 @@ class FileLock:
 _MANIFEST_LIMIT = 5000
 
 
+def _real_path(path) -> str:
+    """The absolute path in its true case - always openable by os.stat."""
+    return os.path.abspath(str(path))
+
+
 def _normalized(path) -> str:
-    key = os.path.abspath(str(path))
+    """A case-folded key for *comparing* two paths on a case-insensitive OS.
+
+    Only ever a comparison key: never store this and try to open it. On Windows
+    ``str.lower()`` maps a few characters to a different length (the Turkish
+    dotted capital I gains a combining dot), so a lowercased path can fail to
+    name the file it came from - which silently dropped such an output from the
+    manifest and made folder tools reprocess it. The stored path is
+    :func:`_real_path`; this is compared against it after folding both.
+    """
+    key = _real_path(path)
     return key.lower() if os.name == "nt" else key
 
 
@@ -434,7 +462,9 @@ def file_identity(path: Path, content: bool = True) -> Optional[dict]:
     except OSError:
         return None
     identity = {
-        "path": _normalized(path),
+        # Real case, so os.stat / open on this stored value always finds the
+        # file. Case-folding for comparison happens on read, not here.
+        "path": _real_path(path),
         "size": int(st.st_size),
         "mtime_ns": int(st.st_mtime_ns),
     }
@@ -534,13 +564,18 @@ def _write_entries(entries: List[dict]) -> None:
 
 
 def load_generated_outputs() -> Set[str]:
-    """Normalized paths of outputs this application created and still owns."""
+    """Case-folded keys of outputs this application created and still owns.
+
+    Folded here, on the real-case stored path, so callers can test membership
+    with :func:`_normalized` on a candidate. The stored value stays real-case
+    (see :func:`file_identity`) so file_identity below can actually stat it.
+    """
     live: Set[str] = set()
     for entry in _read_entries():
         # Cheap metadata first; _matches hashes only if everything else agrees.
         current = file_identity(Path(entry["path"]), content=False)
         if current is not None and _matches(entry, current):
-            live.add(entry["path"])
+            live.add(_normalized(entry["path"]))
     return live
 
 
@@ -571,7 +606,12 @@ def record_generated_output(path: Path) -> None:
         if identity is None:
             return
         with FileLock(manifest_path().with_suffix(".lock")):
-            entries = [e for e in _read_entries() if e["path"] != identity["path"]]
+            # Fold both sides: the stored paths are real-case now, so a rewrite
+            # of the same file under a different case must still replace, not
+            # duplicate, the existing entry.
+            key = _normalized(identity["path"])
+            entries = [e for e in _read_entries()
+                       if _normalized(e["path"]) != key]
             entries.append(identity)
             _write_entries(entries)
     except LockTimeout as exc:

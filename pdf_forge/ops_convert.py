@@ -10,6 +10,7 @@ from .pdf_io import *  # noqa: F401,F403
 from .render import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
+from .batch_protection import _batch_protection_preflight
 
 __all__ = ['operation_images_all_pages', 'operation_images_selected_pages', '_render_pngs_and_report', 'operation_images_batch_folder', 'operation_pdf_to_image_pdf', 'operation_image_pdf_batch_folder', '_warn_if_dpi_exceeds_source', '_prompt_extract_quality', 'operation_extract_images']
 
@@ -427,6 +428,17 @@ def operation_image_pdf_batch_folder() -> None:
         return
 
     folder = pdfs[0].parent
+
+    # Decide protection ONCE, before anything is queued or written (PF-008).
+    decisions, cancelled = _batch_protection_preflight(pdfs)
+    if cancelled:
+        print_warning("Cancelled. Returning to menu.")
+        return
+    pdfs = [p for p in pdfs if decisions.get(normalized_path_key(p)) is not None]
+    if not pdfs:
+        print_warning("No files remain after the protection decision.")
+        return
+
     print_heading("\nSummary")
     print_kv("Folder", folder, Color.CYAN)
     print_kv("PDF files", len(pdfs), Color.MAGENTA)
@@ -461,12 +473,15 @@ def operation_image_pdf_batch_folder() -> None:
                 continue
             try:
                 out_path = unique_file_path(default_image_pdf_output(src))
-                # Per-file policy without mid-batch prompting: keep an open
-                # password; an owner-restricted source cannot be reproduced.
-                file_policy = detect_protection(pdf)
-                if file_policy.kind == "restricted":
-                    file_policy = None
-                    unprotected_notes.append(src.name)
+                # Per-file policy decided by the batch preflight, never prompted
+                # here. A file the preflight could not read (needs an open
+                # password) has no stored policy; the runner authenticated it
+                # just now, so preserve its own policy faithfully.
+                decided = decisions.get(normalized_path_key(src))
+                detected = detect_protection(pdf)
+                file_policy = (decided if isinstance(decided, ProtectionPolicy)
+                               else detected)
+                was_restricted = detected.kind == "restricted"
                 result = render_pdf_to_image_pdf(
                     pdf, page_count, out_path, dpi,
                     progress=lambda c, t: _print_progress("  Rasterizing", c, t),
@@ -474,6 +489,12 @@ def operation_image_pdf_batch_folder() -> None:
                 )
                 total_pages += result.count
                 ok += 1
+                # Report an unprotected output only after it exists and only for
+                # a source that WAS restricted (the consented "write unprotected"
+                # choice) - never before the write, so a failed render is never
+                # named (PF-031).
+                if was_restricted:
+                    unprotected_notes.append(src.name)
                 print_success(f"  -> {result.path.name} ({result.count} page(s))")
             except Exception as exc:  # noqa: BLE001 - keep the batch going
                 print_error(f"  Failed: {exc}")

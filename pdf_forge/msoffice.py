@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from .constants import LOG_PREFIX
+from .office import validate_office_file
 from .office_decrypt import (
     DecryptError, DecryptPasswordError, decrypt_to_temp,
 )
@@ -50,6 +51,12 @@ _MSO_FORCE_DISABLE = 3
 # ppUpdateOptionManual: a linked shape refreshes only when asked, never on its
 # own during open or export.
 _PP_UPDATE_MANUAL = 2
+
+# Supplied to PowerPoint's "path::password::" open form for a file believed to
+# be unencrypted. It only has to be the wrong password, so an unexpectedly
+# encrypted presentation fails instead of raising a modal prompt that would
+# hang a headless run. No NUL bytes: those would truncate the path string.
+_PP_WRONG_PASSWORD = "pdfforge-no-prompt"
 
 # Chunk size for streaming file copies.
 _COPY_CHUNK = 1 << 20
@@ -153,6 +160,46 @@ def _com():
             "installed Microsoft Office cannot be used."
         ) from exc
     return win32
+
+
+def _com_error():
+    """The pywintypes.com_error type, or a class that never matches off Windows.
+
+    A tuple of exception types is always valid in an ``except`` clause, so on a
+    machine without pywin32 this degrades to catching nothing rather than
+    raising at import time.
+    """
+    try:
+        import pywintypes
+        return pywintypes.com_error
+    except ImportError:  # pragma: no cover - environment dependent
+        return ()
+
+
+# HRESULTs Office raises when a document needs a password to open. Word/Excel
+# surface 0x800A1651 (wdRejected / "password is incorrect"); the generic
+# E_ACCESSDENIED shows up for some protected containers.
+_PASSWORD_HRESULTS = frozenset({-2146822575, -2147024891})
+
+
+def _is_password_hresult(exc) -> bool:
+    """True when a com_error is Office refusing a password-protected document."""
+    code = getattr(exc, "hresult", None)
+    if code is None:
+        args = getattr(exc, "args", ())
+        code = args[0] if args else None
+    try:
+        return int(code) in _PASSWORD_HRESULTS
+    except (TypeError, ValueError):
+        return False
+
+
+def _com_message(exc) -> str:
+    """A short, non-sensitive description of a com_error for the user."""
+    args = getattr(exc, "args", ())
+    if len(args) >= 2 and args[1]:
+        return str(args[1])
+    return "the application reported an error"
 
 
 def detect_office() -> Optional[Dict[str, object]]:
@@ -326,6 +373,18 @@ class MsOfficeSession:
                     raise MsOfficePasswordError(str(exc)) from None
                 except DecryptError as exc:
                     raise MsOfficeError(str(exc)) from None
+                # The decrypted bytes may be a different family than the
+                # extension claimed (an xlsx saved as .docx). The LibreOffice
+                # backend rejects that; this one must too, or Office is handed a
+                # spreadsheet and told it is a Word document. Non-CSV only: a
+                # decrypted CSV is plain text with no container to match.
+                if family != "csv":
+                    ok, reason = validate_office_file(src, expected_family=family)
+                    if not ok:
+                        raise MsOfficeError(
+                            f"'{Path(out).name}' decrypted but is not a {family} "
+                            f"file ({reason}); it was not converted."
+                        )
             if family == "csv":
                 src = _csv_with_bom(src, scratch_dir)
             # Office *renames* an export target whose extension is not .pdf
@@ -336,7 +395,25 @@ class MsOfficeSession:
             app = self._app(family)
             # Even a file believed to be unencrypted must not be able to raise a
             # password dialog; the sentinel makes Office fail instead of block.
-            handler(app, src, produced, _REFUSE_PROMPT_PASSWORD)
+            #
+            # Translate COM failures here, in the one place all three handlers
+            # funnel through. A pywintypes.com_error is a bare Exception, not an
+            # MsOfficeError, so an untranslated one escaped every caller's
+            # except and aborted the whole batch with a raw HRESULT and a leaked
+            # scratch dir. A password-to-open legacy .doc reaches Office with
+            # the refusal sentinel and fails exactly this way.
+            try:
+                handler(app, src, produced, _REFUSE_PROMPT_PASSWORD)
+            except _com_error() as exc:
+                if _is_password_hresult(exc):
+                    raise MsOfficePasswordError(
+                        f"'{Path(out).name}' is password-protected and could "
+                        "not be opened."
+                    ) from exc
+                raise MsOfficeError(
+                    f"Microsoft {app_name.title()} could not convert "
+                    f"'{Path(out).name}': {_com_message(exc)}"
+                ) from exc
             if not produced.exists() or produced.stat().st_size == 0:
                 raise MsOfficeError(
                     "Microsoft Office reported success but produced no output "
@@ -410,10 +487,17 @@ def _convert_excel(app, src: Path, out: Path, secret: str) -> None:
 def _convert_powerpoint(app, src: Path, out: Path, secret: str) -> None:
     presentation = None
     try:
-        # A password in the path ("file::pw::") is never needed: an
-        # encrypted source is decrypted before it reaches PowerPoint.
+        # PowerPoint's Open has no password parameter, so the anti-hang sentinel
+        # Word and Excel receive cannot be passed as a keyword - it was simply
+        # dropped, and an unexpectedly encrypted legacy .ppt (which
+        # is_encrypted_office_file does not detect) would raise a modal prompt
+        # and hang a headless run. The documented channel is the filename form
+        # "path::password::". The real sentinel carries NUL bytes, which would
+        # truncate that string, so a plain unguessable token is used here: its
+        # only job is to be wrong, so Office fails instead of prompting.
+        guarded = f"{src}::{_PP_WRONG_PASSWORD}::"
         presentation = app.Presentations.Open(
-            str(src), ReadOnly=True, Untitled=True, WithWindow=False,
+            guarded, ReadOnly=True, Untitled=True, WithWindow=False,
         )
         # Stop linked pictures and OLE objects updating during export (C-12).
         #

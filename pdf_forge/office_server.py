@@ -423,13 +423,12 @@ def _wait_until_ready(server: ConversionServer, timeout: int) -> None:
     while time.monotonic() < deadline:
         if server.process.poll() is not None:
             # Surface the server's own output; without it a startup failure is
-            # an opaque exit code.
-            detail = ""
-            try:
-                if server.process.stdout is not None:
-                    detail = server.process.stdout.read()[-800:].strip()
-            except Exception:  # noqa: BLE001
-                pass
+            # an opaque exit code. Read the LOG FILE, not process.stdout: the
+            # child's output was redirected to a file, so process.stdout is
+            # always None and the old read produced nothing - the real cause
+            # (e.g. "port already in use") sat unread in the log until stop()
+            # deleted it with the profile.
+            detail = server.read_log(800).strip()
             raise OfficeRuntimeError(
                 "The conversion server exited during startup "
                 f"(code {server.process.returncode})."

@@ -44,7 +44,7 @@ def unlock_pdf_doc(doc, out_path: Path) -> OutputResult:
         _validate_written_pdf(tmp_path, expected_pages=total)
         # Never rebind out_path: the caller must be told the written name.
         written = promote_atomically(tmp_path, out_path)
-    except Exception:
+    except BaseException:  # incl. Ctrl+C: an orphaned temp can hold decrypted bytes
         try:
             if tmp_path.exists():
                 tmp_path.unlink()

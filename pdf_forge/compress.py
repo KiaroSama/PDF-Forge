@@ -92,7 +92,7 @@ def compress_pdf(path: Path, out_path: Path, jpeg_quality: Optional[int],
             # Never rebind out_path: keeping the requested and the written name
             # apart is what stops a caller reporting a file it did not write.
             written = promote_atomically(tmp_path, out_path)
-        except Exception:
+        except BaseException:  # incl. Ctrl+C: an orphaned temp can hold decrypted bytes
             try:
                 if tmp_path.exists():
                     tmp_path.unlink()

@@ -437,7 +437,11 @@ def prompt_source_folder_pdfs() -> Optional[List[Path]]:
             print_error("The path is not a folder.")
             continue
 
-        pdfs = discover_pdfs_in_folder(folder)
+        try:
+            pdfs = discover_pdfs_in_folder(folder)
+        except FolderScanError as exc:
+            print_error(str(exc))
+            continue
         if not pdfs:
             print_error("No PDF files were found in that folder.")
             continue

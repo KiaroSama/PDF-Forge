@@ -70,12 +70,18 @@ def decrypt_to_temp(path: Path, password: Optional[str], temp_dir: Path) -> Path
         except OSError:
             pass
         name = type(exc).__name__
-        # msoffcrypto reports a bad key as InvalidKeyError and an absent or
-        # empty password as DecryptionError; both mean "this password does not
-        # open the file", which the caller re-prompts for.
-        if "InvalidKey" in name or "Password" in name or "Decryption" in name:
+        # Classify by type, not by substring. msoffcrypto raises InvalidKeyError
+        # for a genuinely wrong password, but its *base* DecryptionError also
+        # covers "unsupported EncryptionInfo version" - a file this build simply
+        # cannot open with any password. The old `"Decryption" in name` test
+        # caught both, so an unsupported-encryption file was reported as "wrong
+        # password" and the caller re-prompted forever, never reaching the
+        # honest DecryptError branch. Only a true bad-key (or an empty/missing
+        # password) is a password error.
+        is_bad_key = "InvalidKey" in name or "Password" in name or not password
+        if is_bad_key:
             raise DecryptPasswordError("wrong password") from None
         raise DecryptError(
-            f"This encrypted file could not be decrypted locally ({name})."
+            f"This encrypted file could not be decrypted locally ({name}: {exc})."
         ) from None
     return target

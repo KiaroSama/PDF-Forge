@@ -113,7 +113,11 @@ def prompt_merge_source_folder() -> Optional[List[Path]]:
             print_error("The path is not a folder.")
             continue
 
-        pdfs = discover_pdfs_in_folder(folder)
+        try:
+            pdfs = discover_pdfs_in_folder(folder)
+        except FolderScanError as exc:
+            print_error(str(exc))
+            continue
         if len(pdfs) < 2:
             print_error(
                 f"Found {len(pdfs)} PDF file(s) in that folder; at least 2 are "
