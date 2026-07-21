@@ -1129,8 +1129,8 @@ def test_launch_once_removes_its_profile_on_startup_failure(monkeypatch, tmp_pat
     captured = {}
 
     class ExitedProc:
-        pid = 999999
-
+        # No pid on purpose: the pgid capture must degrade to "no group" for a
+        # process double, never resolve a coincidental live pid.
         def poll(self):
             return 1          # already exited: _terminate stays a no-op
 

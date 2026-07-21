@@ -515,7 +515,9 @@ def _launch_conversion_server_once(
     if os.name != "nt":
         try:
             pgid = os.getpgid(process.pid)
-        except OSError:
+        except (OSError, AttributeError):
+            # AttributeError only for a process double without a real pid; a real
+            # Popen always has one. Degrade to "no group" rather than guessing.
             pgid = None
 
     server = ConversionServer(process, port, profile_dir, soffice, log_handle,
@@ -813,7 +815,7 @@ def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
         if os.name != "nt":
             try:
                 cli_pgid = os.getpgid(proc.pid)
-            except OSError:
+            except (OSError, AttributeError):
                 cli_pgid = None
         try:
             proc.wait(timeout=timeout)
