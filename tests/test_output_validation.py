@@ -119,6 +119,51 @@ def test_correct_textless_selection_still_passes(tmp_path):
         app.close_doc(doc)
 
 
+# --------------------------------------------------------------------------- #
+# N-07 (round 2) - a content stream references images/XObjects by NAME, so two
+# pages can carry byte-identical streams ("/fzImg0 Do") while that name resolves
+# to a different image. The fingerprint must fold in the resolved resources, not
+# just the stream bytes, or a swapped/wrong page slips past.
+# --------------------------------------------------------------------------- #
+
+def image_xobject_pdf(path: Path, colors) -> Path:
+    """Same-size pages each drawing ONE image through a resource reference. The
+    content streams are byte-identical ('/fzImg0 Do'); only the image behind the
+    name differs, so a content-stream-only fingerprint collides on them."""
+    doc = pymupdf.open()
+    for c in colors:
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 40), False)
+        pix.set_rect(pix.irect, c)
+        page = doc.new_page(width=100, height=100)
+        page.insert_image(pymupdf.Rect(10, 10, 50, 50), stream=pix.tobytes("png"))
+    doc.save(str(path), garbage=4, deflate=True)
+    doc.close()
+    return path
+
+
+def test_swapped_pages_sharing_a_resource_name_are_rejected(tmp_path):
+    src = image_xobject_pdf(tmp_path / "src.pdf", [(255, 0, 0), (0, 255, 0)])
+    out = build_from(src, tmp_path / "out.pdf", [1, 0])   # swapped; asked for [0, 1]
+    doc = app.open_source_pdf(src)
+    try:
+        with pytest.raises(app.PdfOpenError):
+            app.validate_page_selection_output(out, doc, [0, 1])
+    finally:
+        app.close_doc(doc)
+
+
+def test_correct_image_xobject_selection_passes(tmp_path):
+    """The identity must round-trip through insert_pdf: a correct extract of the
+    same pages still validates (no false rejection)."""
+    src = image_xobject_pdf(tmp_path / "src.pdf", [(255, 0, 0), (0, 255, 0)])
+    out = build_from(src, tmp_path / "out.pdf", [0, 1])
+    doc = app.open_source_pdf(src)
+    try:
+        app.validate_page_selection_output(out, doc, [0, 1])   # must not raise
+    finally:
+        app.close_doc(doc)
+
+
 def test_page_order_mismatch_is_rejected(tmp_path):
     src = distinct_pdf(tmp_path / "src.pdf")
     out = build_from(src, tmp_path / "out.pdf", [4, 2, 0])   # reversed
