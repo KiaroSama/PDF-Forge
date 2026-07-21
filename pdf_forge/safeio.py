@@ -178,15 +178,17 @@ _STATE_ENV = "PDF_FORGE_STATE_DIR"
 _warning_shown = False
 
 
-def state_dir() -> Path:
-    """Writable per-user directory for machine-local state.
+_STATE_DIRNAME = ".pdfforge_state"   # gitignored; see .gitignore
+_project_state_ok: Optional[bool] = None   # cached writability of the project dir
 
-    Never the repository checkout: a checkout can be read-only, shared, or on
-    removable media. ``PDF_FORGE_STATE_DIR`` overrides it (used by tests).
-    """
-    override = os.environ.get(_STATE_ENV)
-    if override:
-        return Path(override)
+
+def _project_state_dir() -> Path:
+    """The project-local state directory (pdf_forge/../.pdfforge_state)."""
+    return Path(__file__).resolve().parent.parent / _STATE_DIRNAME
+
+
+def _user_state_dir() -> Path:
+    """Per-user fallback when the project location cannot be written."""
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
         if base:
@@ -195,6 +197,38 @@ def state_dir() -> Path:
     if xdg:
         return Path(xdg) / "pdf-forge"
     return Path.home() / ".local" / "state" / "pdf-forge"
+
+
+def state_dir() -> Path:
+    """Directory for machine-local state.
+
+    Project-local by default (``.pdfforge_state`` beside the package), so a
+    portable checkout carries its own state and nothing is written outside the
+    project folder. It is git-ignored, so it is never committed. Falls back to a
+    per-user directory only when the project location cannot be written - a
+    read-only, shared, or removable-media checkout - so the app still works
+    there. ``PDF_FORGE_STATE_DIR`` overrides both (used by tests).
+    """
+    global _project_state_ok
+    override = os.environ.get(_STATE_ENV)
+    if override:
+        return Path(override)
+    local = _project_state_dir()
+    if _project_state_ok is None:
+        _project_state_ok = _is_writable_dir(local)
+    return local if _project_state_ok else _user_state_dir()
+
+
+def _is_writable_dir(path: Path) -> bool:
+    """True when ``path`` can be created and written (probed once, then cached)."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def manifest_path() -> Path:

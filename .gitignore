@@ -59,9 +59,11 @@ htmlcov/
 # pinned version/checksum metadata in office_runtime_meta.json IS tracked).
 /.tools/
 
-# Record of PDFs this application generated, so folder tools never reprocess
-# their own output. Machine-local state, not project source.
+# Machine-local state (the generated-output manifest and its lock), kept inside
+# the project so a portable checkout is self-contained, but never committed.
+/.pdfforge_state/
 /.pdfforge_outputs.json
+/generated-outputs.json
 
 # OS / editor junk.
 Thumbs.db

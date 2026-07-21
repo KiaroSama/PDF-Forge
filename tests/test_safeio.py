@@ -300,22 +300,49 @@ def test_interrupted_write_leaves_previous_manifest_readable(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# PF-028 - state lives outside the checkout and degrades visibly
+# PF-028 - state is project-local (portable) but never committed, and degrades
+# visibly when the project cannot be written
 # --------------------------------------------------------------------------- #
 
-def test_state_is_not_stored_in_the_repository_checkout(monkeypatch):
-    # Clear every override first. state_dir() honours PDF_FORGE_STATE_DIR (and
-    # the LOCALAPPDATA/APPDATA/XDG_STATE_HOME fallbacks), so with those set the
-    # assertion measured the env var, not the fallback it exists to check - a
-    # mutation making the fallback return the checkout still passed. Cleared,
-    # the real default is exercised.
-    for var in ("PDF_FORGE_STATE_DIR", "LOCALAPPDATA", "APPDATA",
-                "XDG_STATE_HOME"):
-        monkeypatch.delenv(var, raising=False)
+def test_state_lives_in_the_project_but_is_gitignored(monkeypatch):
+    # Clear the override so the real default is exercised (with the env var set
+    # the assertion would measure the env var, not the default it checks).
+    monkeypatch.delenv("PDF_FORGE_STATE_DIR", raising=False)
+    monkeypatch.setattr(app.safeio, "_project_state_ok", None, raising=False)
+
     checkout = Path(app.__file__).resolve().parent.parent
     store = app.state_dir().resolve()
-    assert checkout not in store.parents and store != checkout, \
-        "machine-local state must not live in the checkout"
+    # Inside the project, so a portable copy carries its own state.
+    assert checkout == store or checkout in store.parents, (
+        "state must live inside the project folder for a portable checkout"
+    )
+    # ...but git-ignored, so it is never committed. (This is what actually
+    # protects the repository, replacing the old "outside the checkout" rule.)
+    import subprocess
+    result = subprocess.run(
+        ["git", "check-ignore", str(store)],
+        capture_output=True, text=True, cwd=str(checkout), timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"the state directory {store} is NOT git-ignored; it could be committed"
+    )
+
+
+def test_state_falls_back_off_the_project_when_it_is_read_only(monkeypatch,
+                                                               tmp_path):
+    """A read-only/shared/removable checkout must still work, off-project."""
+    monkeypatch.delenv("PDF_FORGE_STATE_DIR", raising=False)
+    # Force the project-local location to look unwritable, and give the per-user
+    # fallback a definite home.
+    monkeypatch.setattr(app.safeio, "_project_state_ok", None, raising=False)
+    monkeypatch.setattr(app.safeio, "_is_writable_dir", lambda _p: False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
+
+    checkout = Path(app.__file__).resolve().parent.parent
+    store = app.state_dir().resolve()
+    assert checkout != store and checkout not in store.parents, (
+        "when the project is read-only, state must fall back off the checkout"
+    )
 
 
 def test_unwritable_state_dir_warns_and_does_not_crash(tmp_path, monkeypatch,
