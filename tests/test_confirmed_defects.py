@@ -916,36 +916,142 @@ def test_word_only_office_offers_libreoffice_for_an_excel_batch(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 12. The server's two ports must be distinct
+# 12. N-11 - the server's two ports must be distinct AND bounded, proven without
+# a vacuous `if captured` guard.
 # --------------------------------------------------------------------------- #
 
-def test_server_ports_are_distinct_even_if_allocation_repeats(monkeypatch):
-    """unoserver needs distinct --port and --uno-port.
-
-    Ephemeral allocation can return the same number twice; the loop must retry
-    until they differ. Feeds a repeating sequence to force it.
-    """
-    seq = iter([5000, 5000, 5000, 5001])   # port, uno tries 5000,5000, then 5001
+def test_allocate_distinct_port_pair_retries_until_distinct(monkeypatch):
+    seq = iter([5000, 5000, 5001])   # port, then uno tries 5000 (dup), 5001
     monkeypatch.setattr(office_server, "random_localhost_port", lambda: next(seq))
+    port, uno = office_server._allocate_distinct_port_pair()
+    assert (port, uno) == (5000, 5001) and port != uno
+
+
+def test_allocate_distinct_port_pair_is_bounded(monkeypatch):
+    """A stuck allocator that always returns the same value must fail cleanly,
+    not loop forever (the old ``while uno == port`` had no cap)."""
+    monkeypatch.setattr(office_server, "random_localhost_port", lambda: 5000)
+    with pytest.raises(office_server.OfficeRuntimeError):
+        office_server._allocate_distinct_port_pair(max_attempts=10)
+
+
+def test_server_ports_are_distinct_non_vacuously(monkeypatch, tmp_path):
+    """Distinct --port/--uno-port, proven by forcing execution to Popen.
+
+    Every precondition is patched so start_conversion_server MUST reach command
+    construction; the assertion is unconditional, so this can no longer pass
+    vacuously on a machine (or CI leg) without a provisioned runtime.
+    """
+    monkeypatch.setattr(office_server, "find_soffice",
+                        lambda: tmp_path / "soffice.exe")
+    monkeypatch.setattr(office_server, "find_soffice_python",
+                        lambda: tmp_path / "python.exe")
+    monkeypatch.setattr(office_server, "unoserver_installed", lambda: True)
+    monkeypatch.setattr(office_server, "_harden_profile", lambda p: p)
+    monkeypatch.setattr(office_server, "_wait_until_ready", lambda *a, **k: None)
+    seq = iter([5000, 5000, 5001])   # one collision, then distinct
+    monkeypatch.setattr(office_server, "random_localhost_port", lambda: next(seq))
+    calls = {"n": 0}
     captured = {}
 
     def fake_popen(cmd, **kwargs):
-        # Pull the two ports back out of the command line.
-        for i, tok in enumerate(cmd):
-            if tok == "--port":
-                captured["port"] = cmd[i + 1]
-            if tok == "--uno-port":
-                captured["uno"] = cmd[i + 1]
-        raise RuntimeError("stop before actually launching")
+        calls["n"] += 1
+        captured["port"] = cmd[cmd.index("--port") + 1]
+        captured["uno"] = cmd[cmd.index("--uno-port") + 1]
+
+        class P:
+            def poll(self):
+                return None
+        return P()
 
     monkeypatch.setattr(office_server.subprocess, "Popen", fake_popen)
-    # unoserver_installed etc. are checked first; short-circuit to the port code
-    # by letting the real function run until Popen raises.
+    server = office_server.start_conversion_server()
     try:
-        office_server.start_conversion_server()
-    except Exception:  # noqa: BLE001 - we only care about the ports chosen
-        pass
-    if captured:
-        assert captured["port"] != captured["uno"], (
-            f"the two ports collided: {captured}"
-        )
+        assert calls["n"] == 1, "execution must reach command construction once"
+        assert captured["port"] != captured["uno"], f"ports collided: {captured}"
+    finally:
+        if server.log_handle is not None:
+            server.log_handle.close()
+        office_server._remove_profile(server.profile_dir)
+
+
+# --------------------------------------------------------------------------- #
+# N-12 - _terminate must reap a REAL process tree (not monkeypatched reapers),
+# and _remove_profile must reap an owner that still holds a stuck profile.
+# --------------------------------------------------------------------------- #
+
+def _pid_alive(pid: int) -> bool:
+    from pdf_forge import safeio
+    return safeio._process_start(pid) is not None
+
+
+def test_terminate_kills_the_whole_process_tree(tmp_path):
+    """A real launcher spawns a real child; _terminate must take down both
+    (Windows taskkill /T, POSIX start_new_session + killpg) and nothing else."""
+    import time
+    import textwrap
+
+    launcher = textwrap.dedent("""
+        import subprocess, sys, time
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import time; time.sleep(90)"])
+        print(child.pid, flush=True)
+        time.sleep(90)
+    """)
+    kwargs = {"stdout": subprocess.PIPE}
+    if os.name != "nt":
+        kwargs["start_new_session"] = True   # mirror production so killpg works
+
+    # An unrelated control process that must SURVIVE the reap.
+    control = subprocess.Popen([sys.executable, "-c",
+                                "import time; time.sleep(90)"])
+    proc = subprocess.Popen([sys.executable, "-c", launcher], **kwargs)
+    try:
+        child_pid = int(proc.stdout.readline().decode().strip())
+        assert _pid_alive(child_pid), "the child should be running before terminate"
+
+        office_server._terminate(proc)
+
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and (
+                proc.poll() is None or _pid_alive(child_pid)):
+            time.sleep(0.1)
+        assert proc.poll() is not None, "the launcher survived _terminate"
+        assert not _pid_alive(child_pid), "the spawned child survived _terminate"
+        assert control.poll() is None, "an unrelated process was killed"
+    finally:
+        for p in (control, proc):
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                p.wait(timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-lock rmtree semantics")
+def test_remove_profile_reaps_owners_when_stuck(tmp_path, monkeypatch):
+    """A profile that will not delete because a child holds it open must trigger
+    the profile-owner reap and then be removed - not silently abandoned. This is
+    the CLI already-exited-launcher orphan case (N-12); the 'reap' releasing the
+    lock models killing the soffice.bin that held the profile."""
+    profile = tmp_path / "prof"
+    profile.mkdir()
+    handle = open(profile / "held.txt", "wb")   # an open handle blocks rmtree
+    reaped = {"n": 0}
+
+    def fake_reap(path):
+        reaped["n"] += 1
+        handle.close()   # killing the owner releases the profile it held open
+
+    monkeypatch.setattr(office_server, "_kill_profile_owners", fake_reap)
+    try:
+        office_server._remove_profile(profile, attempts=2, delay=0.01)
+    finally:
+        if not handle.closed:
+            handle.close()
+
+    assert reaped["n"] == 1, "a stuck profile must trigger the owner reap"
+    assert not profile.exists(), "the profile must be removed after the reap"

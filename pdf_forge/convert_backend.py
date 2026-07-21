@@ -97,12 +97,28 @@ def libreoffice_backend() -> BackendChoice:
 
 
 def msoffice_backend() -> BackendChoice:
-    """An installed Microsoft Office, restricted to the families it registers."""
+    """An installed Microsoft Office, restricted to the families it can convert
+    *under the offline contract*.
+
+    PowerPoint is deliberately excluded even when it is installed: Microsoft
+    PowerPoint fetches linked media while ``Presentations.Open`` runs and cannot
+    suppress it (see ``msoffice._convert_powerpoint``), so it cannot honour the
+    "external updates disabled" guarantee. Only the hardened LibreOffice profile
+    (``BlockUntrustedRefererLinks``) can, so ``.ppt``/``.pptx`` routes there.
+    Word and Excel pass real link-suppression options at open time and stay here.
+    """
     detected = msoffice.detect_office()
     if not detected:
         return BackendChoice("none")
+    families = tuple(f for f in (detected.get("families") or ())
+                     if f != "powerpoint")
+    if not families:
+        # A PowerPoint-only install covers nothing under the contract. An empty
+        # ``families`` reads as "handles everything" (see ``handles``), so this
+        # must be reported as no Office backend at all, not an unrestricted one.
+        return BackendChoice("none")
     return BackendChoice(MSOFFICE, msoffice.describe_office(detected),
-                         families=detected.get("families") or ())
+                         families=families)
 
 
 def detect_backend() -> BackendChoice:

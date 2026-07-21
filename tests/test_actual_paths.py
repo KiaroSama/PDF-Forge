@@ -28,7 +28,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pdf_forge as app  # noqa: E402
 import pymupdf  # noqa: E402
 from helpers import file_hash, make_pdf, rgba_png  # noqa: E402
-from pdf_forge import render  # noqa: E402
+from pdf_forge import core, render  # noqa: E402
+
+
+# --------------------------------------------------------------------------- #
+# N-05 - a path can be reserved for only one queued output object; a file and a
+# directory can never share it, so reserving either kind blocks the other.
+# --------------------------------------------------------------------------- #
+
+def test_file_reservation_blocks_the_same_path_as_a_directory(tmp_path):
+    core.clear_reservations()
+    try:
+        p = tmp_path / "result.pdf"
+        f = core.reserve_unique_file(p)
+        d = core.reserve_unique_dir(p)
+        assert core.normalized_path_key(f) != core.normalized_path_key(d), (
+            "a file and a directory cannot occupy one path; the second "
+            "reservation must be suffixed"
+        )
+    finally:
+        core.clear_reservations()
+
+
+def test_directory_reservation_blocks_the_same_path_as_a_file(tmp_path):
+    core.clear_reservations()
+    try:
+        p = tmp_path / "result.pdf"
+        d = core.reserve_unique_dir(p)
+        f = core.reserve_unique_file(p)
+        assert core.normalized_path_key(d) != core.normalized_path_key(f)
+    finally:
+        core.clear_reservations()
 
 # Content of the unrelated file that appears at the configured destination.
 _EXTERNAL = b"%PDF-1.7\nsomeone else's file that must survive\n"

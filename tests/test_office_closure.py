@@ -253,14 +253,98 @@ def test_partial_office_without_libreoffice_reports_the_unsupported_family(
     assert not plan["word"], "a family with no usable backend must be reported"
 
 
-def test_full_office_serves_every_family(monkeypatch):
+def test_full_office_serves_every_family_except_powerpoint(monkeypatch):
+    """Word/Excel/CSV go to Microsoft Office; PowerPoint cannot honour the
+    offline 'external updates disabled' contract there (it fetches linked media
+    during Presentations.Open), so it routes to the hardened LibreOffice."""
     monkeypatch.setattr(
         msoffice, "detect_office",
         lambda: {"apps": ["word", "excel", "powerpoint"],
                  "families": ["csv", "excel", "powerpoint", "word"]},
     )
+    monkeypatch.setattr(app.office_runtime, "runtime_status",
+                        lambda *a, **k: {"ready": True,
+                                         "libreoffice_version": "25.8"})
     plan = cb.plan_batch(["word", "excel", "powerpoint", "csv"])
-    assert {c.kind for c in plan.values()} == {cb.MSOFFICE}
+    assert plan["word"].kind == cb.MSOFFICE
+    assert plan["excel"].kind == cb.MSOFFICE
+    assert plan["csv"].kind == cb.MSOFFICE
+    assert plan["powerpoint"].kind == cb.LIBREOFFICE
+
+
+# --------------------------------------------------------------------------- #
+# N-02 - Microsoft PowerPoint fetches linked media while Presentations.Open
+# runs and cannot suppress it (msoffice._convert_powerpoint), so it is not
+# eligible for the offline contract: .ppt/.pptx routes to hardened LibreOffice.
+# --------------------------------------------------------------------------- #
+
+def _office(monkeypatch, apps, families, *, runtime_ready):
+    monkeypatch.setattr(msoffice, "detect_office",
+                        lambda: {"apps": apps, "families": families})
+    monkeypatch.setattr(app.office_runtime, "runtime_status",
+                        lambda *a, **k: {"ready": runtime_ready,
+                                         "libreoffice_version": "25.8"})
+
+
+def test_powerpoint_routes_to_libreoffice_even_when_installed(monkeypatch):
+    _office(monkeypatch, ["word", "excel", "powerpoint"],
+            ["csv", "excel", "powerpoint", "word"], runtime_ready=True)
+    plan = cb.plan_batch(["powerpoint"])
+    assert plan["powerpoint"].kind == cb.LIBREOFFICE, (
+        "MS PowerPoint fetches linked media during Open; it must route to the "
+        "hardened LibreOffice, not to Microsoft Office"
+    )
+
+
+def test_powerpoint_only_office_covers_nothing_under_the_contract(monkeypatch):
+    """A PowerPoint-only install must read as 'no backend', not as one that (via
+    empty families) claims to handle everything."""
+    _office(monkeypatch, ["powerpoint"], ["powerpoint"], runtime_ready=False)
+    assert not cb.msoffice_backend()
+
+
+def test_word_and_excel_still_route_to_microsoft_office(monkeypatch):
+    """Regression guard: Word/Excel suppress links at open time and stay on
+    Microsoft Office."""
+    _office(monkeypatch, ["word", "excel"], ["csv", "excel", "word"],
+            runtime_ready=True)
+    plan = cb.plan_batch(["word", "excel", "csv"])
+    assert {plan[f].kind for f in ("word", "excel", "csv")} == {cb.MSOFFICE}
+
+
+def test_installed_powerpoint_without_libreoffice_offers_the_install(monkeypatch):
+    """Installed PowerPoint + no LibreOffice must still fire the install offer,
+    because PowerPoint counts as uncovered under the hardened contract."""
+    _office(monkeypatch, ["word", "powerpoint"], ["powerpoint", "word"],
+            runtime_ready=False)
+    offered = {"n": 0}
+
+    def offer(_q, default_yes=True):
+        offered["n"] += 1
+        return False   # decline
+
+    monkeypatch.setattr(ops_office, "ask_yes_no", offer)
+    backend = ops_office._resolve_backend(["word", "powerpoint"])
+    assert offered["n"] == 1, "PowerPoint must trigger the LibreOffice offer"
+    # Word is still covered, so the batch is not aborted.
+    assert backend and backend.kind == cb.MSOFFICE
+
+
+def test_declined_powerpoint_is_never_opened_through_microsoft_office(
+        tmp_path, monkeypatch):
+    """With no LibreOffice, a PowerPoint job is skipped, never handed to the
+    unsafe Microsoft PowerPoint route."""
+    _office(monkeypatch, ["word", "excel", "powerpoint"],
+            ["csv", "excel", "powerpoint", "word"], runtime_ready=False)
+    opened = {"n": 0}
+    monkeypatch.setattr(msoffice, "start_session",
+                        lambda: opened.__setitem__("n", opened["n"] + 1))
+    # plan_batch gives PowerPoint no backend, so _run_conversion skips it.
+    assert not cb.plan_batch(["powerpoint"])["powerpoint"]
+    job = {"src": tmp_path / "deck.pptx", "family": "powerpoint",
+           "out": tmp_path / "deck.pdf", "csv_dialect": None}
+    ops_office._run_conversion([job], {"powerpoint": 1}, None)
+    assert opened["n"] == 0, "PowerPoint must not be opened through Microsoft Office"
 
 
 # --------------------------------------------------------------------------- #

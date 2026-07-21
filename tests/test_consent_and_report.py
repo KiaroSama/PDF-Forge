@@ -211,3 +211,129 @@ def test_image_pdf_batch_failed_render_not_reported_unprotected(tmp_path, monkey
     assert "their outputs are unprotected" not in out, \
         "a file whose render failed produced no output to call 'unprotected' (PF-031)"
     app.taskqueue._discard_queue()
+
+
+# --------------------------------------------------------------------------- #
+# N-01 - transient preflight failure must still fail closed at the runner.
+#
+# The batch preflight and each runner bind open_source_pdf / open_render_document
+# in DIFFERENT modules, so patching only the preflight's binding to raise
+# reproduces the exact scenario: preflight open fails once (the file is recorded
+# "unreadable", so no consent prompt fires), the runner later opens the SAME
+# owner-restricted file successfully, and it must be skipped/failed BEFORE any
+# writer call - with no output, temp artifact, manifest entry, or "unprotected"
+# report. Production is expected to already be correct; a failure here would
+# expose a wiring gap.
+# --------------------------------------------------------------------------- #
+
+def _fail_preflight_open(monkeypatch):
+    """Make the batch preflight's source-open fail transiently."""
+    calls = {"pre": 0}
+
+    def failing(src, *a, **k):
+        calls["pre"] += 1
+        raise app.PdfOpenError("transient preflight open failure")
+
+    monkeypatch.setattr(bp, "open_source_pdf", failing)
+    return calls
+
+
+def test_delete_batch_transient_preflight_skips_restricted(tmp_path, monkeypatch,
+                                                           capsys):
+    src = _restricted_pdf(tmp_path / "r.pdf")
+    pre = _fail_preflight_open(monkeypatch)
+
+    opened = {"n": 0}
+    real_open = app.ops_pages.open_source_pdf
+
+    def open_spy(p, *a, **k):
+        opened["n"] += 1
+        return real_open(p, *a, **k)
+
+    monkeypatch.setattr(app.ops_pages, "open_source_pdf", open_spy)
+    wrote = {"n": 0}
+    monkeypatch.setattr(app.ops_pages, "write_pages_to_pdf",
+                        lambda *a, **k: wrote.__setitem__("n", wrote["n"] + 1))
+
+    _script(monkeypatch, (app.prompts, app.ops_pages, bp), [str(tmp_path), "2"])
+    try:
+        app.operation_delete_pages_batch()
+    except app.taskqueue._TaskQueued:
+        pass
+    if app.taskqueue._task_queue:
+        app.taskqueue._task_queue[-1].run()
+
+    out = capsys.readouterr().out.lower()
+    assert pre["pre"] >= 1, "the preflight open must have been attempted"
+    assert opened["n"] >= 1, "the runner must open the file itself"
+    assert wrote["n"] == 0, "the writer must never be called for a skipped file"
+    assert list(tmp_path.glob("*_deleted*.pdf")) == [], "no output may be written"
+    assert list(tmp_path.glob(".pdfforge_*")) == [], "no temp artifact may survive"
+    assert app.load_generated_outputs() == set(), "nothing may enter the manifest"
+    assert "their outputs are unprotected" not in out
+    assert list(tmp_path.glob("*.pdf")) == [src]
+    app.taskqueue._discard_queue()
+
+
+def test_image_pdf_batch_transient_preflight_skips_restricted(tmp_path, monkeypatch,
+                                                             capsys):
+    src = _restricted_pdf(tmp_path / "r.pdf", pages=2)
+    pre = _fail_preflight_open(monkeypatch)
+
+    opened = {"n": 0}
+    real_open = app.ops_convert.open_render_document
+
+    def open_spy(p, *a, **k):
+        opened["n"] += 1
+        return real_open(p, *a, **k)
+
+    monkeypatch.setattr(app.ops_convert, "open_render_document", open_spy)
+    wrote = {"n": 0}
+    monkeypatch.setattr(app.ops_convert, "render_pdf_to_image_pdf",
+                        lambda *a, **k: wrote.__setitem__("n", wrote["n"] + 1))
+
+    _script(monkeypatch, (app.prompts, app.ops_convert, bp), [str(tmp_path), "3"])
+    try:
+        app.operation_image_pdf_batch_folder()
+    except app.taskqueue._TaskQueued:
+        pass
+    if app.taskqueue._task_queue:
+        app.taskqueue._task_queue[-1].run()
+
+    out = capsys.readouterr().out.lower()
+    assert pre["pre"] >= 1 and opened["n"] >= 1
+    assert wrote["n"] == 0, "the renderer must never be called for a skipped file"
+    assert list(tmp_path.glob(".pdfforge_*")) == []
+    assert app.load_generated_outputs() == set()
+    assert "their outputs are unprotected" not in out
+    assert list(tmp_path.glob("*.pdf")) == [src], "no image-PDF output may be written"
+    app.taskqueue._discard_queue()
+
+
+def test_compress_batch_transient_preflight_fails_closed_on_restricted(
+        tmp_path, monkeypatch, capsys):
+    src = _restricted_pdf(tmp_path / "r.pdf")
+    pre = _fail_preflight_open(monkeypatch)
+
+    promoted = {"n": 0}
+    monkeypatch.setattr(app.compress, "promote_atomically",
+                        lambda *a, **k: promoted.__setitem__("n", promoted["n"] + 1))
+
+    # folder -> compression level 6 (ultra). No consent prompt (unreadable).
+    _script(monkeypatch, (app.prompts, app.ops_compress, bp), [str(tmp_path), "6"])
+    try:
+        app.operation_compress_pdf_batch()
+    except app.taskqueue._TaskQueued:
+        pass
+    if app.taskqueue._task_queue:
+        app.taskqueue._task_queue[-1].run()
+
+    out = capsys.readouterr().out.lower()
+    assert pre["pre"] >= 1
+    assert promoted["n"] == 0, "nothing may be promoted for an owner-restricted file"
+    # Compress fails closed (reports "failed", not "skipped"); both leave no output.
+    assert "owner restrictions" in out
+    assert list(tmp_path.glob(".pdfforge_*")) == [], "no temp artifact may survive"
+    assert app.load_generated_outputs() == set()
+    assert list(tmp_path.glob("*.pdf")) == [src], "no compressed output may be written"
+    app.taskqueue._discard_queue()

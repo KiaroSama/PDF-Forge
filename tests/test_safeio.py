@@ -8,6 +8,7 @@ degrades visibly), and PF-046 (strong file identity).
 """
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -33,6 +34,36 @@ def make_pdf(path: Path, pages: int = 2) -> Path:
 def write_tmp(path: Path, data: bytes = b"%PDF-1.7 new output\n") -> Path:
     path.write_bytes(data)
     return path
+
+
+# --------------------------------------------------------------------------- #
+# N-04 - the POSIX manifest lock uses fcntl.flock: a lock left by a dead process
+# is free at once (no stale-file read-confirm-unlink race), yet it stays
+# mutually exclusive between live holders.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX fcntl.flock acquisition path")
+def test_posix_lock_recovers_a_dead_owner_and_stays_exclusive(tmp_path):
+    from pdf_forge.safeio import FileLock, LockTimeout
+
+    lock_path = tmp_path / "manifest.lock"
+    # A lock file left by a DEAD process: content present, but nothing holds an
+    # flock on it. A fresh mtime would make the old read-confirm-unlink scheme
+    # wait out stale_after and then time out; flock acquires it immediately
+    # because the kernel already released the dead owner's lock.
+    lock_path.write_text('{"pid": 999999, "host": "gone", "start": "0"}',
+                         encoding="utf-8")
+
+    with FileLock(lock_path, timeout=1.0):
+        # Held now: a second acquirer (a separate open file description) must be
+        # excluded and time out - proving mutual exclusion still holds.
+        with pytest.raises(LockTimeout):
+            with FileLock(lock_path, timeout=0.2):
+                pass
+
+    # Released cleanly: it can be taken again.
+    with FileLock(lock_path, timeout=1.0):
+        pass
 
 
 # --------------------------------------------------------------------------- #

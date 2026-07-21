@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -136,6 +137,18 @@ def _remove_profile(path: Path, attempts: int = 12, delay: float = 0.25) -> None
     Retrying briefly is enough; if it still cannot be removed the failure is
     logged rather than swallowed, because teardown must not raise.
     """
+    for _ in range(attempts):
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            return
+        time.sleep(delay)
+    # Still here: something is holding the profile open. The usual cause is an
+    # orphaned soffice.bin that outlived its launcher - the CLI one-shot exits
+    # the launcher before its child, so the finalizer never saw a live tree to
+    # kill (N-12). Reap whatever still holds THIS profile, then try once more.
+    # This only runs when the profile is genuinely stuck, so the PowerShell reap
+    # cost is not paid on the normal path where removal succeeds immediately.
+    _kill_profile_owners(path)
     for _ in range(attempts):
         shutil.rmtree(path, ignore_errors=True)
         if not path.exists():
@@ -273,7 +286,10 @@ def _terminate(process: subprocess.Popen) -> None:
     The unoserver process launches ``soffice`` itself, so terminating only the
     parent can orphan LibreOffice. On Windows the whole tree is taken down by
     PID with ``taskkill /T``, which touches exactly this process tree and never
-    an unrelated LibreOffice the user has open.
+    an unrelated LibreOffice the user has open. On POSIX the child is started in
+    its own session (``start_new_session``), so the whole process group is
+    signalled with ``os.killpg`` - the equivalent tree-kill, reaching the
+    ``soffice.bin`` the launcher spawned without touching unrelated processes.
     """
     if process.poll() is None and os.name == "nt":
         try:
@@ -282,6 +298,16 @@ def _terminate(process: subprocess.Popen) -> None:
                 capture_output=True, timeout=30,
             )
         except (OSError, subprocess.SubprocessError):
+            pass
+    elif process.poll() is None and os.name != "nt":
+        try:
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
             pass
     if process.poll() is not None:
         return
@@ -294,6 +320,27 @@ def _terminate(process: subprocess.Popen) -> None:
             process.wait(timeout=10)
     except Exception:  # noqa: BLE001 - never raise from teardown
         pass
+
+
+def _allocate_distinct_port_pair(max_attempts: int = 100) -> "tuple[int, int]":
+    """Two distinct free localhost ports for unoserver's server and UNO ports.
+
+    unoserver needs two *distinct* ports; ephemeral allocation can hand back the
+    same number twice, so retry until they differ - but bounded, because a stuck
+    allocator that only ever returns one value must fail cleanly rather than spin
+    forever (N-11). The bind-then-close TOCTOU against another process remains a
+    documented ceiling: unoserver takes port numbers, not inherited sockets, and
+    fails cleanly at startup if one is already taken.
+    """
+    port = random_localhost_port()
+    for _ in range(max_attempts):
+        uno_port = random_localhost_port()
+        if uno_port != port:
+            return port, uno_port
+    raise OfficeRuntimeError(
+        "Could not allocate two distinct localhost ports for the conversion "
+        f"server after {max_attempts} attempts."
+    )
 
 
 def start_conversion_server(
@@ -321,14 +368,7 @@ def start_conversion_server(
             "The 'unoserver' package is not installed in the project .venv."
         )
 
-    port = random_localhost_port()
-    uno_port = random_localhost_port()
-    # unoserver needs two *distinct* ports; ephemeral allocation can hand back
-    # the same number twice. (The bind-then-close TOCTOU against another process
-    # remains a documented ceiling: unoserver takes port numbers, not inherited
-    # sockets, and fails cleanly at startup if one is already taken.)
-    while uno_port == port:
-        uno_port = random_localhost_port()
+    port, uno_port = _allocate_distinct_port_pair()
     profile_dir = Path(tempfile.mkdtemp(prefix="pdfforge_loprofile_"))
     # Always hardened unless explicitly disabled for debugging. Beyond the
     # safety it enforces, disabling link/index updates is what keeps Writer
@@ -379,11 +419,14 @@ def start_conversion_server(
     except OSError as exc:
         shutil.rmtree(profile_dir, ignore_errors=True)
         raise OfficeRuntimeError(f"Could not open the server log: {exc}") from exc
+    popen_kwargs = dict(env=env, stdout=log_handle, stderr=subprocess.STDOUT,
+                        creationflags=creationflags)
+    if os.name != "nt":
+        # Own session/process group, so _terminate can killpg the whole tree
+        # (the launcher plus the soffice.bin it spawns) on POSIX.
+        popen_kwargs["start_new_session"] = True
     try:
-        process = subprocess.Popen(
-            cmd, env=env, stdout=log_handle, stderr=subprocess.STDOUT,
-            creationflags=creationflags,
-        )
+        process = subprocess.Popen(cmd, **popen_kwargs)
     except OSError as exc:
         log_handle.close()
         shutil.rmtree(profile_dir, ignore_errors=True)
@@ -671,9 +714,12 @@ def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
         shutil.rmtree(profile, ignore_errors=True)
         shutil.rmtree(outdir, ignore_errors=True)
         raise OfficeRuntimeError(f"Could not open the CLI log: {exc}") from exc
+    cli_popen_kwargs = dict(stdout=log_handle, stderr=subprocess.STDOUT,
+                            creationflags=creationflags)
+    if os.name != "nt":
+        cli_popen_kwargs["start_new_session"] = True   # enable killpg tree-kill
     try:
-        proc = subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT,
-                                creationflags=creationflags)
+        proc = subprocess.Popen(cmd, **cli_popen_kwargs)
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:

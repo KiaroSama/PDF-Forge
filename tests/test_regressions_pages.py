@@ -79,14 +79,19 @@ def test_reservations_prevent_queued_output_collision(tmp_path):
         app.clear_reservations()
 
 
-def test_files_and_dirs_are_reserved_separately(tmp_path):
+def test_a_path_reserves_as_a_file_or_a_directory_but_not_both(tmp_path):
+    """One path backs only one queued output object: a file and a directory can
+    never coexist there, so reserving either kind blocks the other (N-05)."""
     app.clear_reservations()
     try:
         d1 = app.reserve_unique_dir(tmp_path / "shared")
         d2 = app.reserve_unique_dir(tmp_path / "shared")
         assert d1 != d2
-        # A file reservation does not consume a directory name and vice versa.
-        assert app.reserve_unique_file(tmp_path / "shared") == tmp_path / "shared"
+        # A file reservation cannot reuse a path already reserved as a directory.
+        f = app.reserve_unique_file(tmp_path / "shared")
+        assert f not in (tmp_path / "shared", d1, d2), (
+            "a file output must not collide with a reserved directory path"
+        )
     finally:
         app.clear_reservations()
 

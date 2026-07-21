@@ -33,8 +33,19 @@ def restrictable_actions() -> List[Tuple[str, int]]:
     ]
 
 
-def _validate_encrypted(path: Path, expected_pages: int, password: Optional[str]) -> None:
-    """Reopen an encrypted output, authenticate if needed, verify page count."""
+def _validate_encrypted(path: Path, expected_pages: int, password: Optional[str],
+                        expected_permissions: Optional[int] = None) -> None:
+    """Reopen an encrypted output; verify auth, page count and (when given) that
+    the requested permission mask actually took effect.
+
+    The permission check is bit-by-bit (:func:`permissions_match`): for a
+    Restrict output (no open password) the bits are read in the public,
+    non-owner state a reader actually sees, which is exactly where a writer that
+    silently dropped the restrictions would be caught. For an open-password
+    output where ``user_pw == owner_pw`` the reopen authenticates into the owner
+    state, so the mask read back is the (all-allowed) owner view - which is why
+    the current open-password flow only ever requests an all-allowed mask.
+    """
     pymupdf = _import_pymupdf()
     check = pymupdf.open(str(path))
     try:
@@ -44,12 +55,19 @@ def _validate_encrypted(path: Path, expected_pages: int, password: Optional[str]
                 "reopened with its own password."
             )
         actual = check.page_count
+        actual_permissions = int(check.permissions)
     finally:
         check.close()
     if actual != expected_pages:
         raise PdfOpenError(
             f"Output validation failed: expected {expected_pages} pages, "
             f"found {actual}."
+        )
+    if expected_permissions is not None and not permissions_match(
+            actual_permissions, expected_permissions):
+        raise PdfOpenError(
+            "Output validation failed: the encrypted PDF's permission bits do "
+            "not match the requested restrictions."
         )
 
 
@@ -92,7 +110,8 @@ def save_encrypted_pdf(doc, out_path: Path, user_pw: Optional[str] = None,
     tmp_path = Path(tmp_name)
     try:
         doc.save(str(tmp_path), **save_kwargs)
-        _validate_encrypted(tmp_path, total, user_pw or owner_pw)
+        _validate_encrypted(tmp_path, total, user_pw or owner_pw,
+                            expected_permissions=int(permissions))
         # Never rebind out_path: the caller must be told the written name.
         written = promote_atomically(tmp_path, out_path)
     except BaseException:  # incl. Ctrl+C: an orphaned temp can hold decrypted bytes

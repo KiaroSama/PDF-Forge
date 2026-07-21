@@ -81,6 +81,61 @@ def _must_not_run(*_a, **_k):  # pragma: no cover - only runs on failure
 
 
 # --------------------------------------------------------------------------- #
+# N-09 - a failed / declined LibreOffice install must keep the jobs Microsoft
+# Office can still convert, not abort the whole batch.
+# --------------------------------------------------------------------------- #
+
+def test_provision_exception_keeps_office_covered_jobs(monkeypatch):
+    """Install accepted, then provisioning raises: Word (Office-covered) survives
+    while only the uncovered family is skipped."""
+    monkeypatch.setattr(msoffice, "detect_office",
+                        lambda: {"apps": ["word"], "families": ["word"]})
+    monkeypatch.setattr(ort, "runtime_status", lambda *a, **k: {"ready": False})
+    monkeypatch.setattr("builtins.input", lambda *a: "")   # accept the install
+
+    def boom(**_kwargs):
+        raise ort.OfficeRuntimeError("network down")
+
+    monkeypatch.setattr(ort, "provision_runtime", boom)
+    backend = ops_office._resolve_backend(["word", "excel"])
+    assert backend and backend.kind == cb.MSOFFICE, (
+        "a failed LibreOffice install must not throw away the Word jobs Office "
+        "can still convert"
+    )
+
+
+def test_excel_only_office_plus_powerpoint_survives_provision_exception(monkeypatch):
+    monkeypatch.setattr(msoffice, "detect_office",
+                        lambda: {"apps": ["excel"], "families": ["csv", "excel"]})
+    monkeypatch.setattr(ort, "runtime_status", lambda *a, **k: {"ready": False})
+    monkeypatch.setattr("builtins.input", lambda *a: "")
+
+    def boom(**_kwargs):
+        raise ort.OfficeRuntimeError("no network")
+
+    monkeypatch.setattr(ort, "provision_runtime", boom)
+    backend = ops_office._resolve_backend(["excel", "powerpoint"])
+    assert backend and backend.kind == cb.MSOFFICE, (
+        "Excel/CSV must survive; only PowerPoint is skipped"
+    )
+
+
+def test_powerpoint_only_office_aborts_normally_when_install_fails(monkeypatch):
+    """When Microsoft Office covers nothing (PowerPoint-only, excluded by the
+    contract) and LibreOffice cannot install, returning 'none' is correct."""
+    monkeypatch.setattr(msoffice, "detect_office",
+                        lambda: {"apps": ["powerpoint"], "families": ["powerpoint"]})
+    monkeypatch.setattr(ort, "runtime_status", lambda *a, **k: {"ready": False})
+    monkeypatch.setattr("builtins.input", lambda *a: "")
+
+    def boom(**_kwargs):
+        raise ort.OfficeRuntimeError("offline")
+
+    monkeypatch.setattr(ort, "provision_runtime", boom)
+    assert not ops_office._resolve_backend(["powerpoint", "word"])
+
+
+# --------------------------------------------------------------------------- #
 # Microsoft Office detection
 # --------------------------------------------------------------------------- #
 

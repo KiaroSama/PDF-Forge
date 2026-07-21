@@ -162,6 +162,83 @@ def test_unlock_removes_open_password(tmp_path):
         check.close()
 
 
+# --------------------------------------------------------------------------- #
+# N-06 - the writer must prove the requested permission mask actually took
+# effect (bit-by-bit), not just that the output re-opens with the right page
+# count. A restrict that dropped the mask, or an unlock that kept restrictions,
+# must fail before promotion and leave no output.
+# --------------------------------------------------------------------------- #
+
+def test_restrict_output_that_drops_the_mask_fails_validation(tmp_path, monkeypatch):
+    import pymupdf
+
+    src = make_pdf(tmp_path / "doc.pdf", 1)
+    out = tmp_path / "restricted.pdf"
+    allowed = int(pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_ACCESSIBILITY)
+    doc = app.open_source_pdf(src)
+    real_save = doc.save
+
+    def sabotaged(path, **kw):          # honour encryption, ignore the mask
+        kw["permissions"] = app.all_permissions()
+        return real_save(path, **kw)
+
+    monkeypatch.setattr(doc, "save", sabotaged)
+    try:
+        with pytest.raises(app.PdfOpenError):
+            app.save_encrypted_pdf(doc, out, user_pw=None,
+                                   owner_pw="owner", permissions=allowed)
+    finally:
+        doc.close()
+    assert not out.exists(), "a restrict output that ignored the mask was promoted"
+    assert list(tmp_path.glob(".pdfforge_*")) == []
+
+
+def test_unlock_output_that_keeps_restrictions_fails_validation(tmp_path, monkeypatch):
+    import pymupdf
+
+    src = _make_owner_restricted_pdf(tmp_path / "owner.pdf")
+    doc = pymupdf.open(str(src))        # opens freely, restricted
+    out = tmp_path / "unlocked.pdf"
+    real_save = doc.save
+
+    def sabotaged(path, **kw):          # ignore PDF_ENCRYPT_NONE, keep restrictions
+        return real_save(path, encryption=pymupdf.PDF_ENCRYPT_AES_256,
+                         owner_pw="ownersecret",
+                         permissions=int(pymupdf.PDF_PERM_PRINT))
+
+    monkeypatch.setattr(doc, "save", sabotaged)
+    try:
+        with pytest.raises(app.PdfOpenError):
+            app.unlock_pdf_doc(doc, out)
+    finally:
+        doc.close()
+    assert not out.exists(), "a still-restricted 'unlock' output was promoted"
+    assert list(tmp_path.glob(".pdfforge_*")) == []
+
+
+def test_restrict_output_bits_match_requested_mask(tmp_path):
+    """Positive: a correct restrict output verifies bit-by-bit (pymupdf 1.28.0)."""
+    import pymupdf
+
+    src = make_pdf(tmp_path / "doc.pdf", 1)
+    out = tmp_path / "restricted.pdf"
+    expected = app.all_permissions() & ~int(
+        pymupdf.PDF_PERM_MODIFY | pymupdf.PDF_PERM_COPY)
+    doc = app.open_source_pdf(src)
+    try:
+        app.save_encrypted_pdf(doc, out, user_pw=None,
+                               owner_pw="owner", permissions=expected)
+    finally:
+        doc.close()
+    check = pymupdf.open(str(out))
+    try:
+        assert not check.needs_pass
+        for bit in app.permission_bits().values():          # BIT-BY-BIT, not raw int
+            assert bool(check.permissions & int(bit)) == bool(expected & int(bit))
+    finally:
+        check.close()
+
+
 def test_compress_temp_cleanup_on_failure(tmp_path, monkeypatch):
     src = make_pdf(tmp_path / "doc.pdf", 3)
     out = tmp_path / "fail.pdf"

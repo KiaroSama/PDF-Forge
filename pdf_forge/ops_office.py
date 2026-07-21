@@ -895,6 +895,16 @@ def _resolve_backend(families=()):
     except ort.OfficeRuntimeError as exc:
         print_error(f"The converter could not be installed: {exc}")
         logger.error("Provisioning failed: %s", exc)
+        # Keep the jobs Microsoft Office can still convert; only the families
+        # that needed LibreOffice are skipped (reported per family at run time),
+        # exactly as when the install is declined. Aborting everything here threw
+        # away Office-convertible files over an unrelated download failure (N-09).
+        if office:
+            print_warning(
+                "Nothing was installed; the formats Microsoft Office cannot "
+                "convert will be skipped."
+            )
+            return office
         return cb.BackendChoice("none")
     print_success(f"Converter ready ({result.get('status')}).")
 
