@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordinary re-prompt.
 
 ### Changed
+- **`0`/back now steps back one prompt instead of leaving the whole
+  operation.** In every multi-step tool, pressing `0` at a prompt re-shows the
+  *previous* question; only `0` at the first prompt returns to the menu.
+  Deliberate cancels (declining a protection choice, cancelling a batch
+  protection preflight, or a "nothing to do" outcome such as no watermark
+  candidates) still return to the menu, as before.
 - `office_runtime` was split into `office_discovery`, `office_server` and
   `office_provision`, with `office_runtime` re-exporting the public API so no
   caller changed. The two oversized test modules were split by feature into
