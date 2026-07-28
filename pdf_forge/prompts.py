@@ -8,8 +8,47 @@ from .ui import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
-__all__ = ['_input', 'ask_yes_no', 'prompt_password', 'prompt_new_password',
+__all__ = ['_input', 'navigate_steps', '_AbortToMenu', 'ask_yes_no', 'prompt_password', 'prompt_new_password',
            'resolve_protection', 'resolve_merge_protection', 'prompt_source_pdf', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
+
+
+class _AbortToMenu(Exception):
+    """A step's deliberate cancel (e.g. a y/n "No"): abandon the whole operation.
+
+    Distinct from stepping back one prompt - a step raises this to return
+    straight to the menu, which ``navigate_steps`` turns into a ``False`` result.
+    """
+
+
+def navigate_steps(steps) -> bool:
+    """Drive an operation's ordered prompts with single-step back navigation.
+
+    Each ``step`` is a zero-argument callable returning ``True`` to advance to
+    the next step or ``False`` to step back to the previous one - this is how a
+    ``0``/back entry (a prompt returning ``None``) becomes "show the previous
+    question" instead of "abort the whole operation". Backing out of the *first*
+    step, or a step raising :class:`_AbortToMenu` (a deliberate cancel), returns
+    ``False`` from this function, which the caller treats as "return to the
+    menu". Returns ``True`` once the final step advances (configuration done).
+
+    Steps share their working values through their own closures (``nonlocal``);
+    this function owns only the step index, so the back semantics live in one
+    tested place rather than being re-implemented in every operation.
+    """
+    index = 0
+    while index < len(steps):
+        try:
+            advance = steps[index]()
+        except _AbortToMenu:
+            return False  # deliberate cancel -> menu
+        if advance:
+            index += 1
+        else:
+            index -= 1
+            if index < 0:
+                return False  # backed out before the first step -> menu
+    return True
+
 
 def _input(prompt) -> str:
     """Read a line of input, treating EOF as a request to exit.
