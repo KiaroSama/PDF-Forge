@@ -42,32 +42,47 @@ def operation_images_all_pages() -> None:
     print_heading("\nPDF to images: all pages")
     logger.info("Operation started: PDF to images (all pages).")
 
-    try:
+    source = None
+    pdf = None
+    total_pages = 0
+    pw = None
+    dpi = None
+    out_dir = None
+
+    def step_source() -> bool:
+        nonlocal source, pdf, total_pages, pw
+        # Re-entering this step (the user backed up from the quality prompt):
+        # release the document opened for the previous source first.
+        if pdf is not None:
+            close_doc(pdf)
+            pdf = None
         source = prompt_source_pdf()
-    except _ExitRequested:
-        raise
-    if source is None:
-        return
-
-    dpi = prompt_image_quality()
-    if dpi is None:
-        return
-
-    try:
-        pdf, total_pages = open_render_document(source, password_prompt=prompt_password)
-    except (PdfOpenError, RuntimeError) as exc:
-        print_error(str(exc))
-        logger.error("Failed to open '%s' for rendering: %s", source, exc)
-        return
-
-    try:
+        if source is None:
+            return False  # first step: back -> menu
+        try:
+            pdf, total_pages = open_render_document(
+                source, password_prompt=prompt_password)
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(str(exc))
+            logger.error("Failed to open '%s' for rendering: %s", source, exc)
+            return False  # cannot open -> back to the menu (matches prior behaviour)
         # Capture the working password now so the queued runner can reopen the
         # source silently - no password prompt during queue execution (A13).
         pw = source_password(pdf)
         print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
-        _warn_if_dpi_exceeds_source(pdf, dpi)
-        default_folder = unique_dir_path(default_images_output_dir(source))
+        return True
 
+    def step_quality() -> bool:
+        nonlocal dpi
+        dpi = prompt_image_quality()
+        if dpi is None:
+            return False  # back -> source
+        _warn_if_dpi_exceeds_source(pdf, dpi)
+        return True
+
+    def step_output() -> bool:
+        nonlocal out_dir
+        default_folder = unique_dir_path(default_images_output_dir(source))
         print_heading("\nSummary")
         print_kv("Source file", source.name, Color.CYAN)
         print_kv("Total source pages", total_pages, Color.GOLD)
@@ -75,10 +90,11 @@ def operation_images_all_pages() -> None:
         print_kv("Image format", "PNG", Color.ORANGE)
         print_kv("Quality", f"{dpi} DPI", Color.PINK)
         print_kv("Output directory", default_folder, Color.AQUA)
-
         out_dir = _choose_output_dir(default_folder)
-        if out_dir is None:
-            print_warning("Returning to menu.")
+        return out_dir is not None  # back -> quality
+
+    try:
+        if not navigate_steps([step_source, step_quality, step_output]):
             return
 
         pages_zero_based = list(range(total_pages))
@@ -93,7 +109,7 @@ def operation_images_all_pages() -> None:
             try:
                 _render_pngs_and_report(rpdf, pages_zero_based, out_dir, dpi)
             finally:
-                rpdf.close()
+                close_doc(rpdf)
 
         queue_task(
             f"PDF to PNG (all {total_pages} page(s)) of {source.name} "
@@ -104,7 +120,8 @@ def operation_images_all_pages() -> None:
             sources=[capture_file_source(source)],
         )
     finally:
-        pdf.close()
+        if pdf is not None:
+            close_doc(pdf)
 
 
 def operation_images_selected_pages() -> None:
@@ -113,30 +130,44 @@ def operation_images_selected_pages() -> None:
     print_heading("\nPDF to images: selected pages")
     logger.info("Operation started: PDF to images (selected pages).")
 
-    try:
+    source = None
+    pdf = None
+    total_pages = 0
+    pw = None
+    dpi = None
+    result = None
+    out_dir = None
+
+    def step_source() -> bool:
+        nonlocal source, pdf, total_pages, pw
+        if pdf is not None:
+            close_doc(pdf)
+            pdf = None
         source = prompt_source_pdf()
-    except _ExitRequested:
-        raise
-    if source is None:
-        return
-
-    dpi = prompt_image_quality()
-    if dpi is None:
-        return
-
-    try:
-        pdf, total_pages = open_render_document(source, password_prompt=prompt_password)
-    except (PdfOpenError, RuntimeError) as exc:
-        print_error(str(exc))
-        logger.error("Failed to open '%s' for rendering: %s", source, exc)
-        return
-
-    try:
+        if source is None:
+            return False  # first step: back -> menu
+        try:
+            pdf, total_pages = open_render_document(
+                source, password_prompt=prompt_password)
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(str(exc))
+            logger.error("Failed to open '%s' for rendering: %s", source, exc)
+            return False
         # Capture the working password for a silent reopen in the runner (A13).
         pw = source_password(pdf)
         print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
-        _warn_if_dpi_exceeds_source(pdf, dpi)
+        return True
 
+    def step_quality() -> bool:
+        nonlocal dpi
+        dpi = prompt_image_quality()
+        if dpi is None:
+            return False  # back -> source
+        _warn_if_dpi_exceeds_source(pdf, dpi)
+        return True
+
+    def step_selection() -> bool:
+        nonlocal result
         selection_prompt = question_prompt(
             "Pages to export as images",
             details="e.g. 5 or 10-20 or 10-20,25,30-50",
@@ -144,7 +175,7 @@ def operation_images_selected_pages() -> None:
         while True:
             expression = _input(selection_prompt).strip()
             if expression == "0":
-                return
+                return False  # back -> quality
             if expression.lower() in ("exit", "quit"):
                 raise _ExitRequested()
             try:
@@ -152,16 +183,17 @@ def operation_images_selected_pages() -> None:
                 break
             except PageSelectionError as exc:
                 print_error(f"Invalid selection: {exc}")
-
         if result.duplicates_removed:
             print_warning("Duplicate pages were removed; first occurrence kept.")
         logger.info(
             "Image selection parsed: expression='%s' pages=%d",
             expression, len(result.pages),
         )
+        return True
 
+    def step_output() -> bool:
+        nonlocal out_dir
         default_folder = unique_dir_path(default_images_output_dir(source))
-
         print_heading("\nSummary")
         print_kv("Source file", source.name, Color.CYAN)
         print_kv("Total source pages", total_pages, Color.GOLD)
@@ -170,10 +202,12 @@ def operation_images_selected_pages() -> None:
         print_kv("Image format", "PNG", Color.ORANGE)
         print_kv("Quality", f"{dpi} DPI", Color.PINK)
         print_kv("Output directory", default_folder, Color.AQUA)
-
         out_dir = _choose_output_dir(default_folder)
-        if out_dir is None:
-            print_warning("Returning to menu.")
+        return out_dir is not None  # back -> selection
+
+    try:
+        if not navigate_steps(
+                [step_source, step_quality, step_selection, step_output]):
             return
 
         pages_zero_based = [p - 1 for p in result.pages]
@@ -199,7 +233,8 @@ def operation_images_selected_pages() -> None:
             sources=[capture_file_source(source)],
         )
     finally:
-        pdf.close()
+        if pdf is not None:
+            close_doc(pdf)
 
 
 def _render_pngs_and_report(pdf, pages_zero_based: Sequence[int], out_dir: Path,
@@ -241,12 +276,20 @@ def operation_images_batch_folder() -> None:
     print_heading("\nPDF to images: batch folder")
     logger.info("Operation started: PDF to images (batch folder).")
 
-    pdfs = prompt_source_folder_pdfs()
-    if pdfs is None:
-        return
+    pdfs = None
+    dpi = None
 
-    dpi = prompt_image_quality()
-    if dpi is None:
+    def step_folder() -> bool:
+        nonlocal pdfs
+        pdfs = prompt_source_folder_pdfs()
+        return pdfs is not None  # first step: back -> menu
+
+    def step_quality() -> bool:
+        nonlocal dpi
+        dpi = prompt_image_quality()
+        return dpi is not None  # back -> folder
+
+    if not navigate_steps([step_folder, step_quality]):
         return
 
     folder = pdfs[0].parent
@@ -315,47 +358,64 @@ def operation_pdf_to_image_pdf() -> None:
     print_heading("\nPDF to image-only PDF: single file")
     logger.info("Operation started: PDF to image-only PDF (single file).")
 
-    try:
+    source = None
+    pdf = None
+    total_pages = 0
+    pw = None
+    dpi = None
+    detected_protection = None
+    protection = None
+    out_path = None
+
+    def step_source() -> bool:
+        nonlocal source, pdf, total_pages, pw, detected_protection
+        if pdf is not None:
+            close_doc(pdf)
+            pdf = None
         source = prompt_source_pdf()
-    except _ExitRequested:
-        raise
-    if source is None:
-        return
-
-    dpi = prompt_image_quality()
-    if dpi is None:
-        return
-
-    try:
-        pdf, total_pages = open_render_document(source, password_prompt=prompt_password)
-    except (PdfOpenError, RuntimeError) as exc:
-        print_error(str(exc))
-        logger.error("Failed to open '%s' for rendering: %s", source, exc)
-        return
-
-    try:
+        if source is None:
+            return False  # first step: back -> menu
+        try:
+            pdf, total_pages = open_render_document(
+                source, password_prompt=prompt_password)
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(str(exc))
+            logger.error("Failed to open '%s' for rendering: %s", source, exc)
+            return False
         # Capture the working password for a silent reopen in the runner (A13).
         pw = source_password(pdf)
-        protection = detect_protection(pdf)
+        detected_protection = detect_protection(pdf)
         print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
-        _warn_if_dpi_exceeds_source(pdf, dpi)
-        default_path = unique_file_path(default_image_pdf_output(source))
+        return True
 
+    def step_quality() -> bool:
+        nonlocal dpi
+        dpi = prompt_image_quality()
+        if dpi is None:
+            return False  # back -> source
+        _warn_if_dpi_exceeds_source(pdf, dpi)
+        return True
+
+    def step_output() -> bool:
+        nonlocal protection, out_path
+        default_path = unique_file_path(default_image_pdf_output(source))
         print_heading("\nSummary")
         print_kv("Source file", source.name, Color.CYAN)
         print_kv("Total source pages", total_pages, Color.GOLD)
         print_kv("Quality", f"{dpi} DPI", Color.PINK)
         print_kv("Result", "image-only PDF (not editable)", Color.LIME)
         print_kv("Default Output Path", default_path, Color.AQUA)
-
-        protection = resolve_protection(protection, context="image-only PDF")
+        # Resolve from the ORIGINAL detected policy each time, so backing here
+        # and forward re-asks cleanly rather than compounding a prior answer.
+        protection = resolve_protection(detected_protection, context="image-only PDF")
         if protection is None:
             print_warning("Cancelled. Returning to menu.")
-            return
-
+            raise _AbortToMenu()  # deliberate cancel -> menu, not a step back
         out_path = _choose_output_file(default_path, source)
-        if out_path is None:
-            print_warning("Returning to menu.")
+        return out_path is not None  # back -> quality
+
+    try:
+        if not navigate_steps([step_source, step_quality, step_output]):
             return
 
         print_warning(
@@ -406,7 +466,8 @@ def operation_pdf_to_image_pdf() -> None:
             sources=[capture_file_source(source)],
         )
     finally:
-        pdf.close()
+        if pdf is not None:
+            close_doc(pdf)
 
 
 def operation_image_pdf_batch_folder() -> None:
@@ -419,12 +480,20 @@ def operation_image_pdf_batch_folder() -> None:
     print_heading("\nPDF to image-only PDF: batch folder")
     logger.info("Operation started: PDF to image-only PDF (batch folder).")
 
-    pdfs = prompt_source_folder_pdfs()
-    if pdfs is None:
-        return
+    pdfs = None
+    dpi = None
 
-    dpi = prompt_image_quality()
-    if dpi is None:
+    def step_folder() -> bool:
+        nonlocal pdfs
+        pdfs = prompt_source_folder_pdfs()
+        return pdfs is not None  # first step: back -> menu
+
+    def step_quality() -> bool:
+        nonlocal dpi
+        dpi = prompt_image_quality()
+        return dpi is not None  # back -> folder
+
+    if not navigate_steps([step_folder, step_quality]):
         return
 
     folder = pdfs[0].parent
@@ -594,22 +663,30 @@ def operation_extract_images() -> None:
     print_heading("\nExtract images from PDF")
     logger.info("Operation started: Extract images from PDF.")
 
-    try:
+    source = None
+    pdf = None
+    total_pages = 0
+    pw = None
+    image_count = 0
+    label = None
+    jpeg_quality = None
+    out_dir = None
+
+    def step_source() -> bool:
+        nonlocal source, pdf, total_pages, pw, image_count
+        if pdf is not None:
+            close_doc(pdf)
+            pdf = None
         source = prompt_source_pdf()
-    except _ExitRequested:
-        raise
-
-    if source is None:
-        return
-
-    try:
-        pdf, total_pages = open_render_document(source, password_prompt=prompt_password)
-    except (PdfOpenError, RuntimeError) as exc:
-        print_error(str(exc))
-        logger.error("Failed to open '%s' for image extraction: %s", source, exc)
-        return
-
-    try:
+        if source is None:
+            return False  # first step: back -> menu
+        try:
+            pdf, total_pages = open_render_document(
+                source, password_prompt=prompt_password)
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(str(exc))
+            logger.error("Failed to open '%s' for image extraction: %s", source, exc)
+            return False
         # Capture the working password for a silent reopen in the runner (A13).
         pw = source_password(pdf)
         image_count = count_embedded_images(pdf)
@@ -623,7 +700,7 @@ def operation_extract_images() -> None:
                 "No embedded images were found. This tool extracts raster "
                 "images stored inside the PDF; text/vector content has none."
             )
-            return
+            return False  # nothing to extract -> menu
         print_note(
             "The same image reused on many pages (e.g. a watermark) is "
             "extracted once, named after the first page it appears on."
@@ -635,16 +712,21 @@ def operation_extract_images() -> None:
                 "page content and have no separate image object, so they cannot "
                 "be extracted. Use 'PDF to images (PNG)' to capture those pages."
             )
+        return True
 
+    def step_quality() -> bool:
+        nonlocal label, jpeg_quality
         quality = _prompt_extract_quality()
         if quality is None:
-            return
+            return False  # back -> source
         label, jpeg_quality = quality
+        return True
 
+    def step_output() -> bool:
+        nonlocal out_dir
         default_folder = unique_dir_path(
             source.parent / f"{source.stem}_extracted_images"
         )
-
         print_heading("\nSummary")
         print_kv("Source file", source.name, Color.CYAN)
         print_kv("Total source pages", total_pages, Color.GOLD)
@@ -659,10 +741,11 @@ def operation_extract_images() -> None:
         else:
             print_kv("Quality", f"{label} (JPEG quality {jpeg_quality})", Color.LIME)
         print_kv("Output directory", default_folder, Color.AQUA)
-
         out_dir = _choose_output_dir(default_folder)
-        if out_dir is None:
-            print_warning("Returning to menu.")
+        return out_dir is not None  # back -> quality
+
+    try:
+        if not navigate_steps([step_source, step_quality, step_output]):
             return
 
         def _run():
@@ -697,4 +780,5 @@ def operation_extract_images() -> None:
             sources=[capture_file_source(source)],
         )
     finally:
-        pdf.close()
+        if pdf is not None:
+            close_doc(pdf)

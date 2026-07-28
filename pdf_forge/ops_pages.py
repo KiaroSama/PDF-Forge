@@ -24,53 +24,78 @@ def operation_extract_pages() -> None:
     print_heading("\nExtract selected pages")
     logger.info("Operation started: Extract selected pages.")
 
-    try:
+    source = None
+    reader = None
+    total_pages = 0
+    detected_protection = None
+    ref = None
+    groups = None
+
+    def step_source() -> bool:
+        nonlocal source, reader, total_pages, detected_protection, ref
+        # Re-entering this step (the user backed up from the selection prompt):
+        # release the document opened for the previous source first.
+        if reader is not None:
+            close_doc(reader)
+            reader = None
         source = prompt_source_pdf()
-    except _ExitRequested:
-        raise
-    if source is None:
-        return
+        if source is None:
+            return False  # first step: back -> menu
+        try:
+            reader = open_source_pdf(source, password_prompt=prompt_password)
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(str(exc))
+            logger.error("Failed to open source PDF '%s': %s", source, exc)
+            return False  # cannot open -> menu (matches prior behaviour)
+        total_pages = reader.page_count
+        detected_protection = detect_protection(reader)
+        # Carry immutable state into the queue, never the open document (PF-004).
+        ref = capture_source(reader, source)
+        print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
+        logger.info("Extract: source='%s' pages=%d", source, total_pages)
+        return True
+
+    def step_selection() -> bool:
+        nonlocal groups
+        selection_prompt = question_prompt(
+            "Pages to extract",
+            details="',' = one file, '|' = separate files, e.g. 6-37,39-85 or 6-37|39-85",
+        )
+        while True:
+            expression = _input(selection_prompt).strip()
+            if expression == "0":
+                return False  # back -> source
+            if expression.lower() in ("exit", "quit"):
+                raise _ExitRequested()
+            try:
+                groups = parse_multi_file_selection(expression, total_pages)
+                break
+            except PageSelectionError as exc:
+                print_error(f"Invalid selection: {exc}")
+
+        logger.info(
+            "Extract selection parsed: expression='%s' groups=%d total_selected=%d",
+            expression, len(groups), sum(len(g.pages) for g in groups),
+        )
+        return True
+
+    def step_output() -> bool:
+        # Summary, protection resolution and the output prompt live in the
+        # per-shape helpers. A deliberate protection cancel raises _AbortToMenu
+        # (menu); a 0 at the output prompt makes the helper return None, which
+        # steps back to the selection prompt.
+        if len(groups) == 1:
+            return bool(_extract_single_file(
+                ref, source, total_pages, groups[0], detected_protection))
+        return bool(_extract_multiple_files(
+            ref, source, total_pages, groups, detected_protection))
 
     try:
-        reader = open_source_pdf(source, password_prompt=prompt_password)
-    except (PdfOpenError, RuntimeError) as exc:
-        print_error(str(exc))
-        logger.error("Failed to open source PDF '%s': %s", source, exc)
-        return
-
-    total_pages = reader.page_count
-    protection = detect_protection(reader)
-    # Carry immutable state into the queue, never the open document (PF-004).
-    ref = capture_source(reader, source)
-    close_doc(reader)
-    print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
-    logger.info("Extract: source='%s' pages=%d", source, total_pages)
-
-    selection_prompt = question_prompt(
-        "Pages to extract",
-        details="',' = one file, '|' = separate files, e.g. 6-37,39-85 or 6-37|39-85",
-    )
-    while True:
-        expression = _input(selection_prompt).strip()
-        if expression == "0":
+        if not navigate_steps([step_source, step_selection, step_output]):
             return
-        if expression.lower() in ("exit", "quit"):
-            raise _ExitRequested()
-        try:
-            groups = parse_multi_file_selection(expression, total_pages)
-            break
-        except PageSelectionError as exc:
-            print_error(f"Invalid selection: {exc}")
-
-    logger.info(
-        "Extract selection parsed: expression='%s' groups=%d total_selected=%d",
-        expression, len(groups), sum(len(g.pages) for g in groups),
-    )
-
-    if len(groups) == 1:
-        _extract_single_file(ref, source, total_pages, groups[0], protection)
-    else:
-        _extract_multiple_files(ref, source, total_pages, groups, protection)
+    finally:
+        if reader is not None:
+            close_doc(reader)
 
 
 def _extract_single_file(ref, source: Path, total_pages: int, group: "PageGroup",
@@ -95,12 +120,11 @@ def _extract_single_file(ref, source: Path, total_pages: int, group: "PageGroup"
     protection = resolve_protection(protection, context="extracted PDF")
     if protection is None:
         print_warning("Cancelled. Returning to menu.")
-        return
+        raise _AbortToMenu()  # deliberate cancel -> menu, not a step back
 
     out_path = _choose_output_file(default_path, source)
     if out_path is None:
-        print_warning("Returning to menu.")
-        return
+        return  # 0 at the output prompt -> step back to the page selection
 
     pages_zero_based = [p - 1 for p in group.pages]
 
@@ -157,12 +181,11 @@ def _extract_multiple_files(ref, source: Path, total_pages: int,
     protection = resolve_protection(protection, context="extracted PDFs")
     if protection is None:
         print_warning("Cancelled. Returning to menu.")
-        return
+        raise _AbortToMenu()  # deliberate cancel -> menu, not a step back
 
     out_dir = _choose_output_dir_for_files(source.parent)
     if out_dir is None:
-        print_warning("Returning to menu.")
-        return
+        return  # 0 at the output prompt -> step back to the page selection
 
     def _run():
         try:
@@ -234,201 +257,231 @@ def operation_split_chunks() -> None:
     print_heading("\nSplit PDF into fixed-size chunks")
     logger.info("Operation started: Split PDF into fixed-size chunks.")
 
-    try:
+    source = None
+    reader = None
+    total_pages = 0
+    detected_protection = None
+    ref = None
+    chunk_size = 0
+    first_page = 0
+    last_page = 0
+    protection = None
+    chunks = None
+    pad = 0
+    out_dir = None
+
+    def step_source() -> bool:
+        nonlocal source, reader, total_pages, detected_protection, ref
+        if reader is not None:
+            close_doc(reader)
+            reader = None
         source = prompt_source_pdf()
-    except _ExitRequested:
-        raise
-    if source is None:
-        return
-
-    try:
-        reader = open_source_pdf(source, password_prompt=prompt_password)
-    except (PdfOpenError, RuntimeError) as exc:
-        print_error(str(exc))
-        logger.error("Failed to open source PDF '%s': %s", source, exc)
-        return
-
-    total_pages = reader.page_count
-    protection = detect_protection(reader)
-    # Immutable state only: the queue must not hold an open document (PF-004).
-    ref = capture_source(reader, source)
-    close_doc(reader)
-    print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
-    logger.info("Split: source='%s' pages=%d", source, total_pages)
-
-    chunk_prompt = question_prompt("Pages per file")
-    while True:
-        raw = _input(chunk_prompt).strip()
-        if raw == "0":
-            return
-        if raw.lower() in ("exit", "quit"):
-            raise _ExitRequested()
+        if source is None:
+            return False  # first step: back -> menu
         try:
-            chunk_size = parse_chunk_size(raw)
-            break
-        except ChunkSizeError as exc:
-            print_error(f"Invalid value: {exc}")
-
-    # Optional start/end page range. Empty input keeps the document's natural
-    # boundaries (start = 1, end = total_pages).
-    start_prompt = question_prompt("Start page", default="1")
-    while True:
-        raw_start = _input(start_prompt).strip()
-        if raw_start == "0":
-            return
-        if raw_start.lower() in ("exit", "quit"):
-            raise _ExitRequested()
-        try:
-            first_page = parse_page_number(raw_start, 1, total_pages, "start page")
-            break
-        except ChunkSizeError as exc:
-            print_error(f"Invalid value: {exc}")
-
-    end_prompt = question_prompt("End page", default=str(total_pages))
-    while True:
-        raw_end = _input(end_prompt).strip()
-        if raw_end == "0":
-            return
-        if raw_end.lower() in ("exit", "quit"):
-            raise _ExitRequested()
-        try:
-            last_page = parse_page_number(raw_end, total_pages, total_pages, "end page")
-        except ChunkSizeError as exc:
-            print_error(f"Invalid value: {exc}")
-            continue
-        if first_page > last_page:
-            print_error(
-                f"The start page ({first_page}) must not be greater than the "
-                f"end page ({last_page})."
-            )
-            continue
-        break
-
-    covered_pages = last_page - first_page + 1
-    using_subrange = (first_page != 1) or (last_page != total_pages)
-
-    if chunk_size >= covered_pages:
-        print_warning(
-            f"The chunk size ({chunk_size}) is >= the selected span "
-            f"({covered_pages} page(s)). Only one output PDF will be created."
-        )
-        if not ask_yes_no("Continue?", default_yes=True):
-            print_warning("Cancelled. Returning to menu.")
-            return
-
-    chunks = compute_chunks(total_pages, chunk_size, first_page, last_page)
-    pad = pad_width_for(total_pages)
-    logger.info(
-        "Split parameters: chunk_size=%d range=%d-%d covered=%d chunks=%d subrange=%s",
-        chunk_size, first_page, last_page, covered_pages, len(chunks), using_subrange,
-    )
-
-    # Default output folder next to the source PDF; prefer a unique folder.
-    # Include the page span in the folder name when a sub-range is used.
-    if using_subrange:
-        folder_name = (
-            f"{source.stem}_split_{chunk_size}_pages_{first_page}-{last_page}"
-        )
-    else:
-        folder_name = f"{source.stem}_split_{chunk_size}_pages"
-    default_folder = unique_dir_path(source.parent / folder_name)
-
-    print_heading("\nPreview")
-    print_kv("Source file", source.name, Color.CYAN)
-    print_kv("Total source pages", total_pages, Color.GOLD)
-    print_kv(
-        "Page range",
-        f"{first_page} - {last_page} ({covered_pages} page(s))",
-        Color.LIME,
-    )
-    print_kv("Pages per file", chunk_size, Color.ORANGE)
-    print_kv("Output PDFs", len(chunks), Color.MAGENTA)
-    preview_count = min(len(chunks), 10)
-    # Alternate two accent colors for the range list to add visual variety.
-    range_colors = (Color.SKY, Color.VIOLET)
-    for idx, (start, end) in enumerate(chunks[:preview_count]):
-        print(
-            colorize("    - pages ", Color.DIM)
-            + colorize(f"{start}-{end}", range_colors[idx % 2])
-        )
-    if len(chunks) > preview_count:
-        print(colorize(f"    ... (+{len(chunks) - preview_count} more)", Color.DIM))
-    print_kv("Output directory", default_folder, Color.AQUA)
-
-    protection = resolve_protection(protection, context="split PDFs")
-    if protection is None:
-        print_warning("Cancelled. Returning to menu.")
-        return
-
-    out_dir = _choose_output_dir(default_folder)
-    if out_dir is None:
-        print_warning("Returning to menu.")
-        return
-
-    def _run():
-        try:
-            out_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            print_error(f"Could not create output directory: {exc}")
-            logger.error("Failed to create output dir '%s': %s", out_dir, exc)
-            return
-
-        try:
-            doc = ref.open()
+            reader = open_source_pdf(source, password_prompt=prompt_password)
         except (PdfOpenError, RuntimeError) as exc:
             print_error(str(exc))
-            logger.error("Split could not reopen '%s': %s", source, exc)
-            return
-        try:
-            _write_chunks(doc)
-        finally:
-            close_doc(doc)
+            logger.error("Failed to open source PDF '%s': %s", source, exc)
+            return False  # cannot open -> menu (matches prior behaviour)
+        total_pages = reader.page_count
+        detected_protection = detect_protection(reader)
+        # Immutable state only: the queue must not hold an open document (PF-004).
+        ref = capture_source(reader, source)
+        print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
+        logger.info("Split: source='%s' pages=%d", source, total_pages)
+        return True
 
-    def _write_chunks(doc):
-        created_files: List[Path] = []
-        total_written = 0
-        for index, (start, end) in enumerate(chunks, start=1):
-            name = build_chunk_output_name(source.stem, start, end, pad)
-            # Guarantee uniqueness even if a stray file exists in a reused folder.
-            out_path = unique_file_path(out_dir / name)
-            pages_zero_based = list(range(start - 1, end))
-            _print_progress("Writing chunks", index, len(chunks))
+    def step_chunk_size() -> bool:
+        nonlocal chunk_size
+        chunk_prompt = question_prompt("Pages per file")
+        while True:
+            raw = _input(chunk_prompt).strip()
+            if raw == "0":
+                return False  # back -> source
+            if raw.lower() in ("exit", "quit"):
+                raise _ExitRequested()
             try:
-                # Write from the document this runner reopened; the
-                # configure-time reader was closed before queueing (PF-004).
-                result = write_pages_to_pdf(doc, pages_zero_based, out_path,
-                                            protection=protection)
-                written_path, written = result.path, result.count
-            except Exception as exc:  # noqa: BLE001
-                sys.stdout.write("\n")
-                print_error(f"Failed while writing '{out_path.name}': {exc}")
-                logger.exception("Chunk write failed: '%s'", out_path)
-                # Partial failure: keep already completed valid files, stop here.
-                print_warning(
-                    f"{len(created_files)} file(s) were completed before the failure."
+                chunk_size = parse_chunk_size(raw)
+                break
+            except ChunkSizeError as exc:
+                print_error(f"Invalid value: {exc}")
+        return True
+
+    def step_start_page() -> bool:
+        # Optional start/end page range. Empty input keeps the document's natural
+        # boundaries (start = 1, end = total_pages).
+        nonlocal first_page
+        start_prompt = question_prompt("Start page", default="1")
+        while True:
+            raw_start = _input(start_prompt).strip()
+            if raw_start == "0":
+                return False  # back -> pages per file
+            if raw_start.lower() in ("exit", "quit"):
+                raise _ExitRequested()
+            try:
+                first_page = parse_page_number(raw_start, 1, total_pages, "start page")
+                break
+            except ChunkSizeError as exc:
+                print_error(f"Invalid value: {exc}")
+        return True
+
+    def step_end_page() -> bool:
+        nonlocal last_page
+        end_prompt = question_prompt("End page", default=str(total_pages))
+        while True:
+            raw_end = _input(end_prompt).strip()
+            if raw_end == "0":
+                return False  # back -> start page
+            if raw_end.lower() in ("exit", "quit"):
+                raise _ExitRequested()
+            try:
+                last_page = parse_page_number(raw_end, total_pages, total_pages, "end page")
+            except ChunkSizeError as exc:
+                print_error(f"Invalid value: {exc}")
+                continue
+            if first_page > last_page:
+                print_error(
+                    f"The start page ({first_page}) must not be greater than the "
+                    f"end page ({last_page})."
                 )
-                _report_created(created_files, total_written, out_dir)
-                return
-            created_files.append(written_path)
-            total_written += written
+                continue
+            break
+        return True
 
-        print_success(
-            f"Done. Created {len(created_files)} file(s), {total_written} page(s) total."
-        )
-        print_success(f"Output directory:\n  {out_dir}")
+    def step_output() -> bool:
+        nonlocal protection, chunks, pad, out_dir
+        covered_pages = last_page - first_page + 1
+        using_subrange = (first_page != 1) or (last_page != total_pages)
+
+        if chunk_size >= covered_pages:
+            print_warning(
+                f"The chunk size ({chunk_size}) is >= the selected span "
+                f"({covered_pages} page(s)). Only one output PDF will be created."
+            )
+            if not ask_yes_no("Continue?", default_yes=True):
+                print_warning("Cancelled. Returning to menu.")
+                raise _AbortToMenu()  # deliberate cancel -> menu, not a step back
+
+        chunks = compute_chunks(total_pages, chunk_size, first_page, last_page)
+        pad = pad_width_for(total_pages)
         logger.info(
-            "Split complete: files=%d pages=%d dir='%s'",
-            len(created_files), total_written, out_dir,
+            "Split parameters: chunk_size=%d range=%d-%d covered=%d chunks=%d subrange=%s",
+            chunk_size, first_page, last_page, covered_pages, len(chunks), using_subrange,
         )
 
-    queue_task(
-        f"Split {source.name} into {len(chunks)} file(s) of {chunk_size} "
-        f"-> {out_dir.name}",
-        _run,
-        # Identity of every source this task was configured against;
-        # the queue re-verifies it just before running (C-06).
-        sources=[ref],
-    )
+        # Default output folder next to the source PDF; prefer a unique folder.
+        # Include the page span in the folder name when a sub-range is used.
+        if using_subrange:
+            folder_name = (
+                f"{source.stem}_split_{chunk_size}_pages_{first_page}-{last_page}"
+            )
+        else:
+            folder_name = f"{source.stem}_split_{chunk_size}_pages"
+        default_folder = unique_dir_path(source.parent / folder_name)
+
+        print_heading("\nPreview")
+        print_kv("Source file", source.name, Color.CYAN)
+        print_kv("Total source pages", total_pages, Color.GOLD)
+        print_kv(
+            "Page range",
+            f"{first_page} - {last_page} ({covered_pages} page(s))",
+            Color.LIME,
+        )
+        print_kv("Pages per file", chunk_size, Color.ORANGE)
+        print_kv("Output PDFs", len(chunks), Color.MAGENTA)
+        preview_count = min(len(chunks), 10)
+        # Alternate two accent colors for the range list to add visual variety.
+        range_colors = (Color.SKY, Color.VIOLET)
+        for idx, (start, end) in enumerate(chunks[:preview_count]):
+            print(
+                colorize("    - pages ", Color.DIM)
+                + colorize(f"{start}-{end}", range_colors[idx % 2])
+            )
+        if len(chunks) > preview_count:
+            print(colorize(f"    ... (+{len(chunks) - preview_count} more)", Color.DIM))
+        print_kv("Output directory", default_folder, Color.AQUA)
+
+        protection = resolve_protection(detected_protection, context="split PDFs")
+        if protection is None:
+            print_warning("Cancelled. Returning to menu.")
+            raise _AbortToMenu()  # deliberate cancel -> menu, not a step back
+
+        out_dir = _choose_output_dir(default_folder)
+        return out_dir is not None  # back -> end page
+
+    try:
+        if not navigate_steps([step_source, step_chunk_size, step_start_page,
+                               step_end_page, step_output]):
+            return
+
+        def _run():
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                print_error(f"Could not create output directory: {exc}")
+                logger.error("Failed to create output dir '%s': %s", out_dir, exc)
+                return
+
+            try:
+                doc = ref.open()
+            except (PdfOpenError, RuntimeError) as exc:
+                print_error(str(exc))
+                logger.error("Split could not reopen '%s': %s", source, exc)
+                return
+            try:
+                _write_chunks(doc)
+            finally:
+                close_doc(doc)
+
+        def _write_chunks(doc):
+            created_files: List[Path] = []
+            total_written = 0
+            for index, (start, end) in enumerate(chunks, start=1):
+                name = build_chunk_output_name(source.stem, start, end, pad)
+                # Guarantee uniqueness even if a stray file exists in a reused folder.
+                out_path = unique_file_path(out_dir / name)
+                pages_zero_based = list(range(start - 1, end))
+                _print_progress("Writing chunks", index, len(chunks))
+                try:
+                    # Write from the document this runner reopened; the
+                    # configure-time reader was closed before queueing (PF-004).
+                    result = write_pages_to_pdf(doc, pages_zero_based, out_path,
+                                                protection=protection)
+                    written_path, written = result.path, result.count
+                except Exception as exc:  # noqa: BLE001
+                    sys.stdout.write("\n")
+                    print_error(f"Failed while writing '{out_path.name}': {exc}")
+                    logger.exception("Chunk write failed: '%s'", out_path)
+                    # Partial failure: keep already completed valid files, stop here.
+                    print_warning(
+                        f"{len(created_files)} file(s) were completed before the failure."
+                    )
+                    _report_created(created_files, total_written, out_dir)
+                    return
+                created_files.append(written_path)
+                total_written += written
+
+            print_success(
+                f"Done. Created {len(created_files)} file(s), {total_written} page(s) total."
+            )
+            print_success(f"Output directory:\n  {out_dir}")
+            logger.info(
+                "Split complete: files=%d pages=%d dir='%s'",
+                len(created_files), total_written, out_dir,
+            )
+
+        queue_task(
+            f"Split {source.name} into {len(chunks)} file(s) of {chunk_size} "
+            f"-> {out_dir.name}",
+            _run,
+            # Identity of every source this task was configured against;
+            # the queue re-verifies it just before running (C-06).
+            sources=[ref],
+        )
+    finally:
+        if reader is not None:
+            close_doc(reader)
 
 
 def _report_created(files: Sequence[Path], pages: int, out_dir: Path) -> None:
@@ -471,101 +524,122 @@ def operation_delete_pages_single() -> None:
     print_heading("\nDelete pages: single file")
     logger.info("Operation started: Delete pages (single file).")
 
-    try:
+    source = None
+    reader = None
+    total_pages = 0
+    detected_protection = None
+    ref = None
+    present = None
+    kept = None
+    selection_text = None
+    protection = None
+    out_path = None
+
+    def step_source() -> bool:
+        nonlocal source, reader, total_pages, detected_protection, ref
+        if reader is not None:
+            close_doc(reader)
+            reader = None
         source = prompt_source_pdf()
-    except _ExitRequested:
-        raise
-    if source is None:
-        return
+        if source is None:
+            return False  # first step: back -> menu
+        try:
+            reader = open_source_pdf(source, password_prompt=prompt_password)
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(str(exc))
+            logger.error("Failed to open '%s': %s", source, exc)
+            return False  # cannot open -> menu (matches prior behaviour)
+        total_pages = reader.page_count
+        detected_protection = detect_protection(reader)
+        ref = capture_source(reader, source)
+        print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
+        return True
+
+    def step_selection() -> bool:
+        nonlocal present, kept, selection_text
+        # Ask for the pages, rejecting any that do not exist in this document.
+        while True:
+            requested = _prompt_delete_selection(max_page=total_pages)
+            if requested is None:
+                return False  # back -> source
+            present, missing, kept = compute_deletion(total_pages, requested)
+            if missing:
+                print_error(
+                    f"These pages do not exist (document has {total_pages}): "
+                    f"{summarize_ranges(missing)}. Please re-enter."
+                )
+                continue
+            if not present:
+                print_error("No pages selected.")
+                continue
+            if not kept:
+                print_error(
+                    "That would delete every page. A PDF must keep at least one page."
+                )
+                continue
+            break
+        selection_text = summarize_ranges(present)
+        return True
+
+    def step_output() -> bool:
+        nonlocal protection, out_path
+        default_name = build_delete_output_name(source.stem, selection_text)
+        default_path = unique_file_path(source.parent / default_name)
+
+        print_heading("\nSummary")
+        print_kv("Source file", source.name, Color.CYAN)
+        print_kv("Total source pages", total_pages, Color.GOLD)
+        print_kv("Pages to delete", f"{selection_text}  ({len(present)} page(s))", Color.RED)
+        print_kv("Pages remaining", len(kept), Color.LIME)
+        print_kv("Default Output Path", default_path, Color.AQUA)
+
+        protection = resolve_protection(detected_protection, context="output PDF")
+        if protection is None:
+            print_warning("Cancelled. Returning to menu.")
+            raise _AbortToMenu()  # deliberate cancel -> menu, not a step back
+
+        out_path = _choose_output_file(default_path, source)
+        return out_path is not None  # back -> page selection
 
     try:
-        reader = open_source_pdf(source, password_prompt=prompt_password)
-    except (PdfOpenError, RuntimeError) as exc:
-        print_error(str(exc))
-        logger.error("Failed to open '%s': %s", source, exc)
-        return
-
-    total_pages = reader.page_count
-    protection = detect_protection(reader)
-    ref = capture_source(reader, source)
-    close_doc(reader)
-    print_success(f"Loaded '{source.name}' - {total_pages} page(s).")
-
-    # Ask for the pages, rejecting any that do not exist in this document.
-    while True:
-        requested = _prompt_delete_selection(max_page=total_pages)
-        if requested is None:
+        if not navigate_steps([step_source, step_selection, step_output]):
             return
-        present, missing, kept = compute_deletion(total_pages, requested)
-        if missing:
-            print_error(
-                f"These pages do not exist (document has {total_pages}): "
-                f"{summarize_ranges(missing)}. Please re-enter."
+
+        def _run():
+            logger.info(
+                "Delete-pages start: source='%s' delete=%s keep=%d output='%s'",
+                source, selection_text, len(kept), out_path,
             )
-            continue
-        if not present:
-            print_error("No pages selected.")
-            continue
-        if not kept:
-            print_error(
-                "That would delete every page. A PDF must keep at least one page."
+            doc = None
+            try:
+                doc = ref.open()
+                result = write_pages_to_pdf(
+                    doc, kept, out_path,
+                    progress=lambda c, t: _print_progress("Writing pages", c, t),
+                    protection=protection,
+                )
+                written_path, written = result.path, result.count
+            except Exception as exc:  # noqa: BLE001 - clean message, log details
+                print_error(f"Failed to create the output PDF: {exc}")
+                logger.exception("Delete-pages failed for output '%s'", out_path)
+                return
+            finally:
+                close_doc(doc)
+            print_success(
+                f"Done. Deleted {len(present)} page(s); kept {written}:\n  {written_path}"
             )
-            continue
-        break
+            logger.info("Delete-pages complete: output='%s' kept=%d", written_path, written)
 
-    selection_text = summarize_ranges(present)
-    default_name = build_delete_output_name(source.stem, selection_text)
-    default_path = unique_file_path(source.parent / default_name)
-
-    print_heading("\nSummary")
-    print_kv("Source file", source.name, Color.CYAN)
-    print_kv("Total source pages", total_pages, Color.GOLD)
-    print_kv("Pages to delete", f"{selection_text}  ({len(present)} page(s))", Color.RED)
-    print_kv("Pages remaining", len(kept), Color.LIME)
-    print_kv("Default Output Path", default_path, Color.AQUA)
-
-    protection = resolve_protection(protection, context="output PDF")
-    if protection is None:
-        print_warning("Cancelled. Returning to menu.")
-        return
-
-    out_path = _choose_output_file(default_path, source)
-    if out_path is None:
-        print_warning("Returning to menu.")
-        return
-
-    def _run():
-        logger.info(
-            "Delete-pages start: source='%s' delete=%s keep=%d output='%s'",
-            source, selection_text, len(kept), out_path,
+        queue_task(
+            f"Delete pages {selection_text} from {source.name} -> {out_path.name}",
+            _run,
+            # Identity of every source this task was configured against;
+            # the queue re-verifies it just before running (C-06).
+            sources=[ref],
         )
-        doc = None
-        try:
-            doc = ref.open()
-            result = write_pages_to_pdf(
-                doc, kept, out_path,
-                progress=lambda c, t: _print_progress("Writing pages", c, t),
-                protection=protection,
-            )
-            written_path, written = result.path, result.count
-        except Exception as exc:  # noqa: BLE001 - clean message, log details
-            print_error(f"Failed to create the output PDF: {exc}")
-            logger.exception("Delete-pages failed for output '%s'", out_path)
-            return
-        finally:
-            close_doc(doc)
-        print_success(
-            f"Done. Deleted {len(present)} page(s); kept {written}:\n  {written_path}"
-        )
-        logger.info("Delete-pages complete: output='%s' kept=%d", written_path, written)
-
-    queue_task(
-        f"Delete pages {selection_text} from {source.name} -> {out_path.name}",
-        _run,
-        # Identity of every source this task was configured against;
-        # the queue re-verifies it just before running (C-06).
-        sources=[ref],
-    )
+    finally:
+        if reader is not None:
+            close_doc(reader)
 
 
 def operation_delete_pages_batch() -> None:
@@ -580,12 +654,22 @@ def operation_delete_pages_batch() -> None:
     print_heading("\nDelete pages: batch folder")
     logger.info("Operation started: Delete pages (batch folder).")
 
-    pdfs = prompt_source_folder_pdfs()
-    if pdfs is None:
-        return
+    pdfs = None
+    requested = None
 
-    requested = _prompt_delete_selection()
-    if requested is None:
+    def step_folder() -> bool:
+        nonlocal pdfs
+        pdfs = prompt_source_folder_pdfs()
+        return pdfs is not None  # first step: back -> menu
+
+    def step_selection() -> bool:
+        nonlocal requested
+        requested = _prompt_delete_selection()
+        return requested is not None  # back -> folder
+
+    # Only the two back-capable prompts navigate; the protection preflight,
+    # summary and queue run after the last prompt (they never step back).
+    if not navigate_steps([step_folder, step_selection]):
         return
 
     folder = pdfs[0].parent

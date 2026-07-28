@@ -107,124 +107,153 @@ def operation_compress_pdf() -> None:
     print_heading("\nCompress PDF (reduce file size)")
     logger.info("Operation started: Compress PDF.")
 
-    try:
+    source = None
+    pdf = None
+    total_pages = 0
+    dpi_stats = None
+    detected_protection = None
+    pw = None
+    original_size = 0
+    label = None
+    jpeg_quality = None
+    dpi_target = None
+    protection = None
+    out_path = None
+
+    def step_source() -> bool:
+        nonlocal source, pdf, total_pages, dpi_stats, detected_protection
+        nonlocal pw, original_size
+        # Re-entering this step (the user backed up from the level prompt):
+        # release the document opened for the previous source first.
+        if pdf is not None:
+            close_doc(pdf)
+            pdf = None
         source = prompt_source_pdf()
-    except _ExitRequested:
-        raise
-    if source is None:
-        return
-
-    # Open once at configuration time: validates the file, handles the
-    # password prompt early, and reads the page count for the summary.
-    try:
-        doc = open_source_pdf(source, password_prompt=prompt_password)
-    except (PdfOpenError, RuntimeError) as exc:
-        print_error(str(exc))
-        logger.error("Failed to open '%s': %s", source, exc)
-        return
-    total_pages = doc.page_count
-    dpi_stats = scan_image_dpi_stats(doc)
-    protection = detect_protection(doc)
-    # Capture the working password so the queued runner reopens silently (A13).
-    pw = source_password(doc)
-    close_doc(doc)
-
-    original_size = source.stat().st_size
-    print_success(
-        f"Loaded '{source.name}' - {total_pages} page(s), {_format_size(original_size)}."
-    )
-    if dpi_stats is not None:
-        print_kv(
-            "Current image DPI",
-            f"~{dpi_stats['median']} median (min {dpi_stats['min']}, "
-            f"max {dpi_stats['max']}; {dpi_stats['count']} image(s) measured)",
-            Color.GOLD,
-        )
-        logger.info("Image DPI stats for '%s': %s", source, dpi_stats)
-    else:
-        print_note(
-            "No raster images found - this is a text/vector PDF. Text is never "
-            "degraded by compression: every level applies the same lossless "
-            "work (font subsetting, deduplication, stream compression), so "
-            "Ultra is effectively equal to the lossy levels here."
-        )
-    print_note(
-        "Ultra only optimizes structure and fonts (zero quality change). The "
-        "other levels also downsample and re-encode embedded images - on "
-        "scanned/image-only PDFs that affects the whole page, so savings are "
-        "big but quality loss is visible at low levels."
-    )
-
-    level = _prompt_compression_level()
-    if level is None:
-        return
-    label, jpeg_quality, dpi_target = level
-
-    _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats, total_pages)
-
-    # Consent BEFORE any output is configured or written (PF-006).
-    protection = resolve_protection(protection, context="compressed PDF")
-    if protection is None:
-        print_warning("Cancelled. Returning to menu.")
-        return
-
-    default_path = unique_file_path(source.parent / f"{source.stem}_compressed.pdf")
-
-    print_heading("\nSummary")
-    print_kv("Source file", source.name, Color.CYAN)
-    print_kv("Total source pages", total_pages, Color.GOLD)
-    print_kv("Current size", _format_size(original_size), Color.MAGENTA)
-    if jpeg_quality is None:
-        print_kv("Level", "ultra (lossless only, zero quality change)", Color.LIME)
-    else:
-        print_kv(
-            "Level",
-            f"{label} (JPEG quality {jpeg_quality}, images capped at "
-            f"{dpi_target} DPI)",
-            Color.LIME,
-        )
-    print_kv("Default Output Path", default_path, Color.AQUA)
-
-    out_path = _choose_output_file(default_path, source)
-    if out_path is None:
-        print_warning("Returning to menu.")
-        return
-
-    def _run():
+        if source is None:
+            return False  # first step: back -> menu
+        # Open once at configuration time: validates the file, handles the
+        # password prompt early, and reads the page count for the summary.
         try:
-            result = compress_pdf(
-                source, out_path, jpeg_quality, dpi_target, password=pw,
-                protection=protection,
-            )
-        except Exception as exc:  # noqa: BLE001 - clean message, log details
-            print_error(f"Failed to compress the PDF: {exc}")
-            logger.exception("Compression failed for output '%s'", out_path)
-            return
-        # The written path, not the configured one: promotion may have had to
-        # allocate a suffixed sibling.
-        written = result.path
-        old, new = result.stats["original_size"], result.stats["new_size"]
-        saved = old - new
-        if saved > 0:
-            percent = 100.0 * saved / old
-            print_success(
-                f"Done. {_format_size(old)} -> {_format_size(new)} "
-                f"(saved {_format_size(saved)}, {percent:.1f}%):\n  {written}"
-            )
-        else:
-            print_warning(
-                f"Done, but no size reduction was possible "
-                f"({_format_size(old)} -> {_format_size(new)}). The file was "
-                f"already efficiently compressed:\n  {written}"
-            )
+            pdf = open_source_pdf(source, password_prompt=prompt_password)
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(str(exc))
+            logger.error("Failed to open '%s': %s", source, exc)
+            return False  # cannot open -> back to the menu (matches prior behaviour)
+        total_pages = pdf.page_count
+        dpi_stats = scan_image_dpi_stats(pdf)
+        detected_protection = detect_protection(pdf)
+        # Capture the working password so the queued runner reopens silently (A13).
+        pw = source_password(pdf)
 
-    queue_task(
-        f"Compress {source.name} ({label}) -> {out_path.name}",
-        _run,
-        # Identity of every source this task was configured against; the
-        # queue re-verifies it just before running (C-06).
-        sources=[capture_file_source(source)],
-    )
+        original_size = source.stat().st_size
+        print_success(
+            f"Loaded '{source.name}' - {total_pages} page(s), {_format_size(original_size)}."
+        )
+        if dpi_stats is not None:
+            print_kv(
+                "Current image DPI",
+                f"~{dpi_stats['median']} median (min {dpi_stats['min']}, "
+                f"max {dpi_stats['max']}; {dpi_stats['count']} image(s) measured)",
+                Color.GOLD,
+            )
+            logger.info("Image DPI stats for '%s': %s", source, dpi_stats)
+        else:
+            print_note(
+                "No raster images found - this is a text/vector PDF. Text is never "
+                "degraded by compression: every level applies the same lossless "
+                "work (font subsetting, deduplication, stream compression), so "
+                "Ultra is effectively equal to the lossy levels here."
+            )
+        print_note(
+            "Ultra only optimizes structure and fonts (zero quality change). The "
+            "other levels also downsample and re-encode embedded images - on "
+            "scanned/image-only PDFs that affects the whole page, so savings are "
+            "big but quality loss is visible at low levels."
+        )
+        return True
+
+    def step_level() -> bool:
+        nonlocal label, jpeg_quality, dpi_target
+        level = _prompt_compression_level()
+        if level is None:
+            return False  # back -> source
+        label, jpeg_quality, dpi_target = level
+        return True
+
+    def step_output() -> bool:
+        nonlocal protection, out_path
+        _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats, total_pages)
+
+        # Consent BEFORE any output is configured or written (PF-006). Resolve
+        # from the ORIGINAL detected policy each time, so backing here and
+        # forward re-asks cleanly rather than compounding a prior answer.
+        protection = resolve_protection(detected_protection, context="compressed PDF")
+        if protection is None:
+            print_warning("Cancelled. Returning to menu.")
+            raise _AbortToMenu()  # deliberate cancel -> menu, not a step back
+
+        default_path = unique_file_path(source.parent / f"{source.stem}_compressed.pdf")
+
+        print_heading("\nSummary")
+        print_kv("Source file", source.name, Color.CYAN)
+        print_kv("Total source pages", total_pages, Color.GOLD)
+        print_kv("Current size", _format_size(original_size), Color.MAGENTA)
+        if jpeg_quality is None:
+            print_kv("Level", "ultra (lossless only, zero quality change)", Color.LIME)
+        else:
+            print_kv(
+                "Level",
+                f"{label} (JPEG quality {jpeg_quality}, images capped at "
+                f"{dpi_target} DPI)",
+                Color.LIME,
+            )
+        print_kv("Default Output Path", default_path, Color.AQUA)
+
+        out_path = _choose_output_file(default_path, source)
+        return out_path is not None  # back -> level
+
+    try:
+        if not navigate_steps([step_source, step_level, step_output]):
+            return
+
+        def _run():
+            try:
+                result = compress_pdf(
+                    source, out_path, jpeg_quality, dpi_target, password=pw,
+                    protection=protection,
+                )
+            except Exception as exc:  # noqa: BLE001 - clean message, log details
+                print_error(f"Failed to compress the PDF: {exc}")
+                logger.exception("Compression failed for output '%s'", out_path)
+                return
+            # The written path, not the configured one: promotion may have had to
+            # allocate a suffixed sibling.
+            written = result.path
+            old, new = result.stats["original_size"], result.stats["new_size"]
+            saved = old - new
+            if saved > 0:
+                percent = 100.0 * saved / old
+                print_success(
+                    f"Done. {_format_size(old)} -> {_format_size(new)} "
+                    f"(saved {_format_size(saved)}, {percent:.1f}%):\n  {written}"
+                )
+            else:
+                print_warning(
+                    f"Done, but no size reduction was possible "
+                    f"({_format_size(old)} -> {_format_size(new)}). The file was "
+                    f"already efficiently compressed:\n  {written}"
+                )
+
+        queue_task(
+            f"Compress {source.name} ({label}) -> {out_path.name}",
+            _run,
+            # Identity of every source this task was configured against; the
+            # queue re-verifies it just before running (C-06).
+            sources=[capture_file_source(source)],
+        )
+    finally:
+        if pdf is not None:
+            close_doc(pdf)
 
 
 def _warn_if_cap_above_max(dpi_target, jpeg_quality, dpi_stats,
@@ -323,8 +352,25 @@ def operation_compress_pdf_batch() -> None:
     print_heading("\nCompress PDF: batch folder")
     logger.info("Operation started: Compress PDF (batch folder).")
 
-    pdfs = prompt_source_folder_pdfs()
-    if pdfs is None:
+    pdfs = None
+    label = None
+    jpeg_quality = None
+    dpi_target = None
+
+    def step_folder() -> bool:
+        nonlocal pdfs
+        pdfs = prompt_source_folder_pdfs()
+        return pdfs is not None  # first step: back -> menu
+
+    def step_level() -> bool:
+        nonlocal label, jpeg_quality, dpi_target
+        level = _prompt_compression_level()
+        if level is None:
+            return False  # back -> folder
+        label, jpeg_quality, dpi_target = level
+        return True
+
+    if not navigate_steps([step_folder, step_level]):
         return
 
     folder = pdfs[0].parent
@@ -377,11 +423,6 @@ def operation_compress_pdf_batch() -> None:
             "resolution (encrypted or unreadable). Image-DPI stats are "
             "unavailable; compression will still be attempted per file."
         )
-
-    level = _prompt_compression_level()
-    if level is None:
-        return
-    label, jpeg_quality, dpi_target = level
 
     # Folder aggregate: completeness of each file scan is not tracked, so
     # the absolute "nothing downsamples" claim is never made here.

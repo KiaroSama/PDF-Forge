@@ -33,70 +33,87 @@ def operation_protect_open_password() -> None:
     print_heading("\nProtect PDF: password to open")
     logger.info("Operation started: Protect PDF (open password).")
 
-    try:
+    source = None
+    pdf = None
+    source_pw = None
+    page_count = 0
+    password = None
+    out_path = None
+
+    def step_source() -> bool:
+        nonlocal source, pdf, source_pw, page_count
+        # Re-entering this step: release the document opened for the previous
+        # source first.
+        if pdf is not None:
+            close_doc(pdf)
+            pdf = None
         source = prompt_source_pdf()
-    except _ExitRequested:
-        raise
-    if source is None:
-        return
+        if source is None:
+            return False  # first step: back -> menu
+        pdf = _open_source_for_protect(source)
+        if pdf is None:
+            return False  # cannot open -> back to the menu (matches prior behaviour)
+        # Keep only immutable state in the queue: the source path, its own
+        # password (for a silent reopen) and the page count. The config handle
+        # never crosses the queue boundary and is released in the finally below,
+        # so a discarded task cannot leak it (A5).
+        source_pw = source_password(pdf)
+        page_count = pdf.page_count
+        return True
 
-    doc = _open_source_for_protect(source)
-    if doc is None:
-        return
-    # Keep only immutable state in the queue: the source path, its own password
-    # (for a silent reopen) and the page count. The handle is closed now, so a
-    # discarded task cannot leak it (A5).
-    source_pw = source_password(doc)
-    page_count = doc.page_count
-    close_doc(doc)
+    def step_password() -> bool:
+        nonlocal password
+        password = prompt_new_password("to open the file")
+        if password is None:
+            print_warning("Cancelled. Returning to menu.")
+            raise _AbortToMenu()  # deliberate cancel -> menu, not a step back
+        return True
+
+    def step_output() -> bool:
+        nonlocal out_path
+        default_path = unique_file_path(
+            source.parent / f"{source.stem}_protected.pdf")
+        print_heading("\nSummary")
+        print_kv("Source file", source.name, Color.CYAN)
+        print_kv("Total source pages", page_count, Color.GOLD)
+        print_kv("Protection", "AES-256; a password is required to open", Color.LIME)
+        print_kv("Default Output Path", default_path, Color.AQUA)
+        print_note("Keep the password safe - without it the file cannot be opened.")
+        out_path = _choose_output_file(default_path, source)
+        return out_path is not None  # back -> password
 
     try:
-        password = prompt_new_password("to open the file")
-    except _ExitRequested:
-        raise
-    if password is None:
-        print_warning("Cancelled. Returning to menu.")
-        return
-
-    default_path = unique_file_path(source.parent / f"{source.stem}_protected.pdf")
-
-    print_heading("\nSummary")
-    print_kv("Source file", source.name, Color.CYAN)
-    print_kv("Total source pages", page_count, Color.GOLD)
-    print_kv("Protection", "AES-256; a password is required to open", Color.LIME)
-    print_kv("Default Output Path", default_path, Color.AQUA)
-    print_note("Keep the password safe - without it the file cannot be opened.")
-
-    out_path = _choose_output_file(default_path, source)
-    if out_path is None:
-        print_warning("Returning to menu.")
-        return
-
-    def _run():
-        rdoc = None
-        try:
-            rdoc = open_source_pdf(source, password=source_pw)
-            # The same password opens the file and guards its permissions.
-            result = save_encrypted_pdf(
-                rdoc, out_path, user_pw=password, owner_pw=password,
-                permissions=all_permissions(),
-            )
-        except Exception as exc:  # noqa: BLE001 - clean message, log details
-            print_error(f"Failed to protect the PDF: {exc}")
-            logger.exception("Protect (open password) failed for '%s'", out_path)
+        if not navigate_steps([step_source, step_password, step_output]):
             return
-        finally:
-            close_doc(rdoc)
-        # The written path, not the configured one: promotion may have had to
-        # allocate a suffixed sibling.
-        print_success(
-            f"Done. Protected {result.count} page(s) with an open password:"
-            f"\n  {result.path}"
-        )
-        logger.info("Protect (open password) complete: output='%s'", result.path)
 
-    queue_task(f"Protect (open password) {source.name} -> {out_path.name}", _run,
-               sources=[capture_file_source(source)])
+        def _run():
+            rdoc = None
+            try:
+                rdoc = open_source_pdf(source, password=source_pw)
+                # The same password opens the file and guards its permissions.
+                result = save_encrypted_pdf(
+                    rdoc, out_path, user_pw=password, owner_pw=password,
+                    permissions=all_permissions(),
+                )
+            except Exception as exc:  # noqa: BLE001 - clean message, log details
+                print_error(f"Failed to protect the PDF: {exc}")
+                logger.exception("Protect (open password) failed for '%s'", out_path)
+                return
+            finally:
+                close_doc(rdoc)
+            # The written path, not the configured one: promotion may have had to
+            # allocate a suffixed sibling.
+            print_success(
+                f"Done. Protected {result.count} page(s) with an open password:"
+                f"\n  {result.path}"
+            )
+            logger.info("Protect (open password) complete: output='%s'", result.path)
+
+        queue_task(f"Protect (open password) {source.name} -> {out_path.name}", _run,
+                   sources=[capture_file_source(source)])
+    finally:
+        if pdf is not None:
+            close_doc(pdf)
 
 
 def _prompt_blocked_actions():
@@ -147,74 +164,92 @@ def operation_protect_restrict() -> None:
     print_heading("\nProtect PDF: restrict editing (owner password)")
     logger.info("Operation started: Protect PDF (restrict).")
 
-    try:
+    source = None
+    pdf = None
+    source_pw = None
+    page_count = 0
+    permissions = None
+    blocked_labels = None
+    owner_password = None
+    out_path = None
+
+    def step_source() -> bool:
+        nonlocal source, pdf, source_pw, page_count
+        # Re-entering this step: release the document opened for the previous
+        # source first.
+        if pdf is not None:
+            close_doc(pdf)
+            pdf = None
         source = prompt_source_pdf()
-    except _ExitRequested:
-        raise
-    if source is None:
-        return
+        if source is None:
+            return False  # first step: back -> menu
+        pdf = _open_source_for_protect(source)
+        if pdf is None:
+            return False  # cannot open -> back to the menu (matches prior behaviour)
+        # Only immutable state crosses the queue boundary (A5); see the
+        # open-password operation above for the rationale.
+        source_pw = source_password(pdf)
+        page_count = pdf.page_count
+        return True
 
-    doc = _open_source_for_protect(source)
-    if doc is None:
-        return
-    # Only immutable state crosses the queue boundary (A5); see the open-password
-    # operation above for the rationale.
-    source_pw = source_password(doc)
-    page_count = doc.page_count
-    close_doc(doc)
-
-    try:
+    def step_restrictions() -> bool:
+        nonlocal permissions, blocked_labels
         result = _prompt_blocked_actions()
-    except _ExitRequested:
-        raise
-    if result is None:
-        print_warning("Returning to menu.")
-        return
-    permissions, blocked_labels = result
+        if result is None:
+            return False  # 0/back -> source
+        permissions, blocked_labels = result
+        return True
+
+    def step_password() -> bool:
+        nonlocal owner_password
+        owner_password = prompt_new_password("to change permissions (owner password)")
+        if owner_password is None:
+            print_warning("Cancelled. Returning to menu.")
+            raise _AbortToMenu()  # deliberate cancel -> menu, not a step back
+        return True
+
+    def step_output() -> bool:
+        nonlocal out_path
+        default_path = unique_file_path(
+            source.parent / f"{source.stem}_restricted.pdf")
+        print_heading("\nSummary")
+        print_kv("Source file", source.name, Color.CYAN)
+        print_kv("Total source pages", page_count, Color.GOLD)
+        print_kv("Opens without a password", "yes", Color.LIME)
+        print_kv("Blocked actions", ", ".join(blocked_labels) or "(none)", Color.RED)
+        print_kv("Owner password", "required to change permissions", Color.MAGENTA)
+        print_kv("Default Output Path", default_path, Color.AQUA)
+        out_path = _choose_output_file(default_path, source)
+        return out_path is not None  # back -> password
 
     try:
-        owner_password = prompt_new_password("to change permissions (owner password)")
-    except _ExitRequested:
-        raise
-    if owner_password is None:
-        print_warning("Cancelled. Returning to menu.")
-        return
-
-    default_path = unique_file_path(source.parent / f"{source.stem}_restricted.pdf")
-
-    print_heading("\nSummary")
-    print_kv("Source file", source.name, Color.CYAN)
-    print_kv("Total source pages", page_count, Color.GOLD)
-    print_kv("Opens without a password", "yes", Color.LIME)
-    print_kv("Blocked actions", ", ".join(blocked_labels) or "(none)", Color.RED)
-    print_kv("Owner password", "required to change permissions", Color.MAGENTA)
-    print_kv("Default Output Path", default_path, Color.AQUA)
-
-    out_path = _choose_output_file(default_path, source)
-    if out_path is None:
-        print_warning("Returning to menu.")
-        return
-
-    def _run():
-        rdoc = None
-        try:
-            rdoc = open_source_pdf(source, password=source_pw)
-            result = save_encrypted_pdf(
-                rdoc, out_path, user_pw=None, owner_pw=owner_password,
-                permissions=permissions,
-            )
-        except Exception as exc:  # noqa: BLE001 - clean message, log details
-            print_error(f"Failed to protect the PDF: {exc}")
-            logger.exception("Protect (restrict) failed for '%s'", out_path)
+        if not navigate_steps(
+                [step_source, step_restrictions, step_password, step_output]):
             return
-        finally:
-            close_doc(rdoc)
-        # The written path, not the configured one: promotion may have had to
-        # allocate a suffixed sibling.
-        print_success(
-            f"Done. Restricted {result.count} page(s):\n  {result.path}"
-        )
-        logger.info("Protect (restrict) complete: output='%s'", result.path)
 
-    queue_task(f"Protect (restrict) {source.name} -> {out_path.name}", _run,
-               sources=[capture_file_source(source)])
+        def _run():
+            rdoc = None
+            try:
+                rdoc = open_source_pdf(source, password=source_pw)
+                result = save_encrypted_pdf(
+                    rdoc, out_path, user_pw=None, owner_pw=owner_password,
+                    permissions=permissions,
+                )
+            except Exception as exc:  # noqa: BLE001 - clean message, log details
+                print_error(f"Failed to protect the PDF: {exc}")
+                logger.exception("Protect (restrict) failed for '%s'", out_path)
+                return
+            finally:
+                close_doc(rdoc)
+            # The written path, not the configured one: promotion may have had to
+            # allocate a suffixed sibling.
+            print_success(
+                f"Done. Restricted {result.count} page(s):\n  {result.path}"
+            )
+            logger.info("Protect (restrict) complete: output='%s'", result.path)
+
+        queue_task(f"Protect (restrict) {source.name} -> {out_path.name}", _run,
+                   sources=[capture_file_source(source)])
+    finally:
+        if pdf is not None:
+            close_doc(pdf)

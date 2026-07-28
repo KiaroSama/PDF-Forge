@@ -222,10 +222,12 @@ def operation_merge_pdfs() -> None:
     reset_questions()
     logger.info("Operation started: Merge multiple PDFs.")
 
-    # The merge source menu is the hub for this operation. Every step below it
-    # (source picker, output, confirmation, and completion) returns here, so
-    # pressing 0 always goes back exactly one level. Only 0 at this menu returns
-    # to the main menu.
+    # The merge source submenu is the hub for this operation. Choosing a mode
+    # starts a single merge whose own prompts use single-step back navigation:
+    # 0 at the output prompt steps back to source collection, and 0 while
+    # collecting (or a 'no' at the protection question) returns here. Only 0 at
+    # this submenu returns to the main menu; the loop lets several merges be
+    # queued in one visit.
     while True:
         _show_merge_source_menu()
         choice = _input(
@@ -246,84 +248,104 @@ def operation_merge_pdfs() -> None:
         set_operation_prompt(choice)
         if choice == "1":
             mode = "files"
-            sources = prompt_merge_source_files()
         elif choice == "2":
             mode = "folder"
-            sources = prompt_merge_source_folder()
         else:
             print_error("Invalid option. Please choose 1, 2, or 0.")
             continue
 
-        if not sources:
-            # Back (0) from the source picker: re-show this submenu.
-            logger.info("Merge source picker cancelled; re-showing the merge menu.")
-            continue
-
         # Run a single merge. It returns here (to the merge menu) whether it
-        # completed, was cancelled with 0, or failed to open a source.
-        _run_merge_with_sources(mode, sources)
+        # completed, was cancelled, or backed out of source collection.
+        _run_merge_with_sources(mode)
 
 
-def _run_merge_with_sources(mode: str, sources: List[Path]) -> None:
-    """Open, preview, confirm, and write a single merge for the given sources.
+def _run_merge_with_sources(mode: str) -> None:
+    """Collect, open, preview, confirm, and write a single merge.
 
-    Any cancellation (0 at output or a 'no' confirmation) or failure returns
-    normally, so the caller's merge menu is shown again (one level back).
+    ``mode`` selects the source picker ("files" or "folder"). Back navigation is
+    single-step (:func:`navigate_steps`): 0 at the output prompt steps back to
+    source collection, while backing out of collection - or a 'no' at the
+    protection question - returns to the merge menu (one level back).
     """
-    logger.info("Merge source selected: mode=%s files=%d", mode, len(sources))
-
-    # Open every source up front to validate it, count its pages, and capture
-    # the password that opens it - then close it again. Nothing but immutable
-    # paths/passwords is carried into the queue, so a discarded task leaks no
-    # file handles (A5) and the runner never re-prompts for a password (A13).
-    readers = []
+    sources: List[Path] = []
     passwords: List[str] = []
     policies = []
     total_pages = 0
-    current = sources[0]
-    try:
-        for current in sources:
-            reader = open_source_pdf(current, password_prompt=prompt_password)
-            readers.append(reader)
-            passwords.append(source_password(reader))
-            policies.append(detect_protection(reader))
-            total_pages += reader.page_count
-    except (PdfOpenError, RuntimeError) as exc:
-        print_error(f"Cannot merge: failed to open '{current.name}': {exc}")
-        logger.error("Merge aborted; failed to open '%s': %s", current, exc)
-        return
-    finally:
-        # Close every handle opened above, including on a mid-way failure.
-        for reader in readers:
-            close_doc(reader)
+    merge_protection = None
+    out_path = None
+
+    def step_collect_sources() -> bool:
+        nonlocal sources, passwords, policies, total_pages
+        picked = (prompt_merge_source_files() if mode == "files"
+                  else prompt_merge_source_folder())
+        if not picked:
+            # Back (0) from the source picker: return to the merge menu.
+            logger.info("Merge source picker cancelled; re-showing the merge menu.")
+            return False
+        sources = picked
+        logger.info("Merge source selected: mode=%s files=%d", mode, len(sources))
+
+        # Open every source up front to validate it, count its pages, and
+        # capture the password that opens it - then close it again. Nothing but
+        # immutable paths/passwords is carried into the queue, so a discarded
+        # task leaks no file handles (A5) and the runner never re-prompts for a
+        # password (A13).
         readers = []
+        passwords = []
+        policies = []
+        total_pages = 0
+        current = sources[0]
+        try:
+            for current in sources:
+                reader = open_source_pdf(current, password_prompt=prompt_password)
+                readers.append(reader)
+                passwords.append(source_password(reader))
+                policies.append(detect_protection(reader))
+                total_pages += reader.page_count
+        except (PdfOpenError, RuntimeError) as exc:
+            print_error(f"Cannot merge: failed to open '{current.name}': {exc}")
+            logger.error("Merge aborted; failed to open '%s': %s", current, exc)
+            return False  # cannot open -> back to the merge menu (matches prior behaviour)
+        finally:
+            # Close every handle opened above, including on a mid-way failure.
+            for reader in readers:
+                close_doc(reader)
 
-    logger.info(
-        "All %d merge source(s) opened successfully; total pages=%d (sort=%s).",
-        len(sources), total_pages, _describe_merge_sort_mode(mode),
-    )
+        logger.info(
+            "All %d merge source(s) opened successfully; total pages=%d (sort=%s).",
+            len(sources), total_pages, _describe_merge_sort_mode(mode),
+        )
+        return True
 
-    # A merge never invents a protection policy: if any source is protected the
-    # user makes an explicit choice (documented default: unprotected output).
-    merge_protection = resolve_merge_protection(policies)
-    if merge_protection is None:
-        print_warning("Cancelled. Returning to the merge menu.")
+    def step_output() -> bool:
+        nonlocal merge_protection, out_path
+        # A merge never invents a protection policy: if any source is protected
+        # the user makes an explicit choice (documented default: unprotected
+        # output). A 'no' here is a deliberate cancel -> merge menu, not a step
+        # back. Resolve from the sources' policies each time so backing here and
+        # forward re-asks cleanly.
+        merge_protection = resolve_merge_protection(policies)
+        if merge_protection is None:
+            print_warning("Cancelled. Returning to the merge menu.")
+            raise _AbortToMenu()
+
+        # Choose the output path (Enter accepts a safe default beside the source).
+        default_path = unique_file_path(_default_merge_output(mode, sources))
+        out_path = _choose_output_file_for_merge(default_path, sources)
+        if out_path is None:
+            logger.info("Merge cancelled at output selection.")
+            return False  # back -> source collection
+
+        # Show the full merge summary.
+        _print_merge_summary(mode, sources, total_pages, out_path)
+        logger.info(
+            "Merge summary: pdfs=%d pages=%d sort=%s output='%s'",
+            len(sources), total_pages, mode, out_path,
+        )
+        return True
+
+    if not navigate_steps([step_collect_sources, step_output]):
         return
-
-    # Choose the output path (Enter accepts a safe default beside the source).
-    default_path = unique_file_path(_default_merge_output(mode, sources))
-    out_path = _choose_output_file_for_merge(default_path, sources)
-    if out_path is None:
-        print_warning("Returning to the merge menu.")
-        logger.info("Merge cancelled at output selection.")
-        return
-
-    # Show the full merge summary, then confirm.
-    _print_merge_summary(mode, sources, total_pages, out_path)
-    logger.info(
-        "Merge summary: pdfs=%d pages=%d sort=%s output='%s'",
-        len(sources), total_pages, mode, out_path,
-    )
 
     def _run():
         logger.info("Merge start: sources=%d output='%s'", len(sources), out_path)
