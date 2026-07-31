@@ -17,5 +17,5 @@ pytest-cov==7.1.0
 pypdf==6.14.2
 
 # Static analysis gates.
-ruff==0.16.0
+ruff==0.16.1
 mypy==2.3.0
