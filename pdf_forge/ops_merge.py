@@ -31,57 +31,11 @@ def prompt_merge_source_files() -> Optional[List[Path]]:
     enter it again, ``0`` to cancel (Back). The merge order matches the order
     entered. Duplicate files are rejected.
     """
-    print_note(
-        "Enter PDF paths one at a time. Add at least 2 files, then type 'done' "
-        "to finish. Type 'b' to re-enter the previous file."
+    return prompt_pdf_paths(
+        minimum=2,
+        note=("Enter PDF paths one at a time. Add at least 2 files, then type "
+              "'done' to finish. Type 'b' to re-enter the previous file."),
     )
-    selected: List[Path] = []
-    while True:
-        prompt = question_prompt(
-            f"PDF file #{len(selected) + 1}",
-            details=guidance_text(
-                drag_drop_guidance(repeated=True), GUIDANCE_KEYWORDS
-            ),
-        )
-        raw = _input(prompt)
-        cleaned = strip_surrounding_quotes(raw)
-
-        # 'done' (or a blank Enter) finishes once enough files exist.
-        if cleaned == "" or cleaned.lower() == "done":
-            if len(selected) >= 2:
-                return selected
-            print_error("Add at least 2 PDF files before finishing.")
-            continue
-        if cleaned.lower() == "b":
-            if not selected:
-                print_error("There is no previous file to re-enter yet.")
-                continue
-            removed = selected.pop()
-            print_warning(f"Removed: {removed.name}. Enter file #{len(selected) + 1} again.")
-            continue
-        if cleaned == "0":
-            return None
-        if cleaned.lower() in ("exit", "quit"):
-            raise _ExitRequested()
-
-        path = Path(cleaned)
-        if not path.exists():
-            print_error(f"Path does not exist: {cleaned}")
-            continue
-        if not path.is_file():
-            print_error("The path is not a file.")
-            continue
-        if path.suffix.lower() != ".pdf":
-            print_error("The file is not a .pdf file.")
-            continue
-
-        # Reject duplicates so the same PDF is never merged twice by accident.
-        if any(resolves_to_same_file(path, existing) for existing in selected):
-            print_warning("That PDF is already in the list; duplicates are not allowed.")
-            continue
-
-        selected.append(path)
-        print_success(f"Added: {path.name}  (total: {len(selected)})")
 
 
 def prompt_merge_source_folder() -> Optional[List[Path]]:

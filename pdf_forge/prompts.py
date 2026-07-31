@@ -9,7 +9,7 @@ from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
 __all__ = ['_input', 'navigate_steps', '_AbortToMenu', 'ask_yes_no', 'prompt_password', 'prompt_new_password',
-           'resolve_protection', 'resolve_merge_protection', 'prompt_source_pdf', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
+           'resolve_protection', 'resolve_merge_protection', 'prompt_source_pdf', 'prompt_pdf_paths', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
 
 
 class _AbortToMenu(Exception):
@@ -254,6 +254,65 @@ def prompt_source_pdf() -> Optional[Path]:
             print_error("The file is not a .pdf file.")
             continue
         return path
+
+
+def prompt_pdf_paths(minimum: int = 1, label: str = "PDF file",
+                     note: Optional[str] = None) -> Optional[List[Path]]:
+    """Collect PDF paths one at a time, in the order entered.
+
+    ``done`` (or a blank Enter) finishes once ``minimum`` files are gathered,
+    ``b`` drops the file added last so it can be entered again, ``0`` cancels
+    (Back -> ``None``), and exit/quit raise. Duplicates are rejected so the same
+    PDF is never processed twice by accident.
+    """
+    if note:
+        print_note(note)
+    selected: List[Path] = []
+    while True:
+        prompt = question_prompt(
+            f"{label} #{len(selected) + 1}",
+            details=guidance_text(
+                drag_drop_guidance(repeated=True), GUIDANCE_KEYWORDS
+            ),
+        )
+        raw = _input(prompt)
+        cleaned = strip_surrounding_quotes(raw)
+
+        # 'done' (or a blank Enter) finishes once enough files exist.
+        if cleaned == "" or cleaned.lower() == "done":
+            if len(selected) >= minimum:
+                return selected
+            print_error(f"Add at least {minimum} PDF file(s) before finishing.")
+            continue
+        if cleaned.lower() == "b":
+            if not selected:
+                print_error("There is no previous file to re-enter yet.")
+                continue
+            removed = selected.pop()
+            print_warning(f"Removed: {removed.name}. Enter file #{len(selected) + 1} again.")
+            continue
+        if cleaned == "0":
+            return None
+        if cleaned.lower() in ("exit", "quit"):
+            raise _ExitRequested()
+
+        path = Path(cleaned)
+        if not path.exists():
+            print_error(f"Path does not exist: {cleaned}")
+            continue
+        if not path.is_file():
+            print_error("The path is not a file.")
+            continue
+        if path.suffix.lower() != ".pdf":
+            print_error("The file is not a .pdf file.")
+            continue
+
+        if any(resolves_to_same_file(path, existing) for existing in selected):
+            print_warning("That PDF is already in the list; duplicates are not allowed.")
+            continue
+
+        selected.append(path)
+        print_success(f"Added: {path.name}  (total: {len(selected)})")
 
 
 class _ExitRequested(Exception):

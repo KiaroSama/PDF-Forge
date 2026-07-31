@@ -169,7 +169,7 @@ def test_watermark_removal_is_stopped_by_the_queue_source_gate(tmp_path, monkeyp
     """Configure, edit the source in place, then let the queue run the task."""
     src = stamped_pdf(tmp_path / "wm.pdf", pages=3, pad=64)
     assert drive(monkeypatch, app.operation_remove_watermark,
-                 [str(src), "", ""]), "the watermark operation did not queue"
+                 [str(src), "", "", ""]), "the watermark operation did not queue"
 
     # The queue's own gate must be wired, not just the runner's reopen. Both
     # verify, so dropping `sources=[ref]` alone still passes the behavioural
@@ -201,7 +201,8 @@ def test_watermark_removal_is_stopped_by_the_queue_source_gate(tmp_path, monkeyp
 def test_watermark_removal_still_works_on_an_unchanged_source(tmp_path, monkeypatch):
     """The gate must not cost the happy path."""
     src = stamped_pdf(tmp_path / "wm.pdf", pages=3, pad=64)
-    assert drive(monkeypatch, app.operation_remove_watermark, [str(src), "", ""])
+    assert drive(monkeypatch, app.operation_remove_watermark,
+                 [str(src), "", "", ""])
 
     app.taskqueue._run_task_queue()
 

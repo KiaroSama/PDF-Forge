@@ -37,7 +37,7 @@ from pypdf import PdfWriter  # noqa: E402,F401
 def test_merge_finishes_on_blank_finish_and_done(tmp_path, monkeypatch, terminator):
     a, b = make_pdf(tmp_path / "a.pdf", 1), make_pdf(tmp_path / "b.pdf", 1)
     answers = iter([str(a), str(b), terminator])
-    monkeypatch.setattr(app.ops_merge, "_input", lambda _p: next(answers))
+    monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
     result = app.ops_merge.prompt_merge_source_files()
     assert [p.name for p in result] == ["a.pdf", "b.pdf"]
 
@@ -46,20 +46,20 @@ def test_merge_minimum_count_error_keeps_flow(tmp_path, monkeypatch):
     """Finishing early errors and stays in the flow; duplicates stay rejected."""
     a, b = make_pdf(tmp_path / "a.pdf", 1), make_pdf(tmp_path / "b.pdf", 1)
     answers = iter(["", "done", str(a), str(a), str(b), "done"])
-    monkeypatch.setattr(app.ops_merge, "_input", lambda _p: next(answers))
+    monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
     result = app.ops_merge.prompt_merge_source_files()
     assert [p.name for p in result] == ["a.pdf", "b.pdf"]
 
 
 def test_merge_zero_returns_back(tmp_path, monkeypatch):
     answers = iter(["0"])
-    monkeypatch.setattr(app.ops_merge, "_input", lambda _p: next(answers))
+    monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
     assert app.ops_merge.prompt_merge_source_files() is None
 
 
 def test_merge_exit_raises_exit_request(tmp_path, monkeypatch):
     answers = iter(["exit"])
-    monkeypatch.setattr(app.ops_merge, "_input", lambda _p: next(answers))
+    monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
     with pytest.raises(app._ExitRequested):
         app.ops_merge.prompt_merge_source_files()
 
