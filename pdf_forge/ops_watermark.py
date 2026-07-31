@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
+from typing import List, Optional
 
 from .constants import *  # noqa: F401,F403
 from .ui import *  # noqa: F401,F403
@@ -37,54 +38,46 @@ def cleanup_temp_dir() -> None:
             logger.info("Cleared temp folder at startup: %s", temp)
 
 
-def operation_remove_watermark() -> None:
-    """Detect repeated image watermarks, preview them, and remove the chosen one.
-
-    Only image-based watermarks that repeat across pages can be removed. The
-    text layer and all other content are preserved. Preview images are written
-    to the project-local ``temp`` folder (``PDF Forge/temp``) so you can confirm
-    which image to remove before any change is made; that folder is removed
-    automatically when the operation finishes, and any leftovers are cleared on
-    the next launch. The original PDF is never modified.
-    """
-    reset_questions()
-    print_heading("\nRemove image watermark")
-    logger.info("Operation started: Remove image watermark.")
-
-    source = None
-    doc = None
-    ref = None
-    detected_protection = None
-    candidates = None
-    preview_dir = None
-    indices = None
-    chosen = None
-    chosen_sigs = None
-    affected_pages = None
-    protection = None
-    out_path = None
-
-    def step_source() -> bool:
-        nonlocal source, doc, ref, detected_protection, candidates, preview_dir
-        # Re-entered via back: drop the previous doc and previews before rescanning.
-        if doc is not None:
-            close_doc(doc)
-            doc = None
-        if preview_dir is not None:
-            shutil.rmtree(preview_dir, ignore_errors=True)
-            preview_dir = None
-
-        source = prompt_source_pdf()
-        if source is None:
-            return False  # first step: back -> menu
-
+def _prompt_watermark_choice(candidate_count: int) -> Optional[List[int]]:
+    """Ask which candidate(s) to remove. ``None`` = skip this file."""
+    sel_prompt = question_prompt(
+        "Watermark(s) to remove",
+        details="e.g. 1 or 1,3 (0 skips this file)",
+        default="1",
+    )
+    while True:
+        raw = _input(sel_prompt).strip()
+        if raw == "":
+            raw = "1"  # Enter selects candidate 1 (the top match).
+        if raw == "0":
+            return None
+        if raw.lower() in ("exit", "quit"):
+            raise _ExitRequested()
         try:
-            doc = open_source_pdf(source, password_prompt=prompt_password)
-        except (PdfOpenError, RuntimeError) as exc:
+            return parse_index_list(raw, candidate_count)
+        except ValueError as exc:
             print_error(str(exc))
-            logger.error("Failed to open '%s': %s", source, exc)
-            return False
 
+
+def _configure_watermark_removal(source: Path, preview_dirs: list) -> Optional[dict]:
+    """Scan one PDF and ask which watermark(s) to remove, and where to write.
+
+    Returns the configured job, or ``None`` when this file is skipped: it could
+    not be opened, nothing removable was found, the user typed 0 at the
+    selection, or the protection question was declined. Skipping one file never
+    abandons the others - that is the whole point of accepting a list.
+
+    Any preview folder it creates is appended to ``preview_dirs`` so the caller
+    can clear them all once the batch is configured.
+    """
+    try:
+        doc = open_source_pdf(source, password_prompt=prompt_password)
+    except (PdfOpenError, RuntimeError) as exc:
+        print_error(str(exc))
+        logger.error("Failed to open '%s': %s", source, exc)
+        return None
+
+    try:
         # Immutable identity of the source, captured while the configuration doc is
         # still open. The queue verifies it before the runner starts (C-06) and the
         # runner reopens through it, silently, with the captured password (A13).
@@ -114,7 +107,7 @@ def operation_remove_watermark() -> None:
             )
             logger.info("Watermark scan found no removable repeated images in '%s'.",
                         source)
-            return False  # nothing to do -> menu (first step)
+            return None  # nothing to do for this file
 
         # Export previews to the project-local temp folder (always in a known place).
         # Fall back to the system temp folder if that location is not writable.
@@ -123,6 +116,7 @@ def operation_remove_watermark() -> None:
             preview_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             preview_dir = Path(tempfile.mkdtemp(prefix="pdfforge_wm_preview_"))
+        preview_dirs.append(preview_dir)
         logger.info("Watermark previews at: %s", preview_dir)
         print_heading("\nWatermark candidates")
         for idx, cand in enumerate(candidates, start=1):
@@ -139,54 +133,34 @@ def operation_remove_watermark() -> None:
             f"each candidate:\n  {preview_dir}\n"
             "(this folder is removed automatically when the operation finishes)"
         )
-        return True
 
-    def step_choose_candidate() -> bool:
-        nonlocal indices, chosen, chosen_sigs, affected_pages
-        # Let the user pick which candidate(s) to remove.
-        sel_prompt = question_prompt(
-            "Watermark(s) to remove",
-            details="e.g. 1 or 1,3",
-            default="1",
-        )
-        indices = []
         while True:
-            raw = _input(sel_prompt).strip()
-            if raw == "":
-                raw = "1"  # Enter selects candidate 1 (the top match).
-            if raw == "0":
-                return False  # back -> source
-            if raw.lower() in ("exit", "quit"):
-                raise _ExitRequested()
-            try:
-                indices = parse_index_list(raw, len(candidates))
+            indices = _prompt_watermark_choice(len(candidates))
+            if indices is None:
+                print_warning(f"Skipped {source.name}.")
+                return None
+            chosen = [candidates[i - 1] for i in indices]
+            affected_pages = set()
+            for c in chosen:
+                affected_pages |= c.pages
+
+            # Consent BEFORE any output is configured or written (C-13). The
+            # resolved policy is captured in the queued task and handed to the
+            # writer, so a run-time re-detection never decides it. Resolved from
+            # the ORIGINAL detected policy each time round, so stepping back and
+            # forward re-asks cleanly rather than compounding a prior answer.
+            protection = resolve_protection(detected_protection,
+                                            context="watermark-free PDF")
+            if protection is None:
+                print_warning(f"Cancelled; skipped {source.name}.")
+                return None
+
+            default_path = unique_file_path(
+                source.parent / f"{source.stem}_no_watermark.pdf")
+            out_path = _choose_output_file(default_path, source)
+            if out_path is not None:
                 break
-            except ValueError as exc:
-                print_error(str(exc))
-
-        chosen = [candidates[i - 1] for i in indices]
-        chosen_sigs = [c.signature for c in chosen]
-        affected_pages = set()
-        for c in chosen:
-            affected_pages |= c.pages
-        return True
-
-    def step_output() -> bool:
-        nonlocal protection, out_path
-        # Consent BEFORE any output is configured or written (C-13). The
-        # resolved policy is captured in the queued task and handed to the
-        # writer, so a run-time re-detection never decides it. Resolve from the
-        # ORIGINAL detected policy each time, so backing here and forward
-        # re-asks cleanly rather than compounding a prior answer.
-        protection = resolve_protection(detected_protection, context="watermark-free PDF")
-        if protection is None:
-            print_warning("Cancelled. Returning to menu.")
-            raise _AbortToMenu()  # deliberate cancel -> menu, not a step back
-
-        default_path = unique_file_path(source.parent / f"{source.stem}_no_watermark.pdf")
-        out_path = _choose_output_file(default_path, source)
-        if out_path is None:
-            return False  # back -> candidate choice
+            # 0 at the output prompt steps back one prompt, to the selection.
 
         print_heading("\nSummary")
         print_kv("Source file", source.name, Color.CYAN)
@@ -199,66 +173,138 @@ def operation_remove_watermark() -> None:
         print_kv("Pages affected", len(affected_pages), Color.GOLD)
         print_kv("Output Path", out_path, Color.AQUA)
         logger.info(
-            "Watermark removal chosen: candidates=%s pages=%d output='%s'",
-            indices, len(affected_pages), out_path,
+            "Watermark removal chosen: source='%s' candidates=%s pages=%d output='%s'",
+            source, indices, len(affected_pages), out_path,
         )
-        return True
+        return {
+            "source": source,
+            "ref": ref,
+            "chosen": chosen,
+            "signatures": [c.signature for c in chosen],
+            "protection": protection,
+            "out_path": out_path,
+        }
+    finally:
+        # The configuration document never crosses the queue boundary; the
+        # runner reopens each source through its reference (PF-004).
+        close_doc(doc)
 
+
+def _run_watermark_removal(job: dict) -> bool:
+    """Execute one configured removal. ``False`` when it failed."""
+    # Reopen the source fresh (the configure-time doc is closed after previews,
+    # and removal mutates the document in place). Going through the reference
+    # re-proves identity and authenticates silently - no prompt during queue
+    # execution.
     try:
-        if not navigate_steps([step_source, step_choose_candidate, step_output]):
+        rdoc = job["ref"].open()
+    except (PdfOpenError, RuntimeError) as exc:
+        print_error(str(exc))
+        logger.error("Failed to reopen '%s': %s", job["source"], exc)
+        return False
+    try:
+        result = remove_watermark_images(
+            rdoc,
+            job["signatures"],
+            job["out_path"],
+            progress=lambda c, t: _print_progress("Cleaning pages", c, t),
+            protection=job["protection"],
+        )
+    except Exception as exc:  # noqa: BLE001 - clean message, log details
+        print_error(f"Failed to remove the watermark: {exc}")
+        logger.exception("Watermark removal failed for output '%s'", job["out_path"])
+        return False
+    finally:
+        close_doc(rdoc)
+    # Report the path that was actually written: promotion may have allocated a
+    # sibling name if the requested one appeared meanwhile.
+    print_success(
+        f"Done. Removed watermark from {result.count} page(s):\n  {result.path}"
+    )
+    logger.info(
+        "Watermark removal complete: pages=%d output='%s'",
+        result.count, result.path,
+    )
+    return True
+
+
+def operation_remove_watermark() -> None:
+    """Detect repeated image watermarks, preview them, and remove the chosen ones.
+
+    Accepts one or more PDFs in a single pass: paths are entered one at a time
+    until ``done``, then each file is scanned separately and asked about on its
+    own (0 at that point skips just that file). Everything configured is queued
+    as one task.
+
+    Only image-based watermarks that repeat across pages can be removed. The
+    text layer and all other content are preserved. Preview images are written
+    to the project-local ``temp`` folder (``PDF Forge/temp``) so you can confirm
+    which image to remove before any change is made; that folder is removed
+    automatically when the operation finishes, and any leftovers are cleared on
+    the next launch. The original PDFs are never modified.
+    """
+    reset_questions()
+    print_heading("\nRemove image watermark")
+    logger.info("Operation started: Remove image watermark.")
+
+    sources = prompt_pdf_paths(
+        minimum=1,
+        label="Source PDF",
+        note=("Add one or more PDFs, one path at a time, then type 'done' (or "
+              "press Enter) to finish. Each file is scanned on its own and you "
+              "choose its watermark(s) next - 0 there skips just that file."),
+    )
+    if sources is None:
+        return
+
+    preview_dirs = []
+    try:
+        jobs = []
+        for position, source in enumerate(sources, start=1):
+            if len(sources) > 1:
+                print_heading(f"\nFile {position}/{len(sources)}: {source.name}")
+            job = _configure_watermark_removal(source, preview_dirs)
+            if job is not None:
+                jobs.append(job)
+
+        if not jobs:
+            print_warning("No file was configured for removal. Returning to menu.")
+            logger.info("Watermark removal: nothing configured from %d file(s).",
+                        len(sources))
             return
 
         def _run():
-            # Reopen the source fresh (the configure-time doc is closed after
-            # previews, and removal mutates the document in place). Going
-            # through the reference re-proves identity and authenticates
-            # silently - no prompt during queue execution.
-            try:
-                rdoc = ref.open()
-            except (PdfOpenError, RuntimeError) as exc:
-                print_error(str(exc))
-                logger.error("Failed to reopen '%s': %s", source, exc)
-                return
-            try:
-                result = remove_watermark_images(
-                    rdoc,
-                    chosen_sigs,
-                    out_path,
-                    progress=lambda c, t: _print_progress("Cleaning pages", c, t),
-                    protection=protection,
+            failed = 0
+            for index, job in enumerate(jobs, start=1):
+                if len(jobs) > 1:
+                    print_info(f"[{index}/{len(jobs)}] {job['source'].name}")
+                if not _run_watermark_removal(job):
+                    failed += 1
+            if len(jobs) > 1:
+                print_success(
+                    f"\nDone. Cleaned {len(jobs) - failed} file(s), {failed} failed."
                 )
-            except Exception as exc:  # noqa: BLE001 - clean message, log details
-                print_error(f"Failed to remove the watermark: {exc}")
-                logger.exception("Watermark removal failed for output '%s'", out_path)
-                return
-            finally:
-                rdoc.close()
-            # Report the path that was actually written: promotion may have
-            # allocated a sibling name if the requested one appeared meanwhile.
-            print_success(
-                f"Done. Removed watermark from {result.count} page(s):"
-                f"\n  {result.path}"
-            )
-            logger.info(
-                "Watermark removal complete: pages=%d output='%s'",
-                result.count, result.path,
-            )
+                logger.info("Watermark batch complete: ok=%d failed=%d",
+                            len(jobs) - failed, failed)
 
+        summary = (
+            f"Remove {len(jobs[0]['chosen'])} watermark(s) from "
+            f"{jobs[0]['source'].name} -> {jobs[0]['out_path'].name}"
+            if len(jobs) == 1 else
+            f"Remove watermarks from {len(jobs)} file(s)"
+        )
         queue_task(
-            f"Remove {len(chosen)} watermark(s) from {source.name} "
-            f"-> {out_path.name}",
+            summary,
             _run,
             # Identity of every source this task was configured against;
-            # the queue re-verifies it just before running (C-06).
-            sources=[ref],
+            # the queue re-verifies them just before running (C-06).
+            sources=[job["ref"] for job in jobs],
         )
     finally:
-        # Close the configure-time doc, remove the preview folder, and drop the
-        # temp parent too if it is now empty.
-        if doc is not None:
-            close_doc(doc)
-        if preview_dir is not None:
-            shutil.rmtree(preview_dir, ignore_errors=True)
+        # Remove every preview folder, and drop the temp parent too if it is now
+        # empty.
+        for directory in preview_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
         try:
             temp = _temp_dir()
             if temp.exists() and not any(temp.iterdir()):

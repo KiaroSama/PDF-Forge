@@ -9,7 +9,8 @@ from .core import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 from .pdf_io import SourceChangedError, SourceRef
 
-__all__ = ['_TaskQueued', '_QueuedTask', 'queue_task', '_run_task_queue', 'finalize_queue']
+__all__ = ['_TaskQueued', '_QueuedTask', 'queue_task', '_run_task_queue', 'finalize_queue',
+           'queued_count']
 
 class _TaskQueued(Exception):
     """Signal that an operation has been fully configured and queued.
@@ -53,6 +54,11 @@ def queue_task(summary: str, run: Callable[[], None], sources=()) -> None:
     print_success(f"\nAdded to queue (#{len(_task_queue)}): {summary}")
     logger.info("Task queued (#%d): %s", len(_task_queue), summary)
     raise _TaskQueued()
+
+
+def queued_count() -> int:
+    """How many tasks are waiting to run (0 when nothing is queued)."""
+    return len(_task_queue)
 
 
 def _discard_queue() -> None:

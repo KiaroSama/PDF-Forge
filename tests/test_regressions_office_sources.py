@@ -302,7 +302,7 @@ def test_b_re_enters_the_previous_file(tmp_path, monkeypatch):
     c = make_pdf(tmp_path / "c.pdf", 1)
     # add a, add b, 'b' (undo b), add c, done
     answers = iter([str(a), str(b), "b", str(c), "done"])
-    monkeypatch.setattr(app.ops_merge, "_input", lambda _p: next(answers))
+    monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
     result = app.ops_merge.prompt_merge_source_files()
     assert [p.name for p in result] == ["a.pdf", "c.pdf"]
 
@@ -318,7 +318,7 @@ def test_b_prompt_number_goes_back(tmp_path, monkeypatch):
         seen.append(prompt)
         return next(answers)
 
-    monkeypatch.setattr(app.ops_merge, "_input", fake_input)
+    monkeypatch.setattr("builtins.input", fake_input)
     app.ops_merge.prompt_merge_source_files()
     titles = [p.split(". ", 1)[1].split(" (")[0] for p in seen]
     assert titles[:4] == ["PDF file #1", "PDF file #2", "PDF file #3", "PDF file #2"]
@@ -328,7 +328,7 @@ def test_b_with_nothing_selected_is_rejected(tmp_path, monkeypatch):
     a = make_pdf(tmp_path / "a.pdf", 1)
     b = make_pdf(tmp_path / "b.pdf", 1)
     answers = iter(["b", str(a), str(b), "done"])
-    monkeypatch.setattr(app.ops_merge, "_input", lambda _p: next(answers))
+    monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
     result = app.ops_merge.prompt_merge_source_files()
     assert [p.name for p in result] == ["a.pdf", "b.pdf"]
 
@@ -338,7 +338,7 @@ def test_finish_keyword_is_gone(tmp_path, monkeypatch):
     a = make_pdf(tmp_path / "a.pdf", 1)
     b = make_pdf(tmp_path / "b.pdf", 1)
     answers = iter([str(a), str(b), "finish", "done"])
-    monkeypatch.setattr(app.ops_merge, "_input", lambda _p: next(answers))
+    monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
     result = app.ops_merge.prompt_merge_source_files()
     assert [p.name for p in result] == ["a.pdf", "b.pdf"]
 

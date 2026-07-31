@@ -51,6 +51,28 @@ _SUBMENUS = {
 }
 
 
+# The main menu's numbered options, in display order. Rendering AND the number
+# of the temporary "run the queue" entry both derive from this tuple, so adding
+# a tool here can never collide with that entry's number.
+_MAIN_ITEMS = (
+    "Page tools",
+    "Merge multiple PDFs",
+    "Delete pages",
+    "PDF to images (PNG)",
+    "PDF to image-only PDF",
+    "Remove image watermark",
+    "Extract images from PDF",
+    "Compress PDF (reduce file size)",
+    "Protect PDF (set password / restrictions)",
+    "Unlock PDF (remove password & restrictions)",
+    "Convert documents/spreadsheets/presentations to PDF",
+)
+
+# Shown only while tasks are waiting, so the queue can be started from the menu
+# instead of only from the "queue another task?" question.
+_RUN_QUEUE_CHOICE = str(len(_MAIN_ITEMS) + 1)
+
+
 def _render_submenu(key: str) -> None:
     """Print one submenu in the shared Page-tools style."""
     title, _log, options = _SUBMENUS[key]
@@ -156,22 +178,21 @@ def protect_menu() -> None:
 
 
 def show_menu() -> None:
-    """Render the main menu: light-blue header and numbered options."""
+    """Render the main menu: light-blue header and numbered options.
+
+    While tasks are queued, one extra option is appended after Exit so the batch
+    can be started straight from the menu.
+    """
     print()
     print(colorize(f"{APP_NAME} Main menu:", Color.BOLD + Color.LIGHT_BLUE))
-    print(f"  {colorize('1.', Color.LIGHT_BLUE)} Page tools "
-          f"{colorize('[1]', Color.GREEN)}")
-    print(f"  {colorize('2.', Color.LIGHT_BLUE)} Merge multiple PDFs")
-    print(f"  {colorize('3.', Color.LIGHT_BLUE)} Delete pages")
-    print(f"  {colorize('4.', Color.LIGHT_BLUE)} PDF to images (PNG)")
-    print(f"  {colorize('5.', Color.LIGHT_BLUE)} PDF to image-only PDF")
-    print(f"  {colorize('6.', Color.LIGHT_BLUE)} Remove image watermark")
-    print(f"  {colorize('7.', Color.LIGHT_BLUE)} Extract images from PDF")
-    print(f"  {colorize('8.', Color.LIGHT_BLUE)} Compress PDF (reduce file size)")
-    print(f"  {colorize('9.', Color.LIGHT_BLUE)} Protect PDF (set password / restrictions)")
-    print(f"  {colorize('10.', Color.LIGHT_BLUE)} Unlock PDF (remove password & restrictions)")
-    print(f"  {colorize('11.', Color.LIGHT_BLUE)} Convert documents/spreadsheets/presentations to PDF")
+    for index, label in enumerate(_MAIN_ITEMS, start=1):
+        marker = f" {colorize('[1]', Color.GREEN)}" if index == 1 else ""
+        print(f"  {colorize(f'{index}.', Color.LIGHT_BLUE)} {label}{marker}")
     print(f"  {colorize('0.', Color.LIGHT_BLUE)} Exit")
+    pending = queued_count()
+    if pending:
+        print(f"  {colorize(f'{_RUN_QUEUE_CHOICE}.', Color.LIGHT_BLUE)} "
+              + colorize(f"Start the {pending} queued task(s) now", Color.LIME))
     print()
 
 
@@ -247,8 +268,18 @@ def main_menu() -> int:
                 direct_ops[choice]()
             elif choice in submenu_launchers:
                 submenu_launchers[choice]()  # submenu sets the prefix per item.
+            elif choice == _RUN_QUEUE_CHOICE and queued_count():
+                # Only offered while the queue holds something; same summary and
+                # single "Start now?" confirmation as finishing from the
+                # "queue another task?" question.
+                if finalize_queue():  # True => exit/quit typed at "Start now?".
+                    return _goodbye()
+                continue
             else:
-                print_error("Invalid option. Please choose 1-11 or 0.")
+                extra = f", {_RUN_QUEUE_CHOICE}" if queued_count() else ""
+                print_error(
+                    f"Invalid option. Please choose 1-{len(_MAIN_ITEMS)}{extra} or 0."
+                )
                 continue
         except _ExitRequested:
             finalize_queue()

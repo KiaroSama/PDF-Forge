@@ -236,6 +236,11 @@ The flow is:
      result, and a task that fails is reported without stopping the rest.
    - **`n`** cancels and discards the queued tasks.
 
+While tasks are queued, the main menu also grows one extra option after `Exit` —
+**`Start the N queued task(s) now`** — which jumps straight to step 3. It is
+hidden when the queue is empty, and its number always follows the last tool, so
+it never shadows one.
+
 Choosing `Exit` (or typing `exit`) with tasks still queued also shows the
 complete summary and the `Start now?` prompt before the app closes. Cancelling or
 backing out of an operation adds nothing to the queue.
@@ -448,7 +453,9 @@ text layer and all other content are preserved.
 
 How it works:
 
-1. Enter the source PDF path.
+1. Enter one or more source PDF paths, one at a time, then type `done` (or press
+   Enter) to finish. Steps 2-5 then repeat for each file in turn, and everything
+   you configure is queued as a single task.
 2. PDF Forge scans the document and lists the images that repeat across pages,
    ranked by how many pages they cover (the watermark is usually the top
    candidate at or near 100%).
@@ -456,7 +463,8 @@ How it works:
    folder (`PDF Forge/temp`) so you can open them and confirm which image is the
    watermark before removing anything. That folder is removed automatically when
    the operation finishes, and cleared at startup if anything was left behind.
-4. Choose the candidate(s) to remove (e.g. `1`, or `1,3` for several).
+4. Choose the candidate(s) to remove (e.g. `1`, or `1,3` for several). `0` here
+   skips just that file and moves on to the next one.
 5. Review the summary and pick the output path (Enter accepts
    `<source>_no_watermark.pdf` beside the source); the task is added to the queue.
 6. When the queue runs, the watermark's paint calls are removed from every page,
@@ -470,7 +478,8 @@ usually a little smaller than the source.
 
 ```
 Main menu -> 5 (Remove image watermark)
-  Source PDF path: C:\books\volume.pdf
+  Source PDF #1: C:\books\volume.pdf
+  Source PDF #2: done
   Watermark candidates:
     [1] 899x674px  on 231/231 pages (100%) - preview: candidate_1.png
   Watermark(s) to remove: 1

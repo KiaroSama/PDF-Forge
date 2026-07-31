@@ -91,7 +91,7 @@ def test_open_password_source_keeps_its_password(tmp_path, monkeypatch):
     src = stamped_pdf(tmp_path / "enc.pdf", 3,
                       encryption=pymupdf.PDF_ENCRYPT_AES_256,
                       user_pw="pw", owner_pw="pw")
-    assert drive(monkeypatch, [str(src), "", ""], password="pw")
+    assert drive(monkeypatch, [str(src), "", "", ""], password="pw")
 
     # Sabotage the writer's run-time fallback: if it is still what decides,
     # the output loses its password.
@@ -117,7 +117,7 @@ def test_owner_restricted_source_asks_before_queueing(tmp_path, monkeypatch):
         return True
 
     src = restricted_pdf(tmp_path / "restricted.pdf")
-    queued = drive(monkeypatch, [str(src), "", ""], ask=ask)
+    queued = drive(monkeypatch, [str(src), "", "", ""], ask=ask)
     assert asked, "the lost owner restrictions were never raised with the user"
     assert queued, "consent was given, so the task must be queued"
 
@@ -125,7 +125,7 @@ def test_owner_restricted_source_asks_before_queueing(tmp_path, monkeypatch):
 def test_declining_leaves_no_task_and_no_output(tmp_path, monkeypatch):
     src = restricted_pdf(tmp_path / "restricted.pdf")
     before = outputs(tmp_path, src)
-    queued = drive(monkeypatch, [str(src), "", ""],
+    queued = drive(monkeypatch, [str(src), "", "", ""],
                    ask=lambda *_a, **_k: False)
     assert not queued, "a declined operation must not be queued"
     assert app.taskqueue._task_queue == []
@@ -134,7 +134,7 @@ def test_declining_leaves_no_task_and_no_output(tmp_path, monkeypatch):
 
 def test_accepted_downgrade_produces_an_unprotected_output(tmp_path, monkeypatch):
     src = restricted_pdf(tmp_path / "restricted.pdf")
-    assert drive(monkeypatch, [str(src), "", ""], ask=lambda *_a, **_k: True)
+    assert drive(monkeypatch, [str(src), "", "", ""], ask=lambda *_a, **_k: True)
     app.taskqueue._task_queue[-1].run()
 
     out = tmp_path / "restricted_no_watermark.pdf"
@@ -154,7 +154,7 @@ def test_consent_is_asked_before_anything_is_written(tmp_path, monkeypatch):
         seen["files"] = outputs(tmp_path, src)
         return True
 
-    drive(monkeypatch, [str(src), "", ""], ask=ask)
+    drive(monkeypatch, [str(src), "", "", ""], ask=ask)
     assert "files" in seen, "no consent question was asked at all"
     assert seen["files"] == [], (
         f"files existed in the output folder at consent time: {seen['files']}"
@@ -196,7 +196,7 @@ def test_inline_only_images_are_not_selectable_and_are_reported(tmp_path):
 
 def test_the_operation_reports_skipped_inline_images(tmp_path, monkeypatch, capsys):
     src = inline_image_pdf(tmp_path / "inline.pdf")
-    queued = drive(monkeypatch, [str(src)])
+    queued = drive(monkeypatch, [str(src), ""])
     assert not queued, "nothing removable was found, so nothing may be queued"
     output = capsys.readouterr().out
     assert "inline" in output.lower(), (

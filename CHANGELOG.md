@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first and only the plain copy reaches the converter. A wrong password is an
   ordinary re-prompt.
 
+### Added
+- **Watermark removal takes several PDFs in one pass.** Enter paths one at a
+  time and type `done`; each file is then scanned and asked about on its own
+  (`0` there skips just that file), and everything configured is queued as a
+  single task. Previously each file needed its own trip through the menu.
+- **The main menu can start the queue.** While tasks are waiting, one extra
+  option appears after `Exit` that runs them - previously the batch could only
+  be started by answering "no" to "queue another task?". Its number follows the
+  menu length, so adding a tool later moves it instead of colliding with it.
+
 ### Changed
 - **`0`/back now steps back one prompt instead of leaving the whole
   operation.** In every multi-step tool, pressing `0` at a prompt re-shows the
