@@ -349,3 +349,56 @@ def test_watermark_removal_passes_its_own_postcondition(tmp_path):
         app.close_doc(opened)
     assert modified.count == 3
     app.validate_watermark_removed(out, [candidates[0].signature])
+
+
+# --------------------------------------------------------------------------- #
+# Rendered-image validation
+# --------------------------------------------------------------------------- #
+
+class _ShortWritePixmap:
+    """Stands in for a pymupdf Pixmap whose save() leaves a truncated file.
+
+    ``_atomic_pixmap_save`` only ever calls ``save()`` on what it is handed, so
+    this reproduces an interrupted or short write without having to interrupt a
+    real one.
+    """
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def save(self, path, output=None, jpg_quality=None):
+        Path(path).write_bytes(self._payload)
+
+
+def test_a_corrupt_rendered_png_is_rejected_before_promotion(tmp_path):
+    """A truncated/corrupt image must never be promoted to the user's output.
+
+    This is the requirement, stated without naming the library that enforces
+    it: whichever decoder ``_validate_image_file`` uses, a short write has to
+    fail loudly and leave the output directory untouched. The exception type is
+    asserted too, because every caller in ``ops_convert`` funnels these into one
+    handler - swapping the validating decoder must not silently change what
+    reaches them.
+    """
+    from pdf_forge.render import _atomic_pixmap_save
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=200)
+    page.insert_text((20, 100), "PDF FORGE", fontsize=24)
+    good = page.get_pixmap(dpi=96).tobytes("png")
+    doc.close()
+
+    truncated = good[: len(good) // 2]
+    # Header and IHDR survive, so it still looks like a PNG - it is merely cut
+    # short, which is exactly what an interrupted write leaves behind.
+    assert truncated.startswith(b"\x89PNG\r\n\x1a\n")
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    final_path = out_dir / "page_1.png"
+
+    with pytest.raises((app.PdfOpenError, OSError)):
+        _atomic_pixmap_save(_ShortWritePixmap(truncated), out_dir, final_path, "png")
+
+    assert not final_path.exists(), "a corrupt image was promoted to the output name"
+    assert list(out_dir.iterdir()) == [], "the rejected temp file was left behind"

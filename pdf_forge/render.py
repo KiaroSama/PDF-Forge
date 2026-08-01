@@ -12,7 +12,7 @@ from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
 __all__ = ['_import_pillow', 'open_render_document', '_validate_image_file',
-           'render_pages_to_pngs', 'render_pdf_to_image_pdf',
+           'render_pages_to_pngs', 'render_pdf_to_image_pdf', 'scan_images',
            'count_embedded_images', 'count_inline_images', 'extract_embedded_images']
 
 # Embedded images smaller than this (either side, in pixels) are treated as
@@ -50,7 +50,15 @@ def open_render_document(path: Path, password_prompt=None, password=None):
 
 
 def _validate_image_file(path: Path) -> None:
-    """Reopen a freshly written image and confirm it is a valid, non-empty file."""
+    """Reopen a freshly written image and confirm it is a valid, non-empty file.
+
+    The decoder is deliberately *independent* of the one that wrote the file:
+    self-verifying with PyMuPDF cannot catch a PyMuPDF writer bug. This is not
+    theoretical - on a PNG corrupted mid-IDAT, PyMuPDF's own decoder accepts the
+    file and hands back different pixels without raising, because it does not
+    check the chunk CRC, while Pillow's ``verify()`` rejects it. That is the
+    whole reason Pillow is a runtime dependency; see requirements.txt.
+    """
     Image = _import_pillow()
     if path.stat().st_size <= 0:
         raise PdfOpenError("Output validation failed: the image file is empty.")
@@ -145,7 +153,8 @@ def render_pdf_to_image_pdf(doc, page_count: int, out_path: Path, dpi: int,
             )
             # Never rebind out_path: the requested and the written name must
             # stay distinguishable all the way back to the caller.
-            written = promote_atomically(tmp_path, out_path)
+            written = promote_atomically(
+                tmp_path, out_path, overwrite=overwrite_approved(out_path))
         except BaseException:  # incl. Ctrl+C: leaked temp survives otherwise
             try:
                 if tmp_path.exists():
@@ -179,16 +188,26 @@ def _image_content_key(item) -> str:
     return f"xref{item.get('xref', 0)}:{width}x{height}"
 
 
-def _iter_unique_images(doc):
-    """Yield ``(xref, first_page_number, per_page_index)`` for each distinct
-    embedded image, in first-appearance order.
+def scan_images(doc):
+    """One pass over the document: unique embedded images + inline count.
+
+    Returns ``(items, inline_count)``. Each item is
+    ``(xref, first_page_number, per_page_index)`` for one distinct embedded
+    image, in first-appearance order; ``inline_count`` is the number of painted
+    inline images, which extraction cannot produce.
 
     Only images actually **painted** on a page are considered, so unused
     resource entries are never reported as extractable. Distinctness is by
     image *content*, so the same picture referenced from many pages (e.g. a
-    watermark) - or stored under several xrefs - is yielded once, for the first
-    page it appears on. Tiny placeholder images are skipped.
+    watermark) - or stored under several xrefs - is reported once, for the
+    first page it appears on. Tiny placeholder images are skipped.
+
+    Extraction previously walked the document three times (embedded count,
+    inline count, extraction), each decoding and digesting every image. Both
+    questions are answered by the same per-page records, so ask once.
     """
+    items: List[tuple] = []
+    inline = 0
     seen = set()
     for page_index in range(doc.page_count):
         counter = 0
@@ -208,13 +227,20 @@ def _iter_unique_images(doc):
                 # would mean parsing content streams - the parsing risk this
                 # code deliberately avoids. It is counted and reported instead
                 # of being silently dropped (PF-026).
+                inline += 1
                 continue
             counter += 1
             key = _image_content_key(item)
             if key in seen:
                 continue
             seen.add(key)
-            yield xref, page_index + 1, counter
+            items.append((xref, page_index + 1, counter))
+    return items, inline
+
+
+def _iter_unique_images(doc):
+    """The distinct embedded images of the document (see :func:`scan_images`)."""
+    return scan_images(doc)[0]
 
 
 def _smask_xref(doc, xref: int) -> int:
@@ -320,7 +346,7 @@ def _atomic_pixmap_save(pixmap, out_dir: Path, final_path: Path, fmt: str,
 
 def count_embedded_images(doc) -> int:
     """Number of distinct extractable (XObject) images in the document."""
-    return sum(1 for _ in _iter_unique_images(doc))
+    return len(scan_images(doc)[0])
 
 
 def count_inline_images(doc) -> int:
@@ -333,7 +359,9 @@ def count_inline_images(doc) -> int:
     total = 0
     for page_index in range(doc.page_count):
         try:
-            infos = doc[page_index].get_image_info(hashes=True, xrefs=True)
+            # No digest is read below - only xref/width/height - and hashes=True
+            # makes MuPDF decode and digest every image on the page.
+            infos = doc[page_index].get_image_info(xrefs=True)
         except Exception:  # noqa: BLE001
             continue
         for item in infos:
@@ -347,7 +375,7 @@ def count_inline_images(doc) -> int:
 
 
 def extract_embedded_images(doc, out_dir: Path, jpeg_quality=None,
-                            progress=None) -> List[Path]:
+                            progress=None, items=None) -> List[Path]:
     """Extract every distinct embedded image into ``out_dir``.
 
     With ``jpeg_quality=None`` (Original mode) the raw embedded bytes are
@@ -356,6 +384,11 @@ def extract_embedded_images(doc, out_dir: Path, jpeg_quality=None,
     the given quality. Files are named ``p<page>_<n>.<ext>`` after the first
     page the image appears on. Never overwrites existing files. Returns the
     list of created paths.
+
+    ``items`` optionally supplies the result of an earlier :func:`scan_images`
+    on the same bytes, so a queued run does not walk and digest the whole
+    document a second time. It carries plain ints only. When it is absent the
+    document is scanned here, which is what every direct caller does.
     """
     pymupdf = _import_pymupdf()
 
@@ -363,7 +396,7 @@ def extract_embedded_images(doc, out_dir: Path, jpeg_quality=None,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     started = time.perf_counter()
-    items = list(_iter_unique_images(doc))
+    items = scan_images(doc)[0] if items is None else list(items)
     total = len(items)
     created: List[Path] = []
     logger.debug(

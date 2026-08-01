@@ -3,11 +3,13 @@
 Two responsibilities that every writer in the application shares:
 
 1. :func:`promote_atomically` - move a validated temporary file onto its final
-   name **without ever overwriting** anything. Queue-time reservation only
-   protects one process; between configuration and execution another process
-   (or another PDF Forge instance) can create the destination. ``os.replace()``
-   would silently clobber it, so promotion instead claims the name atomically
-   and, on collision, allocates the next free suffix and retries.
+   name **without ever overwriting** anything the user did not explicitly ask it
+   to replace. Queue-time reservation only protects one process; between
+   configuration and execution another process (or another PDF Forge instance)
+   can create the destination. ``os.replace()`` would silently clobber it, so
+   promotion instead claims the name atomically and, on collision, allocates the
+   next free suffix and retries. Only an explicit ``overwrite=True`` - consent
+   the user gave at the prompt - lands on an occupied name (OW-1).
 
 2. :class:`StateStore` / the generated-output manifest - remembers which PDFs
    this application produced, so folder tools never reprocess their own output.
@@ -129,7 +131,7 @@ def _discard(path: Path, description: str) -> None:
 
 
 def promote_atomically(tmp_path: Path, final_path: Path,
-                       record: bool = True) -> Path:
+                       record: bool = True, overwrite: bool = False) -> Path:
     """Promote a validated temp file to its final name without clobbering.
 
     Returns the path actually written, which may carry a ``_2``/``_3`` suffix if
@@ -139,26 +141,47 @@ def promote_atomically(tmp_path: Path, final_path: Path,
     ``record=True`` registers the result in the generated-output manifest, so
     folder tools skip it on a later run. Recording happens here - in the single
     place every PDF output is finalized - so no writer can forget it.
+
+    ``overwrite=True`` replaces ``final_path`` instead of stepping around it, and
+    is only ever passed for a destination the user explicitly approved (OW-1).
+    It lands on the requested name exactly - no suffix is allocated - and never
+    applies to a directory. The default is today's no-clobber behaviour, so a
+    caller that says nothing cannot destroy anything.
     """
     tmp_path, final_path = Path(tmp_path), Path(final_path)
-    claimed = None
+    claimed = final_path
+    # Only ever the empty placeholder *this call* created, so cleanup below can
+    # never touch the user's own file: it stays None in overwrite mode (OW-1).
+    placeholder: Optional[Path] = None
     try:
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        claimed = claim_unique_path(final_path)
-        # The claim is an empty placeholder we own; replacing it is safe and
-        # atomic. os.replace is correct *here* precisely because the target was
-        # created by us microseconds earlier and nobody else can hold that name.
-        os.replace(str(tmp_path), str(claimed))
+        if overwrite:
+            # The user explicitly approved replacing this destination (OW-1).
+            # os.replace is atomic and replaces an existing file, so the user is
+            # never left without either version. No placeholder is claimed here:
+            # the whole point is to land on the name that already exists.
+            if final_path.is_dir():
+                raise IsADirectoryError(
+                    f"Refusing to overwrite a directory: {final_path}")
+            os.replace(str(tmp_path), str(final_path))
+        else:
+            claimed = placeholder = claim_unique_path(final_path)
+            # The claim is an empty placeholder we own; replacing it is safe and
+            # atomic. os.replace is correct *here* precisely because the target was
+            # created by us microseconds earlier and nobody else can hold that name.
+            os.replace(str(tmp_path), str(claimed))
     except Exception:
         # Clean up BOTH artifacts, independently: a failure to remove one must
         # not abandon the other. The claim is an empty placeholder wearing the
         # user's expected output name, so leaving it behind hands them a 0-byte
         # file and pushes every later run onto a _2 suffix. Only the placeholder
         # this call created is removed - never a pre-existing external file,
-        # which claim_unique_path by construction never returns.
+        # which claim_unique_path by construction never returns, and never the
+        # approved destination of a failed overwrite, which is the user's own
+        # file and must survive intact (OW-1).
         _discard(tmp_path, "temporary file")
-        if claimed is not None:
-            _discard(claimed, "claimed output placeholder")
+        if placeholder is not None:
+            _discard(placeholder, "claimed output placeholder")
         raise
     if record:
         record_generated_output(claimed)

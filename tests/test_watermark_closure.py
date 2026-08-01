@@ -290,3 +290,91 @@ def test_the_written_path_is_reported_not_the_configured_one(tmp_path):
     assert result.path != out and result.path.exists()
     assert result.count == 2
     assert out.read_bytes() == b"taken", "an existing file must not be clobbered"
+
+
+# --------------------------------------------------------------------------- #
+# C-04 - startup cleanup shares one temp folder with every other instance, so
+# it must delete only what its owner has finished with.
+# --------------------------------------------------------------------------- #
+
+import os  # noqa: E402
+
+from pdf_forge import ops_watermark  # noqa: E402
+
+
+def _temp_root(monkeypatch, tmp_path: Path) -> Path:
+    """Point the shared temp folder at an isolated directory for one test."""
+    root = tmp_path / "temp"
+    root.mkdir()
+    monkeypatch.setattr(ops_watermark, "_temp_dir", lambda: root)
+    return root
+
+
+def test_startup_cleanup_keeps_a_live_instances_previews(monkeypatch, tmp_path):
+    """The user-visible defect: instance two wiped instance one's previews.
+
+    Instance one sits at "open these previews and choose"; instance two starts
+    and used to rmtree the whole shared folder out from under it.
+    """
+    root = _temp_root(monkeypatch, tmp_path)
+    live = root / ops_watermark._run_dir().name   # owned by THIS live process
+    live.mkdir()
+    (live / "candidate_1.png").write_bytes(b"preview")
+
+    ops_watermark.cleanup_temp_dir()
+
+    assert (live / "candidate_1.png").exists(), (
+        "startup cleanup deleted a running instance's previews"
+    )
+
+
+def test_startup_cleanup_removes_a_dead_owners_previews(monkeypatch, tmp_path):
+    """The behaviour that must survive: real leftovers are still cleared."""
+    root = _temp_root(monkeypatch, tmp_path)
+    dead = root / "run-999999-1"                  # no such process
+    dead.mkdir()
+    (dead / "candidate_1.png").write_bytes(b"preview")
+
+    ops_watermark.cleanup_temp_dir()
+
+    assert not dead.exists(), "a finished run's previews were left behind"
+
+
+def test_startup_cleanup_removes_a_recycled_pids_previews(monkeypatch, tmp_path):
+    """A live PID with a different start time is a recycled number, not an owner.
+
+    Without the start-time half of the identity this folder would look alive
+    forever and never be cleaned up.
+    """
+    root = _temp_root(monkeypatch, tmp_path)
+    stale = root / f"run-{os.getpid()}-1"         # our PID, someone else's run
+    stale.mkdir()
+
+    ops_watermark.cleanup_temp_dir()
+
+    assert not stale.exists(), "a recycled PID was mistaken for a live owner"
+
+
+def test_startup_cleanup_keeps_an_unreadable_owners_previews(monkeypatch,
+                                                             tmp_path):
+    """Alive-but-opaque must never be treated as dead."""
+    root = _temp_root(monkeypatch, tmp_path)
+    opaque = root / "run-4242-7"
+    opaque.mkdir()
+    monkeypatch.setattr(ops_watermark, "_process_start",
+                        lambda pid: ops_watermark._ALIVE_UNKNOWN)
+
+    ops_watermark.cleanup_temp_dir()
+
+    assert opaque.exists(), "an unreadable owner was assumed dead"
+
+
+def test_startup_cleanup_clears_legacy_leftovers(monkeypatch, tmp_path):
+    """Folders from before per-run isolation carry no owner; they are stale."""
+    root = _temp_root(monkeypatch, tmp_path)
+    legacy = root / "report_wm_preview"
+    legacy.mkdir()
+
+    ops_watermark.cleanup_temp_dir()
+
+    assert not legacy.exists(), "a pre-isolation leftover was never cleared"

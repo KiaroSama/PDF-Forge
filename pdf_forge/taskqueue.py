@@ -91,25 +91,37 @@ def _run_task_queue() -> None:
     # BaseException that is not caught per task. The original exception keeps
     # propagating; cleanup never swallows or replaces it.
     try:
-        for index, task in enumerate(_task_queue, start=1):
-            print(colorize(
-                f"\n=== Task {index}/{count}: {task.summary} ===",
-                Color.BOLD + Color.LIGHT_BLUE,
-            ))
-            try:
-                _verify_sources(task)
-                task.run()
-            except SourceChangedError as exc:
-                print_error(f"Task {index} skipped: {exc}")
-                logger.error("Queued task %d skipped: %s", index, exc)
-            except KeyboardInterrupt:
-                print_warning("\nTask interrupted; continuing with the next one.")
-                logger.warning("Queued task %d interrupted.", index)
-            except Exception as exc:  # noqa: BLE001 - one task must not sink the batch
-                print_error(f"Task {index} failed: {exc}")
-                logger.exception("Queued task %d failed.", index)
-        print_success(f"\nAll {count} queued task(s) processed.")
-        logger.info("Task queue finished: %d task(s).", count)
+        # Durations report *work*, not wall time: a task that stops to ask for a
+        # password would otherwise be credited with however long the user took to
+        # type it, which would make every figure meaningless.
+        with work_timer() as batch:
+            for index, task in enumerate(_task_queue, start=1):
+                print(colorize(
+                    f"\n=== Task {index}/{count}: {task.summary} ===",
+                    Color.BOLD + Color.LIGHT_BLUE,
+                ))
+                with work_timer() as spent:
+                    try:
+                        _verify_sources(task)
+                        task.run()
+                    except SourceChangedError as exc:
+                        print_error(f"Task {index} skipped: {exc}")
+                        logger.error("Queued task %d skipped: %s", index, exc)
+                    except KeyboardInterrupt:
+                        print_warning("\nTask interrupted; continuing with the next one.")
+                        logger.warning("Queued task %d interrupted.", index)
+                    except Exception as exc:  # noqa: BLE001 - one task must not sink the batch
+                        print_error(f"Task {index} failed: {exc}")
+                        logger.exception("Queued task %d failed.", index)
+                # Printed for failures too: a four-minute failure is worth knowing.
+                print_info(f"Took {format_duration(spent['seconds'])}.")
+                logger.info("Task %d finished in %.2fs of work.", index, spent["seconds"])
+        print_success(
+            f"\nAll {count} queued task(s) processed "
+            f"in {format_duration(batch['seconds'])}."
+        )
+        logger.info("Task queue finished: %d task(s) in %.2fs of work.",
+                    count, batch["seconds"])
     finally:
         _discard_queue()
 
@@ -124,6 +136,12 @@ def finalize_queue() -> bool:
     cleanly first, never surfaced as an unexpected top-level error).
     """
     if not _task_queue:
+        # An empty queue owns no tasks, but a configuration that was abandoned
+        # before queueing (e.g. the converter install was declined after output
+        # paths were reserved) can still hold reservations. Releasing here is
+        # safe by construction: with no queued task, no reservation can be
+        # referenced by anything (C-01).
+        _discard_queue()
         return False
     print_heading(f"\nComplete summary - {len(_task_queue)} task(s) queued")
     for index, task in enumerate(_task_queue, start=1):

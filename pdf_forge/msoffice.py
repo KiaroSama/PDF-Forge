@@ -40,7 +40,7 @@ logger = logging.getLogger(LOG_PREFIX)
 
 __all__ = [
     'MsOfficeError', 'MsOfficePasswordError', 'MsOfficeSession', 'detect_office',
-    'is_available', 'start_session', 'convert_to_pdf', 'describe_office',
+    'start_session', 'convert_to_pdf', 'describe_office',
     'office_families',
 ]
 
@@ -241,10 +241,6 @@ def office_families(apps) -> list:
     """Map available applications to the source families they can convert."""
     apps = set(apps)
     return sorted({fam for fam, app in _FAMILY_APP.items() if app in apps})
-
-
-def is_available() -> bool:
-    return detect_office() is not None
 
 
 def describe_office(detected: Optional[Dict[str, object]] = None) -> str:

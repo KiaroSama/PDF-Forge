@@ -330,12 +330,12 @@ def _prompt_convert_password(filename: str, previous_failed: bool) -> Optional[s
     if previous_failed:
         print_error("Incorrect password. Try again, or type 0/back/skip.")
     try:
-        entry = getpass.getpass(
+        entry = _timed_input(lambda: getpass.getpass(
             colorize(
                 f'Password for "{filename}" (hidden; 0/back/skip to skip): ',
                 Color.CYAN,
             )
-        )
+        ))
     except (EOFError, KeyboardInterrupt):
         return None
     nav = entry.strip().lower()
@@ -686,42 +686,36 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
                                               dir=str(out.parent)))
             tmp = stage_dir / "converted.pdf"
             try:
-                if use_msoffice:
-                    msoffice.convert_to_pdf(
-                        server, source_for_convert, tmp, job["family"],
-                        password=password, encrypted=bool(password),
-                    )
-                elif password:
-                    # LibreOffice cannot open a document encrypted by Microsoft
-                    # Office - it loses the UNO bridge instead of converting -
-                    # so the source is decrypted locally first and the server
-                    # only ever sees a plain document. The decrypted copy lives
-                    # in a temporary directory that is removed straight after.
-                    plain = decrypt_to_temp(source_for_convert, password,
-                                            stage_dir)
-                    _require_matching_family(plain, job["family"], src.name)
-                    ort.convert_to_pdf(server, plain, tmp)
-                else:
-                    ort.convert_to_pdf(server, source_for_convert, tmp)
-                _validate_pdf_output(tmp)
-            except (msoffice.MsOfficePasswordError, DecryptPasswordError):
-                _discard_stage(stage_dir)
-                pw = _prompt_convert_password(src.name, attempted)
-                if pw is None:
-                    print_note(f"  Skipped (password not provided): {src.name}")
-                    return "skip"
-                password = pw
-                attempted = True
-                continue
-            except (msoffice.MsOfficeError, DecryptError) as exc:
-                _discard_stage(stage_dir)
-                print_error(f"  Failed: {exc}")
-                logger.error("Convert failed for '%s': %s", src, exc)
-                return "fail"
-            except ort.OfficeRuntimeError as exc:
-                _discard_stage(stage_dir)
-                if str(exc) == ort.PASSWORD_SENTINEL:
-                    # Encrypted / wrong password: prompt (unlimited retries).
+                try:
+                    if use_msoffice:
+                        msoffice.convert_to_pdf(
+                            server, source_for_convert, tmp, job["family"],
+                            password=password, encrypted=bool(password),
+                        )
+                    elif password:
+                        # LibreOffice cannot open a document encrypted by
+                        # Microsoft Office - it loses the UNO bridge instead of
+                        # converting - so the source is decrypted locally first
+                        # and the server only ever sees a plain document.
+                        #
+                        # The decrypted copy is full plaintext of the user's
+                        # document: keep it in system temp, never beside the
+                        # original where sync/backup/indexing would pick it up
+                        # (SEC-01). The converted PDF still stages in out.parent
+                        # so the final promotion stays a same-volume atomic
+                        # replace.
+                        with tempfile.TemporaryDirectory(
+                                prefix="pdfforge_decrypt_") as plain_dir:
+                            plain = decrypt_to_temp(source_for_convert, password,
+                                                    Path(plain_dir))
+                            _require_matching_family(plain, job["family"],
+                                                     src.name)
+                            ort.convert_to_pdf(server, plain, tmp)
+                    else:
+                        ort.convert_to_pdf(server, source_for_convert, tmp)
+                    _validate_pdf_output(tmp)
+                except (msoffice.MsOfficePasswordError, DecryptPasswordError):
+                    _discard_stage(stage_dir)
                     pw = _prompt_convert_password(src.name, attempted)
                     if pw is None:
                         print_note(f"  Skipped (password not provided): {src.name}")
@@ -729,44 +723,79 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
                     password = pw
                     attempted = True
                     continue
-                if ort.is_bridge_lost(exc):
-                    # The runtime died: the caller restarts it and retries.
-                    raise
-                print_error(f"  Failed: {exc}")
-                logger.error("Convert failed for '%s': %s", src, exc)
-                return "fail"
-            except PdfOpenError as exc:
-                _discard_stage(stage_dir)
-                print_error(f"  Failed output validation: {exc}")
-                logger.error("Convert output invalid for '%s': %s", src, exc)
-                return "fail"
+                except (msoffice.MsOfficeError, DecryptError) as exc:
+                    _discard_stage(stage_dir)
+                    print_error(f"  Failed: {exc}")
+                    logger.error("Convert failed for '%s': %s", src, exc)
+                    return "fail"
+                except ort.OfficeRuntimeError as exc:
+                    _discard_stage(stage_dir)
+                    if str(exc) == ort.PASSWORD_SENTINEL:
+                        # Encrypted / wrong password: prompt (unlimited retries).
+                        pw = _prompt_convert_password(src.name, attempted)
+                        if pw is None:
+                            print_note(f"  Skipped (password not provided): {src.name}")
+                            return "skip"
+                        password = pw
+                        attempted = True
+                        continue
+                    if ort.is_bridge_lost(exc):
+                        # The runtime died: the caller restarts it and retries.
+                        raise
+                    print_error(f"  Failed: {exc}")
+                    logger.error("Convert failed for '%s': %s", src, exc)
+                    return "fail"
+                except PdfOpenError as exc:
+                    _discard_stage(stage_dir)
+                    print_error(f"  Failed output validation: {exc}")
+                    logger.error("Convert output invalid for '%s': %s", src, exc)
+                    return "fail"
 
-            # Success: optional output protection for encrypted sources.
-            try:
-                final_staging = tmp
-                if password:
-                    choice = _prompt_output_protection(src.name)
-                    if choice and choice[0] != "none":
-                        mode, new_pw = choice
-                        # Protection replaces the artifact about to be promoted;
-                        # it never promotes anything itself (C-08).
-                        final_staging = _apply_output_protection(
-                            tmp, password if mode == "same" else new_pw,
-                            stage_dir,
-                        )
-                # One promotion, once, with an explicit recording policy: a
-                # converted PDF is a brand-new source the user will usually want
-                # to split, compress or protect next, so it stays visible to the
-                # PDF folder tools and is deliberately NOT recorded (C-09).
-                job["written"] = promote_atomically(final_staging, out,
-                                                    record=False)
-            except Exception as exc:  # noqa: BLE001
-                print_error(f"  Failed finalizing output: {exc}")
-                logger.exception("Convert finalize failed for '%s'", src)
-                return "fail"
+                # Success: optional output protection for encrypted sources.
+                try:
+                    final_staging = tmp
+                    if password:
+                        choice = _prompt_output_protection(src.name)
+                        if choice and choice[0] != "none":
+                            mode, new_pw = choice
+                            # Protection replaces the artifact about to be
+                            # promoted; it never promotes anything itself (C-08).
+                            final_staging = _apply_output_protection(
+                                tmp, password if mode == "same" else new_pw,
+                                stage_dir,
+                            )
+                    # One promotion, once, with an explicit recording policy: a
+                    # converted PDF is a brand-new source the user will usually
+                    # want to split, compress or protect next, so it stays
+                    # visible to the PDF folder tools and is NOT recorded (C-09).
+                    job["written"] = promote_atomically(
+                        final_staging, out, record=False,
+                        overwrite=overwrite_approved(out))
+                except _ExitRequested:
+                    # 'exit'/'quit' at the protection prompt is a request to
+                    # close the app, not a conversion failure. The broad handler
+                    # below is an Exception handler and _ExitRequested is an
+                    # Exception, so without this the request was swallowed and
+                    # the user got a blank "Failed finalizing output:" line
+                    # instead (C-02). The finally below still discards the stage
+                    # on the way out.
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    print_error(f"  Failed finalizing output: {exc}")
+                    logger.exception("Convert finalize failed for '%s'", src)
+                    return "fail"
+                return "ok"
             finally:
+                # Every exit path releases the stage - including KeyboardInterrupt
+                # (the queue catches it per task and keeps going) and an OSError
+                # from the move/mkdir. Without this, an interrupted conversion of
+                # an encrypted document left its decrypted copy in the user's own
+                # folder (SEC-01). The finally wraps BOTH the conversion and the
+                # finalization: attaching it to the conversion try alone would
+                # delete the staged PDF before it could be protected and promoted.
+                # _discard_stage is idempotent, so the existing explicit calls in
+                # the except clauses stay harmless.
                 _discard_stage(stage_dir)
-            return "ok"
     finally:
         password = None  # drop the source password as soon as this file ends
 

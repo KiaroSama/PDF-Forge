@@ -9,7 +9,7 @@ from typing import Iterable, List, Optional, Sequence, Set, Tuple
 from .constants import *  # noqa: F401,F403
 from .safeio import load_generated_outputs
 
-__all__ = ['_sanitize_for_filename', 'PageSelectionError', 'ChunkSizeError', 'PageSelectionResult', 'parse_page_selection', 'PageGroup', 'parse_multi_file_selection', 'parse_delete_pages', 'compute_deletion', 'build_delete_output_name', 'compute_chunks', 'parse_page_number', 'parse_chunk_size', 'parse_index_list', 'sanitize_selection_text', 'build_extract_output_name', 'build_chunk_output_name', 'pad_width_for', 'build_page_image_name', 'default_images_output_dir', 'default_image_pdf_output', 'unique_file_path', 'unique_dir_path', 'strip_surrounding_quotes', 'natural_sort_key', 'discover_pdfs_in_folder', 'FolderScanError', 'summarize_ranges', 'GUIDANCE_KEYWORDS', 'drag_drop_guidance', 'BATCH_PASSWORD_NOTICE', 'normalized_path_key', 'reserve_unique_file', 'reserve_unique_dir', 'release_reservations', 'clear_reservations',
+__all__ = ['_sanitize_for_filename', 'PageSelectionError', 'ChunkSizeError', 'PageSelectionResult', 'parse_page_selection', 'PageGroup', 'parse_multi_file_selection', 'parse_delete_pages', 'compute_deletion', 'build_delete_output_name', 'compute_chunks', 'parse_page_number', 'parse_chunk_size', 'parse_index_list', 'sanitize_selection_text', 'build_extract_output_name', 'build_chunk_output_name', 'pad_width_for', 'build_page_image_name', 'default_images_output_dir', 'default_image_pdf_output', 'unique_file_path', 'unique_dir_path', 'strip_surrounding_quotes', 'natural_sort_key', 'discover_pdfs_in_folder', 'FolderScanError', 'summarize_ranges', 'GUIDANCE_KEYWORDS', 'drag_drop_guidance', 'BATCH_PASSWORD_NOTICE', 'normalized_path_key', 'reserve_unique_file', 'reserve_unique_dir', 'release_reservations', 'clear_reservations', 'format_duration', 'approve_overwrite', 'overwrite_approved', 'reserve_exact_file',
 ]
 
 # Command keywords picked out in the guidance (see ui.guidance_text): the
@@ -555,6 +555,7 @@ def unique_dir_path(path: Path) -> Path:
 
 _reserved_files: Set[str] = set()
 _reserved_dirs: Set[str] = set()
+_overwrite_approved: Set[str] = set()
 
 
 def normalized_path_key(path) -> str:
@@ -601,6 +602,20 @@ def reserve_unique_file(path: Path) -> Path:
     return candidate
 
 
+def reserve_exact_file(path: Path) -> bool:
+    """Reserve this exact path. False when another queued task already holds it.
+
+    Used for an approved overwrite: the user asked for THIS name, so no _2
+    suffix is allocated - but two queued tasks still must not target one file
+    (OW-1).
+    """
+    key = normalized_path_key(Path(path))
+    if key in _reserved_files:
+        return False
+    _reserved_files.add(key)
+    return True
+
+
 def reserve_unique_dir(path: Path) -> Path:
     """Pick a directory path free on disk **and** unreserved, then reserve it."""
     path = Path(path)
@@ -624,10 +639,26 @@ def release_reservations(files: Iterable[Path] = (), dirs: Iterable[Path] = ()) 
         _reserved_dirs.discard(normalized_path_key(d))
 
 
+def approve_overwrite(path: Path) -> None:
+    """Record the user's explicit consent to replace this exact path.
+
+    Consent is given during configuration and consumed during queue execution,
+    so it lives beside the path reservations and is released with them (OW-1).
+    """
+    _overwrite_approved.add(normalized_path_key(Path(path)))
+
+
+def overwrite_approved(path: Path) -> bool:
+    """True when the user approved replacing this exact path."""
+    return normalized_path_key(Path(path)) in _overwrite_approved
+
+
 def clear_reservations() -> None:
     """Drop every reservation (called when the queue finishes or is discarded)."""
     _reserved_files.clear()
     _reserved_dirs.clear()
+    # An approval is consent for one queue's task; it must never outlive it (OW-1).
+    _overwrite_approved.clear()
 
 
 def strip_surrounding_quotes(text: str) -> str:
@@ -719,3 +750,19 @@ def summarize_ranges(pages: Sequence[int]) -> str:
             start = prev = page
     parts.append(f"{start}-{prev}" if start != prev else f"{start}")
     return ", ".join(parts)
+
+
+def format_duration(seconds: float) -> str:
+    """Human-readable duration: '0.8s', '12.4s', '1m 03s', '1h 07m 12s'.
+
+    Sub-minute values keep one decimal (the difference between 0.8s and 4.2s is
+    interesting); anything longer drops it, because a tenth of a second in a
+    seven-minute conversion is noise. A negative input formats as '0.0s'.
+    """
+    if seconds < 60:
+        return f"{max(0.0, seconds):.1f}s"
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    return f"{minutes}m {secs:02d}s"

@@ -11,6 +11,34 @@ from .core import *  # noqa: F401,F403
 
 __all__ = ['_utc_now', '_UtcFormatter', 'setup_logging']
 
+# Generous on purpose: enough history to debug a report, small enough to stay
+# out of packaging's way.
+_MAX_LOG_FILES = 50
+
+
+def _prune_old_logs(log_dir: Path, keep: int, current: Path) -> None:
+    """Keep the newest ``keep`` log files; never touch the current run's file.
+
+    One file per launch with no cap grew this directory to hundreds of entries
+    in a portable checkout, and once broke wheel builds on any machine that had
+    run the app (flat-layout discovery treated ``logs/`` as a package). It is
+    best-effort: a failure here must never stop startup.
+    """
+    try:
+        existing = sorted(
+            (p for p in log_dir.glob("*.log") if p != current),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in existing[keep - 1:]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass          # a locked file (another instance) is not an error
+    except OSError:
+        pass
+
+
 def _utc_now() -> datetime.datetime:
     """Return the current UTC time (timezone-aware)."""
     return datetime.datetime.now(datetime.timezone.utc)
@@ -57,6 +85,9 @@ def setup_logging(script_dir: Path) -> Optional[Path]:
             _UtcFormatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
         )
         logger.addHandler(file_handler)
+        # Only now is this run's file both named and on disk, so the
+        # "never delete the current file" rule can be enforced by identity.
+        _prune_old_logs(log_dir, _MAX_LOG_FILES, log_path)
     except OSError as exc:
         # Console fallback; do not falsely claim a log file was created.
         print_error(f"Persistent logging unavailable: {exc}")

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
 from typing import List, Optional
 
+# The project's process-identity primitive: a PID alone is not an owner, so the
+# start time is paired with it (see safeio). Imported rather than reimplemented.
+from .safeio import _ALIVE_UNKNOWN, _process_start
 from .constants import *  # noqa: F401,F403
 from .ui import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
@@ -13,7 +17,8 @@ from .watermark import *  # noqa: F401,F403
 from .prompts import *  # noqa: F401,F403
 from .taskqueue import *  # noqa: F401,F403
 
-__all__ = ['_temp_dir', 'cleanup_temp_dir', 'operation_remove_watermark']
+__all__ = ['_temp_dir', '_run_dir', 'cleanup_temp_dir',
+           'operation_remove_watermark']
 
 def _temp_dir() -> Path:
     """The project-local scratch folder (``PDF Forge/temp``).
@@ -25,17 +30,66 @@ def _temp_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "temp"
 
 
-def cleanup_temp_dir() -> None:
-    """Remove the project-local temp folder and its contents at startup.
+def _run_dir() -> Path:
+    """This run's own subfolder of ``temp``, stamped with its owner's identity.
 
-    Ensures any preview images left behind by a previous run (for example after
-    an unexpected exit) are cleared. The folder is recreated on demand.
+    The temp folder is shared by every instance, but previews are not: a second
+    instance starting up must not delete the previews the first instance is
+    asking the user to go and look at (C-04). The name carries PID *and* process
+    start time, because a recycled PID would otherwise make a dead run look
+    alive - the same identity rule ``safeio`` applies to lock owners.
+    """
+    start = _process_start(os.getpid()) or _ALIVE_UNKNOWN
+    # Keep the name filename-safe: _ALIVE_UNKNOWN is '?', illegal on Windows.
+    stamp = start if start.isdigit() else "unknown"
+    return _temp_dir() / f"run-{os.getpid()}-{stamp}"
+
+
+def _owner_is_gone(name: str) -> bool:
+    """Whether the run directory ``name`` belongs to a process provably gone.
+
+    Fails safe in both directions: an entry that is not one of our run folders
+    is treated as stale leftover (that is what startup cleanup has always been
+    for), while a live or merely unreadable owner is never reported as gone.
+    """
+    parts = name.split("-")
+    if len(parts) != 3 or parts[0] != "run" or not parts[1].isdigit():
+        return True  # legacy or foreign leftover, no owner to respect
+    current = _process_start(int(parts[1]))
+    if current is None:
+        return True  # no such process: provably gone
+    if current == _ALIVE_UNKNOWN:
+        return False  # alive but opaque - never mistake that for dead
+    return current != parts[2]  # different start time: the PID was recycled
+
+
+def cleanup_temp_dir() -> None:
+    """Clear preview folders left by runs that have ended, at startup.
+
+    Only folders whose owning process is provably gone are removed, so a second
+    instance launched while the first is sitting at the "open these previews and
+    choose" prompt no longer wipes them out from under it (C-04). The temp
+    parent itself is dropped once nothing is left in it.
     """
     temp = _temp_dir()
-    if temp.exists():
-        shutil.rmtree(temp, ignore_errors=True)
-        if not temp.exists():
+    if not temp.exists():
+        return
+    for entry in temp.iterdir():
+        if not _owner_is_gone(entry.name):
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            try:
+                entry.unlink()
+            except OSError:
+                pass
+    try:
+        if not any(temp.iterdir()):
+            temp.rmdir()
             logger.info("Cleared temp folder at startup: %s", temp)
+    except OSError:
+        pass
 
 
 def _prompt_watermark_choice(candidate_count: int) -> Optional[List[int]]:
@@ -111,7 +165,7 @@ def _configure_watermark_removal(source: Path, preview_dirs: list) -> Optional[d
 
         # Export previews to the project-local temp folder (always in a known place).
         # Fall back to the system temp folder if that location is not writable.
-        preview_dir = unique_dir_path(_temp_dir() / f"{source.stem}_wm_preview")
+        preview_dir = unique_dir_path(_run_dir() / f"{source.stem}_wm_preview")
         try:
             preview_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -301,13 +355,13 @@ def operation_remove_watermark() -> None:
             sources=[job["ref"] for job in jobs],
         )
     finally:
-        # Remove every preview folder, and drop the temp parent too if it is now
-        # empty.
+        # Remove every preview folder, then this run's own folder and the temp
+        # parent, each only while empty - another instance may be using them.
         for directory in preview_dirs:
             shutil.rmtree(directory, ignore_errors=True)
-        try:
-            temp = _temp_dir()
-            if temp.exists() and not any(temp.iterdir()):
-                temp.rmdir()
-        except OSError:
-            pass
+        for directory in (_run_dir(), _temp_dir()):
+            try:
+                if directory.exists() and not any(directory.iterdir()):
+                    directory.rmdir()
+            except OSError:
+                pass

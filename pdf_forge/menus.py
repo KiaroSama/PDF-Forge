@@ -14,7 +14,7 @@ from .ops_unlock import *  # noqa: F401,F403
 from .ops_encrypt import *  # noqa: F401,F403
 from .ops_office import *  # noqa: F401,F403
 
-__all__ = ['_show_pdf_to_images_menu', 'pdf_to_images_menu', '_show_image_pdf_menu', 'pdf_to_image_pdf_menu', '_show_delete_pages_menu', 'delete_pages_menu', '_show_compress_menu', 'compress_menu', '_show_protect_menu', 'protect_menu', 'show_menu', 'show_page_tools_menu', 'page_tools_menu', 'main_menu']
+__all__ = ['pdf_to_images_menu', 'pdf_to_image_pdf_menu', 'delete_pages_menu', 'compress_menu', 'protect_menu', 'show_menu', 'page_tools_menu', 'main_menu']
 
 # Six submenus share one loop. Each config is (title, debug-log tag, options),
 # where options is an ordered tuple of (label, operation-function NAME). Names,
@@ -127,19 +127,9 @@ def _run_submenu(key: str) -> None:
             logger.warning("Operation interrupted by user (KeyboardInterrupt).")
 
 
-def _show_pdf_to_images_menu() -> None:
-    """Render the PDF-to-images submenu."""
-    _render_submenu("pdf_to_images")
-
-
 def pdf_to_images_menu() -> None:
     """Run the PDF-to-images submenu loop."""
     _run_submenu("pdf_to_images")
-
-
-def _show_image_pdf_menu() -> None:
-    """Render the image-only-PDF submenu."""
-    _render_submenu("image_pdf")
 
 
 def pdf_to_image_pdf_menu() -> None:
@@ -147,29 +137,14 @@ def pdf_to_image_pdf_menu() -> None:
     _run_submenu("image_pdf")
 
 
-def _show_delete_pages_menu() -> None:
-    """Render the delete-pages submenu."""
-    _render_submenu("delete_pages")
-
-
 def delete_pages_menu() -> None:
     """Run the delete-pages submenu loop."""
     _run_submenu("delete_pages")
 
 
-def _show_compress_menu() -> None:
-    """Render the compress submenu."""
-    _render_submenu("compress")
-
-
 def compress_menu() -> None:
     """Run the compress submenu loop."""
     _run_submenu("compress")
-
-
-def _show_protect_menu() -> None:
-    """Render the protect submenu."""
-    _render_submenu("protect")
 
 
 def protect_menu() -> None:
@@ -194,11 +169,6 @@ def show_menu() -> None:
         print(f"  {colorize(f'{_RUN_QUEUE_CHOICE}.', Color.LIGHT_BLUE)} "
               + colorize(f"Start the {pending} queued task(s) now", Color.LIME))
     print()
-
-
-def show_page_tools_menu() -> None:
-    """Render the Page tools submenu."""
-    _render_submenu("page_tools")
 
 
 def page_tools_menu() -> None:

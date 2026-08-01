@@ -582,6 +582,131 @@ def test_excel_bom_copy_is_streamed(tmp_path):
     )
 
 
+# --------------------------------------------------------------------------- #
+# SEC-01 - the staging directory is always released, and the decrypted
+# plaintext never lands in the user's own folder
+# --------------------------------------------------------------------------- #
+
+def _encrypted_word_job(tmp_path, monkeypatch, fake_decrypt):
+    """Wire the LibreOffice decrypt-then-convert path for an encrypted source."""
+    monkeypatch.setattr(ops_office, "decrypt_to_temp", fake_decrypt)
+    monkeypatch.setattr(ops_office, "is_encrypted_office_file", lambda _p: True)
+    monkeypatch.setattr(ops_office, "_prompt_convert_password", lambda *_a: "pw")
+    monkeypatch.setattr(ops_office, "_prompt_output_protection", lambda _n: None)
+    return {"src": _encrypted_looking(tmp_path / "secret.docx", b"encrypted-blob"),
+            "family": "word", "out": tmp_path / "secret.pdf", "csv_dialect": None}
+
+
+def _word_payload(tmp_path) -> bytes:
+    """Valid .docx bytes for a fake decryption to yield."""
+    scratch = tmp_path / "payload.docx"
+    data = make_ooxml(scratch, "word").read_bytes()
+    scratch.unlink()
+    return data
+
+
+def test_interrupted_conversion_leaves_no_stage_in_the_user_folder(tmp_path,
+                                                                   monkeypatch):
+    """Ctrl+C mid-convert must not strand a staging dir - or decrypted bytes -
+    beside the user's document (SEC-01).
+
+    The queue catches KeyboardInterrupt per task and continues the batch, so
+    without a finally the stage survived for the rest of the session.
+    """
+    payload = _word_payload(tmp_path)
+
+    def fake_decrypt(_path, _password, temp_dir):
+        target = Path(temp_dir) / "decrypted.docx"
+        target.write_bytes(payload)
+        return target
+
+    job = _encrypted_word_job(tmp_path, monkeypatch, fake_decrypt)
+
+    def interrupted(*_a, **_k):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(app.office_runtime, "convert_to_pdf", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        ops_office._convert_one(object(), job,
+                                cb.BackendChoice(cb.LIBREOFFICE, "25.8"))
+
+    strays = [p for p in tmp_path.iterdir()
+              if p.name.startswith(".pdfforge_convert_")]
+    assert strays == [], f"staging survived an interrupt: {strays}"
+
+
+def test_the_decrypted_plaintext_never_lands_in_the_user_folder(tmp_path,
+                                                                monkeypatch):
+    """The decrypted copy is full plaintext of the user's document, so it must
+    stage in system temp - never beside the original, where sync, backup and
+    search indexing would pick it up (SEC-01)."""
+    payload = _word_payload(tmp_path)
+    handed = []
+
+    def fake_decrypt(_path, _password, temp_dir):
+        handed.append(Path(temp_dir))
+        target = Path(temp_dir) / "decrypted.docx"
+        target.write_bytes(payload)
+        return target
+
+    job = _encrypted_word_job(tmp_path, monkeypatch, fake_decrypt)
+    monkeypatch.setattr(app.office_runtime, "convert_to_pdf",
+                        lambda _s, src, out, **_k:
+                        Path(out).write_bytes(_pdf_bytes()))
+
+    assert ops_office._convert_one(
+        object(), job, cb.BackendChoice(cb.LIBREOFFICE, "25.8")) == "ok"
+
+    assert handed, "the decryption path must actually have run"
+    plain_dir = handed[0]
+    assert plain_dir != tmp_path and tmp_path not in plain_dir.parents, (
+        f"the decrypted plaintext was written inside the user's folder: "
+        f"{plain_dir}"
+    )
+    assert not plain_dir.exists(), (
+        "the system-temp directory holding the plaintext must be removed"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# C-02 - exit/quit at the protection prompt closes the app, it is not a failure
+# --------------------------------------------------------------------------- #
+
+def test_exit_at_the_protection_prompt_propagates(tmp_path, monkeypatch):
+    """exit/quit while finalizing a converted file must close the app, not mark
+    the file failed (C-02).
+
+    _ExitRequested is an ordinary Exception, so the broad `except Exception`
+    around the finalizer swallowed it and printed a blank
+    "Failed finalizing output:" line instead.
+    """
+    session = _FakeSession()
+    monkeypatch.setattr(msoffice, "convert_to_pdf",
+                        lambda _s, src, out, fam, password=None, encrypted=False:
+                        session.convert(src, out, fam))
+    monkeypatch.setattr(ops_office, "is_encrypted_office_file", lambda _p: True)
+    # The prompt is only reached when a source password was supplied.
+    monkeypatch.setattr(ops_office, "_prompt_convert_password", lambda *_a: "pw")
+
+    def exits(_name):
+        raise app.prompts._ExitRequested()
+
+    monkeypatch.setattr(ops_office, "_prompt_output_protection", exits)
+
+    job = _job(tmp_path)
+    with pytest.raises(app.prompts._ExitRequested):
+        ops_office._convert_one(session, job,
+                                cb.BackendChoice(cb.MSOFFICE, "Word"))
+
+    assert not job["out"].exists(), (
+        "an exit request must not promote a half-finalized output"
+    )
+    strays = [p for p in tmp_path.iterdir()
+              if p.name.startswith(".pdfforge_convert_")]
+    assert strays == [], f"staging survived the exit request: {strays}"
+
+
 def test_bom_copy_preserves_content_exactly(tmp_path):
     src = tmp_path / "fa.csv"
     payload = "نام,توضیح\nسلام,دنیا 😀\n".encode("utf-8")

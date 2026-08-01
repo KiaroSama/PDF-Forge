@@ -78,7 +78,9 @@ GATES: List[Gate] = [
     # here and fails there. --platform makes that reachable locally.
     Gate("Mypy (as analysed on Linux)", "ci.yml / lint",
          [PYTHON, "-m", "mypy", "--platform", "linux"]),
-    Gate("Coverage threshold", "ci.yml / coverage",
+    # Coverage is produced by the ubuntu/3.12 leg of the test matrix, not by a
+    # separate job.
+    Gate("Coverage threshold", "ci.yml / test (coverage leg)",
          [PYTHON, "-m", "pytest", "--cov", "--cov-report=term-missing"],
          slow=True),
     Gate("Dependency vulnerability audit", "ci.yml / security",

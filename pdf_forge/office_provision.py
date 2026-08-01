@@ -21,7 +21,7 @@ from . import office_discovery as _discovery
 from .office_discovery import (
     EXTRACT_TIMEOUT, NO_PROGRESS_TIMEOUT, OfficeRuntimeError, RuntimeCandidate,
 )
-from .office_server import _terminate
+from .office_server import _system32, _terminate
 
 
 # Resolved through the module object rather than bound at import time, so a test
@@ -239,10 +239,15 @@ def provision_runtime(
         )
 
     plat = meta.get("windows") or {}
-    url = plat.get("url")
+    # Ordered download candidates: the pinned stable URL first, then the
+    # archive copy the mirror keeps once a release is rotated out of stable/.
+    # It is the same release, so the same pinned SHA-256 must still verify -
+    # the fallback widens *where* the bytes come from, never *which* bytes are
+    # accepted.
+    candidates = [u for u in (plat.get("url"), plat.get("fallback_url")) if u]
     expected_sha = plat.get("sha256")
     version = meta.get("version", "unknown")
-    if not url:
+    if not candidates:
         raise OfficeRuntimeError("Runtime metadata has no Windows download URL.")
 
     runtime_root().mkdir(parents=True, exist_ok=True)
@@ -264,7 +269,7 @@ def provision_runtime(
         if progress:
             progress(f"Downloading LibreOffice {version} (official)...")
         partial = installer.with_suffix(installer.suffix + ".part")
-        _download(url, partial, download)
+        _download_first_available(candidates, partial, download, version)
         if verify_checksum and expected_sha:
             actual = _sha256(partial)
             if actual.lower() != expected_sha.lower():
@@ -348,6 +353,34 @@ def _download(url: str, dest: Path, download=None) -> None:
         raise OfficeRuntimeError(f"Download failed: {exc}") from exc
 
 
+def _download_first_available(urls, dest: Path, download=None,
+                              version: str = "unknown") -> None:
+    """Fetch from the first candidate URL that answers; report all of them if none do.
+
+    Only a *transport* failure moves on to the next candidate. Checksum
+    verification deliberately stays in the caller, AFTER this returns: a
+    download that fails verification must abort outright and must never be
+    retried against another mirror until one happens to pass, which would turn
+    the fail-closed checksum gate into a retry-until-something-passes hole.
+    """
+    failures = []
+    for url in urls:
+        try:
+            _download(url, dest, download)
+            return
+        except Exception as exc:  # noqa: BLE001 - any transport failure, try the next
+            failures.append(f"  {url}\n    {exc}")
+            dest.unlink(missing_ok=True)
+    raise OfficeRuntimeError(
+        f"Could not download LibreOffice {version} from any known location:\n"
+        + "\n".join(failures)
+        + "\n\nThe pinned release may have been retired from the mirror's "
+          "stable/ path. The pin lives in office_runtime_meta.json - updating "
+          "it to a current release (url, filename and sha256 together) is the "
+          "fix. Nothing was installed."
+    )
+
+
 def _ensure_installer_service() -> None:
     """Refuse to run msiexec only when the installer service is DISABLED.
 
@@ -361,7 +394,8 @@ def _ensure_installer_service() -> None:
     the fix to the user.
     """
     try:
-        config = subprocess.run(["sc", "qc", "msiserver"], capture_output=True,
+        config = subprocess.run([_system32("sc"), "qc", "msiserver"],
+                                capture_output=True,
                                 text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return  # Cannot query; let msiexec try (bounded by its own timeout).

@@ -35,7 +35,8 @@ images. The original PDFs are never modified, overwritten, or deleted.
 - Preserves the original page content for extract/split/merge (no rasterizing or
   re-encoding).
 - Writes output safely using temporary files and atomic renames, and never
-  overwrites existing files.
+  overwrites an existing file unless you explicitly answer yes when asked (that
+  question defaults to no).
 
 ## Requirements
 
@@ -179,11 +180,17 @@ highlighted inside the guidance:
 
 These are enforced in code and covered by regression tests:
 
-- **Outputs never overwrite anything.** A final name is claimed atomically
+- **Outputs never overwrite anything unless you ask them to.** When the
+  destination already exists you are asked whether to replace it, and the answer
+  defaults to **no**. Decline - or just press Enter - and the historical
+  behaviour applies exactly: a final name is claimed atomically
   (`O_CREAT|O_EXCL`); if the destination appeared after you configured the task -
   even from another program or a second PDF Forge instance - the output is
   written to the next free `_2`/`_3` name instead. Two concurrent PDF Forge
-  processes cannot select the same final path.
+  processes cannot select the same final path. Answer `y` and that one approved
+  file is replaced atomically, so you are never left without either version, and
+  a replace that fails leaves the original untouched. Consent applies to that one
+  path and is dropped when the queue finishes. Folder outputs are never replaced.
 - **Queued tasks hold no file handles.** An operation carries the source path,
   page selection, captured password and a fingerprint - never an open document -
   so a queued or discarded task never locks your file.
@@ -347,9 +354,60 @@ Main menu -> 2 (Merge) -> 2 (Use all PDFs from a folder)
   -> C:\docs\report-parts\report-parts_merged.pdf
 ```
 
+### Delete pages
+
+Selecting `3` in the main menu removes pages from PDFs. It opens a submenu (same
+style as the others):
+
+```
+PDF Forge Delete pages:
+  1. Single PDF [1]
+  2. Batch: all PDFs in a folder
+  0. Back
+```
+
+The pages to delete use the same syntax as extraction: single values and
+combined ranges, e.g. `5`, `10-20`, or `10-20,25,30-50`.
+
+**Sub-option 1 — Single PDF**
+
+1. Enter the source PDF path.
+2. Enter the pages to delete. Pages that do not exist in the document are
+   rejected so you can re-enter.
+3. Review the summary (pages to delete, pages remaining) and pick the output
+   path (Enter accepts `<source>_deleted_....pdf` beside the source).
+4. Confirm. A new PDF is written with those pages removed; the original is never
+   modified.
+
+**Sub-option 2 — Batch: all PDFs in a folder**
+
+1. Enter a folder path (every `*.pdf` directly inside it is processed).
+2. Enter the pages to delete.
+3. Review the summary; the task is added to the queue.
+4. Each PDF is handled **per file**: only the requested pages that actually
+   exist in that file are deleted, and each file becomes its own
+   `<name>_deleted_....pdf`. When some requested pages are beyond a file's
+   length, they are skipped for that file and a **note** explains what happened.
+   Files that contain none of the requested pages, or where the request would
+   remove every page, are skipped with a note. A per-file progress line and a
+   final summary (processed / skipped / failed and total pages deleted) are
+   shown.
+
+```
+Main menu -> 3 (Delete pages) -> 2 (Batch), delete 4-6, on a/b/c.pdf:
+  [1/3] a.pdf  -> deleted 3 page(s) [4-6]; kept 7 -> a_deleted_4-6.pdf
+  [2/3] b.pdf  -> deleted 2 page(s) [4-5]; kept 3 -> b_deleted_4-5.pdf
+                 Note: pages not in this file were skipped: 6 (has 5 page(s)).
+  [3/3] c.pdf  Note: none of the requested pages exist here (has 3 page(s)); skipped.
+  Done. Processed 2 file(s), skipped 1, failed 0; 5 page(s) deleted in total.
+```
+
+Deletion is lossless: the kept pages are copied as-is (no re-encoding), so image
+and text quality is preserved.
+
 ### PDF to images (PNG)
 
-Selecting `3` in the main menu opens the image-export submenu (same style as
+Selecting `4` in the main menu opens the image-export submenu (same style as
 Page tools):
 
 ```
@@ -399,7 +457,7 @@ written into a folder named `<source>_images` beside the source PDF (a unique
 folder such as `<source>_images_2` is used if one already exists).
 
 ```
-Main menu -> 3 (PDF to images) -> 1 (All pages to PNG)
+Main menu -> 4 (PDF to images) -> 1 (All pages to PNG)
   Source PDF path: C:\docs\report.pdf
   Output image quality [2]: 3
   -> C:\docs\report_images\1.png, 2.png, 3.png, ...
@@ -407,7 +465,7 @@ Main menu -> 3 (PDF to images) -> 1 (All pages to PNG)
 
 ### PDF to image-only PDF
 
-Selecting `4` in the main menu rasterizes PDFs and rebuilds them as image-only
+Selecting `5` in the main menu rasterizes PDFs and rebuilds them as image-only
 documents. This makes the content non-editable: the text becomes images and is
 no longer selectable or searchable. The output is typically larger than the
 source. It opens a submenu (same style as Page tools):
@@ -439,7 +497,7 @@ PDF Forge PDF to image-only PDF:
    shown at the end.
 
 ```
-Main menu -> 4 (PDF to image-only PDF) -> 1 (Single PDF)
+Main menu -> 5 (PDF to image-only PDF) -> 1 (Single PDF)
   Source PDF path: C:\docs\contract.pdf
   Output image quality [2]: 2
   -> C:\docs\contract_image.pdf   (rasterized, not editable)
@@ -447,7 +505,7 @@ Main menu -> 4 (PDF to image-only PDF) -> 1 (Single PDF)
 
 ### Remove image watermark
 
-Selecting `5` in the main menu removes an **image-based** watermark that repeats
+Selecting `6` in the main menu removes an **image-based** watermark that repeats
 across pages (for example a site/scanlation badge stamped on every page). The
 text layer and all other content are preserved.
 
@@ -477,7 +535,7 @@ the unused watermark image is deleted and objects are deduplicated, the output i
 usually a little smaller than the source.
 
 ```
-Main menu -> 5 (Remove image watermark)
+Main menu -> 6 (Remove image watermark)
   Source PDF #1: C:\books\volume.pdf
   Source PDF #2: done
   Watermark candidates:
@@ -491,60 +549,30 @@ cannot remove text-based watermarks, optional-content layers, or a watermark
 that is baked into a scanned/flattened page image. Because you confirm the
 candidate from a preview, legitimate repeated logos are not removed by accident.
 
-### Delete pages
+### Extract images from PDF
 
-Selecting `6` in the main menu removes pages from PDFs. It opens a submenu (same
-style as the others):
+Selecting `7` in the main menu extracts the raster images embedded inside a
+PDF into a folder. The original PDF is never modified.
 
-```
-PDF Forge Delete pages:
-  1. Single PDF [1]
-  2. Batch: all PDFs in a folder
-  0. Back
-```
+1. Enter the source PDF path. The number of **distinct** images is shown —
+   an image reused on many pages (e.g. a watermark) is extracted once, named
+   after the first page it appears on (`p<page>_<n>.<ext>`). Tiny placeholder
+   images are skipped.
+2. Choose the output quality — `1` **Original** (default: the raw embedded
+   bytes are copied untouched in their native format, JPEG stays JPEG, PNG
+   stays PNG — zero quality loss), or re-encode as JPEG: `2` Very low (40),
+   `3` Low (60), `4` Medium (75), `5` High (85), `6` Very high (90),
+   `7` Ultra (95), `8` Custom (1-100).
+3. Review the summary and pick the output folder (Enter accepts
+   `<source>_extracted_images` beside the source); the task is added to the
+   queue.
 
-The pages to delete use the same syntax as extraction: single values and
-combined ranges, e.g. `5`, `10-20`, or `10-20,25,30-50`.
-
-**Sub-option 1 — Single PDF**
-
-1. Enter the source PDF path.
-2. Enter the pages to delete. Pages that do not exist in the document are
-   rejected so you can re-enter.
-3. Review the summary (pages to delete, pages remaining) and pick the output
-   path (Enter accepts `<source>_deleted_....pdf` beside the source).
-4. Confirm. A new PDF is written with those pages removed; the original is never
-   modified.
-
-**Sub-option 2 — Batch: all PDFs in a folder**
-
-1. Enter a folder path (every `*.pdf` directly inside it is processed).
-2. Enter the pages to delete.
-3. Review the summary; the task is added to the queue.
-4. Each PDF is handled **per file**: only the requested pages that actually
-   exist in that file are deleted, and each file becomes its own
-   `<name>_deleted_....pdf`. When some requested pages are beyond a file's
-   length, they are skipped for that file and a **note** explains what happened.
-   Files that contain none of the requested pages, or where the request would
-   remove every page, are skipped with a note. A per-file progress line and a
-   final summary (processed / skipped / failed and total pages deleted) are
-   shown.
-
-```
-Main menu -> 6 (Delete pages) -> 2 (Batch), delete 4-6, on a/b/c.pdf:
-  [1/3] a.pdf  -> deleted 3 page(s) [4-6]; kept 7 -> a_deleted_4-6.pdf
-  [2/3] b.pdf  -> deleted 2 page(s) [4-5]; kept 3 -> b_deleted_4-5.pdf
-                 Note: pages not in this file were skipped: 6 (has 5 page(s)).
-  [3/3] c.pdf  Note: none of the requested pages exist here (has 3 page(s)); skipped.
-  Done. Processed 2 file(s), skipped 1, failed 0; 5 page(s) deleted in total.
-```
-
-Deletion is lossless: the kept pages are copied as-is (no re-encoding), so image
-and text quality is preserved.
+A text/vector PDF with no embedded raster images reports that there is
+nothing to extract.
 
 ### Compress PDF (reduce file size)
 
-Selecting `7` in the main menu compresses a PDF into a smaller new file. The
+Selecting `8` in the main menu compresses a PDF into a smaller new file. The
 original is never modified.
 
 What each level does:
@@ -583,7 +611,7 @@ enlarged:
   quality-preserving, roughly-halving steps, never below the cap), and images
   already at or below the cap are left untouched.
 
-Selecting `7` opens a submenu — **single file** or **batch folder**:
+Selecting `8` opens a submenu — **single file** or **batch folder**:
 
 Single file:
 
@@ -610,7 +638,7 @@ Batch folder:
    skipped without stopping the batch.
 
 ```
-Main menu -> 7 (Compress PDF) -> 1 (Single PDF)
+Main menu -> 8 (Compress PDF) -> 1 (Single PDF)
   Source PDF path: C:\docs\report.pdf
   Loaded 'report.pdf' - 48 page(s), 12.40 MB.
   Current image DPI: ~300 median (min 300, max 300; 48 image(s) measured)
@@ -618,27 +646,6 @@ Main menu -> 7 (Compress PDF) -> 1 (Single PDF)
   Output Path [report_compressed.pdf beside source]: <Enter>
   Added to queue (#1): Compress report.pdf (very high) -> report_compressed.pdf
 ```
-
-### Extract images from PDF
-
-Selecting `8` in the main menu extracts the raster images embedded inside a
-PDF into a folder. The original PDF is never modified.
-
-1. Enter the source PDF path. The number of **distinct** images is shown —
-   an image reused on many pages (e.g. a watermark) is extracted once, named
-   after the first page it appears on (`p<page>_<n>.<ext>`). Tiny placeholder
-   images are skipped.
-2. Choose the output quality — `1` **Original** (default: the raw embedded
-   bytes are copied untouched in their native format, JPEG stays JPEG, PNG
-   stays PNG — zero quality loss), or re-encode as JPEG: `2` Very low (40),
-   `3` Low (60), `4` Medium (75), `5` High (85), `6` Very high (90),
-   `7` Ultra (95), `8` Custom (1-100).
-3. Review the summary and pick the output folder (Enter accepts
-   `<source>_extracted_images` beside the source); the task is added to the
-   queue.
-
-A text/vector PDF with no embedded raster images reports that there is
-nothing to extract.
 
 ### Protect PDF (set password / restrictions)
 
@@ -714,7 +721,9 @@ as each file is accepted.
 
 Each file becomes `<source-stem>.pdf` beside the source. Output paths are
 reserved through the same queue-time system as every other tool, so nothing is
-ever overwritten and two queued jobs cannot collide.
+ever overwritten and two queued jobs cannot collide. Batch conversion always
+takes a unique name; the replace-the-existing-file prompt applies only to the
+single-file output paths you type in yourself.
 
 #### How the conversion stack works
 
@@ -925,7 +934,8 @@ error message instead of a crash.
 - Any output path that resolves to a source PDF is rejected (including every
   source in a merge).
 - Output is written to a temporary file, validated, then atomically renamed.
-- Existing files are never overwritten; a unique name is generated instead.
+- Existing files are never overwritten without explicit consent: you are asked,
+  the answer defaults to no, and declining generates a unique name instead.
 - On a partial failure during a split, already-completed valid files are kept
   and only the current operation's temporary files are removed.
 - A merge opens all sources first and fails before writing if any source cannot
@@ -937,6 +947,12 @@ Operational logs are written to the `logs` directory next to the script. Each
 run creates a uniquely named file using UTC timestamps to the second, for
 example `PDF Forge_2026-06-30_14-32-08_UTC.log`. Console output stays concise;
 detailed diagnostics go to the log. PDF passwords are never logged.
+
+Startup keeps the newest **50** log files and deletes the older ones, so the
+directory cannot grow without bound in a portable checkout you copy between
+machines. The log the current run is writing is never deleted, and a file held
+open by a second PDF Forge instance is skipped. Deleting the whole `logs`
+directory is safe at any time - it is recreated on the next run.
 
 Logging is intentionally thorough. Each run records the application version,
 Python runtime and platform, resolved script/working directories, the log path,
@@ -974,6 +990,7 @@ captures `DEBUG` and above while the console stays quiet.
 Run.ps1               PowerShell launcher (the only launcher)
 Install-pdf-forgeCommand.ps1   Registers the pdf-forge command (PowerShell profile)
 pdf_forge/            Main application package (run with: python -m pdf_forge)
+  __init__.py         Package surface (APP_VERSION and the submodule re-exports)
   __main__.py         Entry point
   app.py              main()
   menus.py            Menu rendering and the main loop
@@ -983,14 +1000,24 @@ pdf_forge/            Main application package (run with: python -m pdf_forge)
   prompts.py          Interactive prompts and output-path pickers
   core.py             Pure logic: page parsing, chunking, filename rules,
                       queue-time path reservations, generated-output manifest
+  safeio.py           Race-safe output promotion and the generated-output store
   pdf_io.py render.py compress.py watermark.py   I/O adapters (PyMuPDF engine)
   encrypt.py unlock.py               Protection (AES-256) and unlocking
+  batch_protection.py Per-file protection policy for batch encrypt/unlock
   office.py           Office/CSV detection, validation, dialect sniffing
-  office_runtime.py   Project-local LibreOffice + unoserver lifecycle
+  convert_backend.py  Chooses the converter: Microsoft Office or LibreOffice
+  msoffice.py         Converts through an installed Microsoft Office (Windows)
+  office_decrypt.py   Decrypts a password-protected Office file before convert
+  office_discovery.py Where the LibreOffice runtime lives and whether it is usable
+  office_server.py    Runs a task-owned headless LibreOffice and converts through it
+  office_provision.py Installs, verifies, trims and removes that runtime
+  office_runtime.py   Re-export facade over office_discovery / office_server /
+                      office_provision, so callers keep one namespace
   ui.py logsetup.py constants.py     Terminal UI, logging, constants
 office_runtime_meta.json   Pinned LibreOffice version, URL, and SHA-256
 requirements.txt      Python runtime dependencies
 requirements-dev.txt  Development dependencies (pytest)
+scripts/              local-gates.py - reproduces the CI gates on this machine
 README.md             This file
 CHANGELOG.md          Version history
 LICENSE               MIT license
@@ -1011,14 +1038,53 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
+The same on Linux or macOS (four of the CI legs are Ubuntu):
+
+```bash
+python3 -m venv .venv
+./.venv/bin/python -m pip install -r requirements-dev.txt
+./.venv/bin/python -m pytest -q
+```
+
+Before pushing, run the gates instead of `pytest` alone. `scripts/local-gates.py`
+runs each CI step with the *identical* command its workflow uses, and reports
+what this machine could not reproduce rather than implying full coverage:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\local-gates.py
+```
+
+Use `--quick` to skip the slow gates (suite, coverage, dependency audit, E2E)
+and `--list` to print the plan without running anything.
+
 ## Continuous integration
 
-Every push and pull request to `main` runs the test suite on GitHub Actions
-(`.github/workflows/ci.yml`) across Linux and Windows on Python 3.10, 3.11,
-3.12, and 3.13. The badge at the top of this file shows the current status. The
-workflow simply installs the runtime and development dependencies and runs
-`pytest`, the same command you can run locally. Dependabot
-(`.github/dependabot.yml`) keeps the Actions and Python dependencies current.
+Every push and pull request to `main` runs the quality gates on GitHub Actions
+(`.github/workflows/ci.yml`). The badge at the top of this file shows the
+current status. There are five jobs:
+
+| Job | What it enforces |
+|---|---|
+| `test` | The suite on an 8-way matrix: Linux and Windows on Python 3.10, 3.11, 3.12 and 3.13. The Ubuntu/3.12 leg also produces coverage and fails if it drops below the `fail_under` threshold in `pyproject.toml`. Every leg then asserts the suite left the checkout unmodified. |
+| `lint` | `ruff check` and `mypy`. |
+| `security` | `pip-audit --strict` against the pinned dependencies, plus a gitleaks secret scan over the full history. |
+| `powershell` | PSScriptAnalyzer at `Error` severity over `Run.ps1` and the other scripts. |
+| `cli-smoke` | `--version`, `--diagnose` and a version/`APP_VERSION` agreement check on both operating systems - the entry points a user reaches before any menu. |
+
+A second workflow, `.github/workflows/office-e2e.yml`, covers main-menu item 11
+for real: it provisions the pinned project-local LibreOffice, starts the real
+headless server and converts real fixtures on Windows. It is separate because it
+downloads ~360 MB, so it runs on demand, weekly on a schedule, and on pushes
+that touch the conversion code (`pdf_forge/office*.py`, `pdf_forge/ops_office.py`,
+`office_runtime_meta.json`, its own three test modules, or the workflow itself).
+
+A green local `pytest` is therefore a **subset** of CI: it proves nothing about
+the other interpreters, the Linux legs, the lint/security/PowerShell gates, or
+real document conversion. `scripts/local-gates.py` closes most of that gap on
+one machine and names the rest.
+
+Dependabot (`.github/dependabot.yml`) keeps the Actions and Python dependencies
+current.
 
 ## Troubleshooting
 
@@ -1033,8 +1099,10 @@ workflow simply installs the runtime and development dependencies and runs
   cannot open a PDF whose password is unknown.
 - **Corrupted PDFs**: If a file cannot be parsed, PDF Forge reports the problem
   and returns to the menu without crashing.
-- **Output folder conflicts**: PDF Forge never overwrites existing files. It
-  generates a unique filename or output folder automatically.
+- **Output folder conflicts**: PDF Forge never overwrites an existing file
+  unless you answer yes to the explicit "Overwrite the existing file?" prompt,
+  which defaults to no. Otherwise it generates a unique filename or output
+  folder automatically. Folder outputs are always given a unique name.
 
 ## License
 

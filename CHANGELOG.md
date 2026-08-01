@@ -7,15 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-01
+
 ### Added
+- **Offer to replace an existing output, defaulting to no.** When the output
+  path you choose already exists, PDF Forge now asks `Overwrite the existing
+  file?` and defaults the answer to **n**. Declining (or pressing Enter) keeps
+  the previous behaviour exactly - a reserved `_2`/`_3` name - so nothing
+  changes unless you opt in. Answering `y` replaces that one file atomically at
+  write time: you are never left without either version, and a failed replace
+  leaves the original intact. The consent covers only that exact path, is
+  refused if another queued task already targets it, never applies to a
+  directory, and is dropped when the queue finishes. The rule that an output
+  can never be the source PDF is unchanged, and folder outputs keep unique
+  names.
+- **Each finished task reports how long it took**, and the batch reports its
+  own total. The figure is work time: every interval the app spent waiting at a
+  prompt is subtracted, so a conversion that stopped to ask for a password is
+  not credited with the minutes you took to type it. Failed tasks report their
+  duration too.
 - **Encrypted sources now convert on the LibreOffice backend too.** Both
   backends share one local decryptor: neither can be handed an encrypted file
   directly (Office blocks on a modal dialog, LibreOffice loses the UNO bridge),
   so the password is verified and the document decrypted with `msoffcrypto-tool`
   first and only the plain copy reaches the converter. A wrong password is an
   ordinary re-prompt.
-
-### Added
 - **Watermark removal takes several PDFs in one pass.** Enter paths one at a
   time and type `done`; each file is then scanned and asked about on its own
   (`0` there skips just that file), and everything configured is queued as a
@@ -32,19 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deliberate cancels (declining a protection choice, cancelling a batch
   protection preflight, or a "nothing to do" outcome such as no watermark
   candidates) still return to the menu, as before.
-- `office_runtime` was split into `office_discovery`, `office_server` and
-  `office_provision`, with `office_runtime` re-exporting the public API so no
-  caller changed. The two oversized test modules were split by feature into
-  twelve focused modules with shared fixture builders in `tests/helpers.py`; the
-  test inventory is unchanged (186 functions, none lost).
-
 - **Microsoft Office is used as the converter when it is installed.** It is the
   native renderer for these formats, needs no download and no extra disk space,
   and LibreOffice is never provisioned on such a machine. Word, Excel,
   PowerPoint and CSV all go through it; files are opened read-only with macros
   force-disabled in a dedicated process.
-
-### Changed
 - **The LibreOffice runtime is optional and installed on demand.** Nothing is
   downloaded at startup or as a prerequisite. When a conversion is requested and
   Microsoft Office is absent, PDF Forge explains the cost and asks whether to
@@ -56,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Excel, PowerPoint and CSV sources through both the CLI and the production
   unoserver path and comparing the extracted text of every page with a full
   install; all outputs were identical.
+- `office_runtime` was split into `office_discovery`, `office_server` and
+  `office_provision`, with `office_runtime` re-exporting the public API so no
+  caller changed. The two oversized test modules were split by feature into
+  twelve focused modules with shared fixture builders in `tests/helpers.py`; the
+  test inventory is unchanged (186 functions, none lost).
 
 ### Fixed
 - `save_with_password` (the end-to-end encrypted-fixture helper) verifies the
@@ -71,6 +84,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A UTF-8 CSV is handed to Excel with a byte-order mark. Without one Excel
   guesses the system code page, so non-Latin text arrived as mojibake
   ("سلام" imported as "Ø³Ù„Ø§Ù…"). The source file is never modified.
+- **A second PDF Forge no longer deletes the previews the first one is showing
+  you.** Watermark previews now go in a per-run folder, and startup only clears
+  folders whose owning process is provably gone - identified by process id *and*
+  start time, so a recycled id cannot make a finished run look alive. Previously
+  launching a second instance wiped the shared `temp` folder while the first was
+  still asking which candidate to remove.
+- **A LibreOffice download that 404s now falls back to the archive mirror.** The
+  pinned installer is removed from the stable path when a new version ships,
+  which broke first-time setup until the pin was bumped. Both locations are
+  tried in order and verified against the same pinned checksum; a checksum
+  failure stays terminal and never advances to the next candidate. When every
+  location fails, the error names the version, the file holding the pin, and the
+  reason.
+- The LibreOffice teardown gives its process group a real chance to exit: on
+  POSIX `SIGTERM` and `SIGKILL` were sent back to back, so the graceful path
+  never happened. It also signals the group *before* waiting on the launcher,
+  because waiting frees the launcher's id - and the group is identified by that
+  id, so signalling afterwards could reach an unrelated process.
+- Windows helper tools (`taskkill`, `powershell`, `sc`) are invoked by absolute
+  path. A bare name is resolved through a search order that includes the current
+  directory, and this tool is pointed at untrusted document folders by design.
+
+### Removed
+- Six submenu render wrappers and `msoffice.is_available()`, none of which had
+  a caller. No behaviour change.
 
 ## [2.0.1] - 2026-07-19
 

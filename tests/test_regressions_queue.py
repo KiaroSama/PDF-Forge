@@ -98,9 +98,41 @@ def test_running_queue_releases_reservations(tmp_path, monkeypatch):
     assert not app.core._reserved_files
 
 
+def test_overwrite_approval_is_released_with_the_queue(tmp_path):
+    """Consent is for one queue only; it must never leak into the next (OW-1)."""
+    target = tmp_path / "report.pdf"
+    app.approve_overwrite(target)
+    assert app.overwrite_approved(target)
+
+    app.clear_reservations()
+
+    assert not app.overwrite_approved(target), (
+        "an approval outlived the queue it was given for"
+    )
+
+
 def test_empty_queue_finalize_is_a_noop():
     app.taskqueue._task_queue.clear()
     assert app.finalize_queue() is False
+
+
+def test_empty_queue_finalize_releases_stale_reservations(tmp_path):
+    """A configuration abandoned before queueing must not poison later runs.
+
+    Reserving an output and then finalizing an empty queue is exactly what the
+    office flow does when the converter install is declined after
+    `_build_jobs` reserved one path per file (C-01).
+    """
+    target = tmp_path / "report.pdf"
+    first = app.core.reserve_unique_file(target)
+    assert first == target, "a free path must reserve under its own name"
+
+    assert app.taskqueue.finalize_queue() is False
+
+    second = app.core.reserve_unique_file(target)
+    assert second == target, (
+        f"the reservation was never released; got {second.name}"
+    )
 
 
 def test_password_never_appears_in_a_task_repr(tmp_path):

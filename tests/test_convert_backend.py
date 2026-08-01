@@ -158,7 +158,6 @@ def test_detection_matches_the_registry():
 def test_detection_is_none_without_com(monkeypatch):
     monkeypatch.setattr(msoffice.os, "name", "posix")
     assert msoffice.detect_office() is None
-    assert msoffice.is_available() is False
     assert msoffice.describe_office(None) == "not installed"
 
 

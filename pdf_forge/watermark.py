@@ -266,7 +266,8 @@ def remove_watermark_images(doc, signatures_to_remove, out_path: Path,
         # leave the rejected file on disk, at the user's chosen path, and in the
         # generated-output manifest (C-14).
         validate_watermark_removed(tmp_path, targets, password=password)
-        written = promote_atomically(tmp_path, out_path)
+        written = promote_atomically(
+            tmp_path, out_path, overwrite=overwrite_approved(out_path))
     except BaseException:  # incl. Ctrl+C: an orphaned temp can hold decrypted bytes
         try:
             if tmp_path.exists():

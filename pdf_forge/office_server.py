@@ -26,6 +26,37 @@ from .office_discovery import (
     random_localhost_port, unoserver_installed, venv_site_packages,
 )
 
+#: How long a process group gets to exit on SIGTERM before SIGKILL (C-03).
+#: Short and bounded: teardown runs on the user's critical path.
+_REAP_GRACE_SECONDS = 0.5
+_REAP_POLL_SECONDS = 0.05
+
+
+def _system32(name: str) -> str:
+    """Absolute path to a Windows system tool, or ``name`` when not found.
+
+    ``CreateProcess`` resolves a bare argv[0] through a search order that
+    includes the current working directory, and this tool is pointed at
+    untrusted, freshly-unzipped document folders by design - so a ``taskkill.exe``
+    dropped next to a PDF would win over the real one (SEC-02). The shipped
+    launcher pins CWD to the project root; ``python -m pdf_forge`` from an
+    arbitrary directory does not.
+
+    Falls back to the bare name so a non-standard ``SystemRoot`` still works,
+    and returns it unchanged off Windows.
+    """
+    if os.name != "nt":
+        return name
+    system32 = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32"
+    for directory in (system32, system32 / "WindowsPowerShell" / "v1.0"):
+        # powershell.exe does not sit in System32 itself; verified on this
+        # platform rather than assumed, because a wrong path here silently
+        # degrades to the bare name and reintroduces the CWD search.
+        candidate = directory / f"{name}.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return name
+
 
 # --------------------------------------------------------------------------- #
 # Server lifecycle
@@ -69,6 +100,14 @@ class ConversionServer:
         # left to walk and its soffice.bin child is orphaned. Decide that
         # before terminating, because afterwards the two cases look identical.
         orphaned = self.process.poll() is not None
+        # POSIX: reap the stored process group BEFORE _terminate, which waits on
+        # the launcher and so reaps it. That ordering is the ownership proof: an
+        # un-reaped launcher (running, or a zombie still held by Popen) keeps its
+        # PID reserved, and the group id equals that PID - so the group we signal
+        # is provably still ours. Reaping first and signalling after would hand a
+        # SIGKILL to whatever inherited the number (C-03). Reaching a child that
+        # outlived its launcher needs the id captured at launch either way (N-12).
+        _reap_process_group(self.pgid)
         _terminate(self.process)
         # Close our end of the log before the profile (which holds it) is removed.
         try:
@@ -78,10 +117,6 @@ class ConversionServer:
             pass
         if orphaned:
             _kill_profile_owners(self.profile_dir)
-        # POSIX: reap the stored process group too. When the launcher has already
-        # exited, _terminate's os.getpgid(pid) fails and cannot reach a child
-        # that outlived it; the group id captured at launch still can (N-12).
-        _reap_process_group(self.pgid)
         _remove_profile(self.profile_dir)
 
 
@@ -113,7 +148,8 @@ def _kill_profile_owners(profile_dir: Path) -> None:
     )
     try:
         subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            [_system32("powershell"), "-NoProfile", "-NonInteractive",
+             "-Command", script],
             capture_output=True, timeout=30,
             # Match the URI form, which is what is actually on the command
             # line: we pass --user-installation a plain path, but unoserver
@@ -141,14 +177,32 @@ def _reap_process_group(pgid: Optional[int]) -> None:
     the parent-exited/child-alive case reachable: the surviving ``soffice.bin``
     is still in this group and is reaped here (N-12). No-op on Windows and when
     no pgid was captured.
+
+    SIGTERM is given a real chance before SIGKILL: sending both back to back
+    made the graceful path the old comment described unreachable, so unoserver
+    never got to close its soffice.bin cleanly (C-03).
+
+    **Caller contract**: the launcher must not have been reaped yet, or the pgid
+    may name a recycled PID's group. ``ServerHandle.stop`` guarantees this by
+    calling here before ``_terminate``.
     """
     if pgid is None or os.name == "nt":
         return
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        return  # the group is already gone (or not ours) - nothing to reap
+    deadline = time.monotonic() + _REAP_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(_REAP_POLL_SECONDS)
         try:
-            os.killpg(pgid, sig)
+            os.killpg(pgid, 0)  # signal 0 only probes; it delivers nothing
         except (ProcessLookupError, PermissionError, OSError):
-            return  # the group is already gone (or not ours) - nothing to reap
+            return  # every member exited on the graceful signal
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass  # it exited during the last poll interval
 
 
 def _remove_profile(path: Path, attempts: int = 12, delay: float = 0.25) -> None:
@@ -321,7 +375,7 @@ def _terminate(process: subprocess.Popen) -> None:
     if process.poll() is None and os.name == "nt":
         try:
             subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                [_system32("taskkill"), "/PID", str(process.pid), "/T", "/F"],
                 capture_output=True, timeout=30,
             )
         except (OSError, subprocess.SubprocessError):
