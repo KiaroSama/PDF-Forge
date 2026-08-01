@@ -1060,6 +1060,11 @@ what this machine could not reproduce rather than implying full coverage:
 Use `--quick` to skip the slow gates (suite, coverage, dependency audit, E2E)
 and `--list` to print the plan without running anything.
 
+Every gate has a wall ceiling — 300 s, or 600 s for the slow ones, against a
+normal worst case of about 110 s. A gate that outruns it is reported as failed
+and terminated together with everything it started, so a wedged child (a
+headless LibreOffice, say) can never leave the run hanging with nothing printed.
+
 ## Continuous integration
 
 Every push and pull request to `main` runs the quality gates on GitHub Actions

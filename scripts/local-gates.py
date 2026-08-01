@@ -34,6 +34,17 @@ if not VENV_PYTHON.exists():
 PYTHON = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
 
 
+#: Wall ceilings. Every observed gate finishes far inside these: the full suite
+#: ~110s, the real conversion E2E ~96s, everything else in seconds. A gate that
+#: outruns its ceiling is a defect to investigate, never a slow gate to wait on.
+DEFAULT_TIMEOUT = 300
+SLOW_TIMEOUT = 600
+
+#: Workers for the conversion E2E. Bounded by the ~370 MB LibreOffice each one
+#: can hold, not by core count - see the gate's own note.
+E2E_WORKERS = min(4, os.cpu_count() or 1)
+
+
 @dataclass
 class Gate:
     """One CI step reproduced locally."""
@@ -45,6 +56,8 @@ class Gate:
     shell: bool = False
     available: Callable[[], Optional[str]] = lambda: None
     env: dict = field(default_factory=dict)
+    #: Override the wall ceiling for this gate; None takes the slow/fast default.
+    timeout: Optional[int] = None
 
 
 def _needs(tool: str) -> Callable[[], Optional[str]]:
@@ -117,9 +130,16 @@ GATES: List[Gate] = [
           "raise SystemExit(0 if s['ready'] else 1)"]),
     # Both files, because the workflow runs both: a local gate that covers less
     # than CI reports green for a narrower thing than it claims.
+    #
+    # Same tests as CI, but the worker count is capped instead of `-n auto`.
+    # Every worker here can own a headless LibreOffice of ~370 MB, and `auto`
+    # counts cores while knowing nothing about that: measured on this 16-core
+    # machine it put 12 soffice.bin up at once (~4.4 GB) with 6.4 GB free, and
+    # once left two of them wedged. CI never sees this because its runners have
+    # 4 cores - so 4 is the concurrency that is actually evidenced to work.
     Gate("Real conversion end-to-end tests", "office-e2e.yml",
          [PYTHON, "-m", "pytest", "tests/test_office_e2e.py",
-          "tests/test_office_links.py", "-q", "-n", "auto"],
+          "tests/test_office_links.py", "-q", "-n", str(E2E_WORKERS)],
          slow=True, env={"PDF_FORGE_E2E": "1"}),
 ]
 
@@ -135,14 +155,56 @@ UNCOVERABLE = [
 ]
 
 
+def _terminate_tree(process: subprocess.Popen) -> None:
+    """Take down a timed-out gate *and everything it started*.
+
+    A gate does not hang in the process this script spawned; it hangs in a
+    grandchild - a headless LibreOffice, behind unoserver, behind a pytest-xdist
+    worker. ``Popen.kill()`` reaches only the direct child and orphans that
+    grandchild, which then sits on its profile directory and hundreds of
+    megabytes. ``office_server._terminate`` is the project's existing tree-kill
+    (``taskkill /T`` on Windows, ``killpg`` on POSIX); reuse it rather than write
+    a second one that has not been through the same failures.
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        from pdf_forge.office_server import _terminate
+        _terminate(process)
+    except Exception:  # noqa: BLE001 - cleanup must never mask the timeout
+        process.kill()
+    finally:
+        try:
+            process.wait(timeout=30)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def run_gate(gate: Gate) -> tuple:
     reason = gate.available()
     if reason:
         return "skipped", reason, 0.0
     env = dict(os.environ, **gate.env)
+    limit = gate.timeout or (SLOW_TIMEOUT if gate.slow else DEFAULT_TIMEOUT)
     started = time.perf_counter()
-    result = subprocess.run(list(gate.command), cwd=str(ROOT), env=env,
-                            capture_output=True, text=True)
+    process = subprocess.Popen(list(gate.command), cwd=str(ROOT), env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True)
+    try:
+        stdout, stderr = process.communicate(timeout=limit)
+    except subprocess.TimeoutExpired:
+        # Bounded, visible failure. Without this the whole gate run waits
+        # forever on one wedged child and reports nothing at all.
+        _terminate_tree(process)
+        stdout, stderr = process.communicate()
+        elapsed = time.perf_counter() - started
+        tail = "\n".join(line for line in ((stdout or "") + (stderr or "")).splitlines()
+                         if line.strip())
+        return ("failed",
+                f"no result after {limit}s - terminated, with its process tree.\n"
+                f"Last output before the stall:\n{tail[-1200:]}",
+                elapsed)
+    result = subprocess.CompletedProcess(gate.command, process.returncode,
+                                         stdout, stderr)
     elapsed = time.perf_counter() - started
     output = (result.stdout or "") + (result.stderr or "")
 
