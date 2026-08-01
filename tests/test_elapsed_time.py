@@ -13,7 +13,6 @@ only one that distinguishes this feature from a plain stopwatch.
 from __future__ import annotations
 
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -36,50 +35,75 @@ def _clean_state():
     app.taskqueue._task_queue.clear()
 
 
-def _slow_answer(answer: str):
-    """A prompt reader that blocks like a human deciding what to type."""
+class _FakeTime:
+    """Stands in for the ``time`` module inside ``prompts``, clock-driven.
+
+    These tests are about arithmetic - wall time minus input wait - so they
+    drive the clock instead of sleeping. Real sleeps made the assertion a race
+    against the OS scheduler: a 0.05s "work" sleep asserted under a 0.2s ceiling
+    leaves 0.15s of slack, which a loaded machine can eat, and that produced a
+    real failure. Advancing an explicit clock is both deterministic AND a
+    stricter check, because the expected value is exact rather than a bound.
+    """
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self._now = start
+
+    def monotonic(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Replace the clock `prompts` reads, leaving the real one alone elsewhere."""
+    fake = _FakeTime()
+    monkeypatch.setattr(prompts, "time", fake)
+    return fake
+
+
+def _slow_answer(clock, answer: str):
+    """A prompt reader that costs the wall clock what a human would."""
     def read(*_a, **_k) -> str:
-        time.sleep(INPUT_WAIT)
+        clock.advance(INPUT_WAIT)
         return answer
     return read
 
 
-def test_input_wait_is_not_counted_as_work(monkeypatch):
+def test_input_wait_is_not_counted_as_work(monkeypatch, clock):
     """The whole point: waiting at a prompt is not work time."""
-    monkeypatch.setattr("builtins.input", _slow_answer("typed"))
+    monkeypatch.setattr("builtins.input", _slow_answer(clock, "typed"))
 
     with prompts.work_timer() as spent:
         assert prompts._input("Question: ") == "typed"
-        time.sleep(REAL_WORK)
+        clock.advance(REAL_WORK)
 
-    assert spent["seconds"] < 0.2, (
+    assert spent["seconds"] == pytest.approx(REAL_WORK), (
         f"the {INPUT_WAIT}s spent waiting for the user was counted as work "
         f"({spent['seconds']:.3f}s recorded)"
     )
-    assert spent["seconds"] >= 0.04, (
-        f"the real work was not counted at all ({spent['seconds']:.3f}s)"
-    )
 
 
-def test_getpass_wait_is_not_counted(monkeypatch):
+def test_getpass_wait_is_not_counted(monkeypatch, clock):
     """Hidden password prompts bypass ``input()`` - they must be timed too."""
-    monkeypatch.setattr("getpass.getpass", _slow_answer("s3cret"))
+    monkeypatch.setattr("getpass.getpass", _slow_answer(clock, "s3cret"))
 
     with prompts.work_timer() as spent:
         assert prompts.prompt_password() == "s3cret"
-        time.sleep(REAL_WORK)
+        clock.advance(REAL_WORK)
 
-    assert spent["seconds"] < 0.2, (
+    assert spent["seconds"] == pytest.approx(REAL_WORK), (
         f"a hidden-password wait was counted as work "
         f"({spent['seconds']:.3f}s recorded)"
     )
-    assert spent["seconds"] >= 0.04
 
 
-def test_input_wait_is_charged_even_when_the_prompt_raises(monkeypatch):
+def test_input_wait_is_charged_even_when_the_prompt_raises(monkeypatch, clock):
     """An exit request raised from a prompt must still not inflate the work."""
     def raiser(*_a, **_k):
-        time.sleep(INPUT_WAIT)
+        clock.advance(INPUT_WAIT)
         raise KeyboardInterrupt
 
     monkeypatch.setattr("builtins.input", raiser)
@@ -87,9 +111,12 @@ def test_input_wait_is_charged_even_when_the_prompt_raises(monkeypatch):
     with prompts.work_timer() as spent:
         with pytest.raises(KeyboardInterrupt):
             prompts._input("Question: ")
-        time.sleep(REAL_WORK)
+        clock.advance(REAL_WORK)
 
-    assert spent["seconds"] < 0.2, f"{spent['seconds']:.3f}s recorded"
+    assert spent["seconds"] == pytest.approx(REAL_WORK), (
+        f"the wait before the exception was counted as work "
+        f"({spent['seconds']:.3f}s recorded)"
+    )
 
 
 @pytest.mark.parametrize("seconds, expected", [
