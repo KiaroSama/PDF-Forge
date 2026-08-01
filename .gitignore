@@ -93,3 +93,6 @@ desktop.ini
 !/.env.template
 !/.env.dist
 /SKILL.md
+
+# Advisor implementation plans (local working notes)
+/plans/
