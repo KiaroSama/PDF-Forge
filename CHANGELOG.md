@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-01
+
 ### Added
 - **Offer to replace an existing output, defaulting to no.** When the output
   path you choose already exists, PDF Forge now asks `Overwrite the existing
@@ -46,19 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deliberate cancels (declining a protection choice, cancelling a batch
   protection preflight, or a "nothing to do" outcome such as no watermark
   candidates) still return to the menu, as before.
-- `office_runtime` was split into `office_discovery`, `office_server` and
-  `office_provision`, with `office_runtime` re-exporting the public API so no
-  caller changed. The two oversized test modules were split by feature into
-  twelve focused modules with shared fixture builders in `tests/helpers.py`; the
-  test inventory is unchanged (186 functions, none lost).
-
 - **Microsoft Office is used as the converter when it is installed.** It is the
   native renderer for these formats, needs no download and no extra disk space,
   and LibreOffice is never provisioned on such a machine. Word, Excel,
   PowerPoint and CSV all go through it; files are opened read-only with macros
   force-disabled in a dedicated process.
-
-### Changed
 - **The LibreOffice runtime is optional and installed on demand.** Nothing is
   downloaded at startup or as a prerequisite. When a conversion is requested and
   Microsoft Office is absent, PDF Forge explains the cost and asks whether to
@@ -70,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Excel, PowerPoint and CSV sources through both the CLI and the production
   unoserver path and comparing the extracted text of every page with a full
   install; all outputs were identical.
+- `office_runtime` was split into `office_discovery`, `office_server` and
+  `office_provision`, with `office_runtime` re-exporting the public API so no
+  caller changed. The two oversized test modules were split by feature into
+  twelve focused modules with shared fixture builders in `tests/helpers.py`; the
+  test inventory is unchanged (186 functions, none lost).
 
 ### Fixed
 - `save_with_password` (the end-to-end encrypted-fixture helper) verifies the

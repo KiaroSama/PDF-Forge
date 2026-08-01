@@ -1,13 +1,13 @@
 {
   "_comment": "Pinned metadata for the project-local, CLI-only LibreOffice runtime used by the Convert-to-PDF tool. Tracked in git; the downloaded/extracted runtime under .tools/libreoffice/ is git-ignored. Checksums are the official DocumentFoundation .sha256 sidecar values. Provisioning uses an official administrative extraction (msiexec /a) - no system install, PATH, registry, shortcut, or service changes.",
-  "_fallback_url_comment": "'fallback_url' is the same release on the DocumentFoundation download archive, tried only if 'url' does not answer - The Document Foundation rotates aged releases out of the mirror's stable/ path, which would otherwise turn --setup-office into a bare 404. It cannot be derived from 'url' by substitution: the archive is a different host AND is keyed by the 4-component build version (25.8.7 ships as 25.8.7.2), which does not appear in the stable URL at all. It is the same file under its build-version name, so 'sha256' below must still verify against it; if it ever does not, provisioning fails closed as designed. Update it together with url/filename/sha256 whenever the pin is bumped, and read the build version off https://downloadarchive.documentfoundation.org/libreoffice/old/",
+  "_fallback_url_comment": "'fallback_url' is the same release on the DocumentFoundation download archive, tried only if 'url' does not answer - The Document Foundation rotates aged releases out of the mirror's stable/ path, which would otherwise turn --setup-office into a bare 404. It cannot be derived from 'url' by substitution: the archive is a different host AND is keyed by the 4-component build version (25.8.7 ships as 25.8.7.2), which does not appear in the stable URL at all. It is the same file under its build-version name, so 'sha256' below must still verify against it; if it ever does not, provisioning fails closed as designed. When bumping the pin, do NOT guess the build number: list https://downloadarchive.documentfoundation.org/libreoffice/old/ and pick the build whose published .msi.sha256 equals 'sha256' below. Verified 2026-08-01 - 25.8.7 ships as build 25.8.7.3 (ecdb65e7...); builds .1 and .2 are earlier candidates with different checksums, so pointing at one would make this fallback fail closed on every attempt.",
   "product": "LibreOffice",
   "version": "25.8.7",
   "arch": "x86-64",
   "license": "MPL-2.0 (LibreOffice). See https://www.libreoffice.org/about-us/licenses/",
   "windows": {
     "url": "https://download.documentfoundation.org/libreoffice/stable/25.8.7/win/x86_64/LibreOffice_25.8.7_Win_x86-64.msi",
-    "fallback_url": "https://downloadarchive.documentfoundation.org/libreoffice/old/25.8.7.2/win/x86_64/LibreOffice_25.8.7.2_Win_x86-64.msi",
+    "fallback_url": "https://downloadarchive.documentfoundation.org/libreoffice/old/25.8.7.3/win/x86_64/LibreOffice_25.8.7.3_Win_x86-64.msi",
     "filename": "LibreOffice_25.8.7_Win_x86-64.msi",
     "sha256": "ecdb65e76f5e91dc198b8c8dce5b5d6e1eb12fea6023553e52b591afd10b619d",
     "sha256_source": "https://download.documentfoundation.org/libreoffice/stable/25.8.7/win/x86_64/LibreOffice_25.8.7_Win_x86-64.msi.sha256",
