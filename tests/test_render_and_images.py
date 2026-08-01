@@ -258,3 +258,71 @@ def test_extract_images_none_in_text_pdf(tmp_path):
         assert app.count_embedded_images(doc) == 0
     finally:
         doc.close()
+
+
+def _make_mixed_image_pdf(tmp_path):
+    """Three pages holding one of every case the scan has to tell apart.
+
+    Page 1: a unique photo + the logo + an inline image.
+    Page 2: the logo again + an inline image.
+    Page 3: the logo again.
+
+    So: 2 distinct embedded images (the logo deduped across three pages) and
+    2 painted inline occurrences, which have no image object to extract.
+    """
+    import pymupdf
+    from PIL import Image
+
+    photo = tmp_path / "photo.png"
+    Image.new("RGB", (400, 300), (180, 40, 40)).save(photo)
+    logo = tmp_path / "logo.png"
+    Image.new("RGB", (100, 50), (40, 40, 180)).save(logo)
+
+    # A real BI ... ID ... EI inline image: 16x16 grayscale, hex-encoded.
+    raw = bytes(range(256))
+    inline = (b"q 100 0 0 100 20 20 cm\n"
+              b"BI /W 16 /H 16 /CS /G /BPC 8 /F /AHx ID\n"
+              + raw.hex().encode("ascii") + b">\nEI\nQ\n")
+
+    src = tmp_path / "mixed.pdf"
+    doc = pymupdf.open()
+    for page_no in range(3):
+        page = doc.new_page(width=500, height=400)
+        if page_no == 0:
+            page.insert_image(pymupdf.Rect(50, 50, 450, 350), filename=str(photo))
+        page.insert_image(pymupdf.Rect(10, 10, 110, 60), filename=str(logo))
+    for page_no in (0, 1):
+        page = doc[page_no]
+        xref = page.get_contents()[0]
+        doc.update_stream(xref, inline + (doc.xref_stream(xref) or b""))
+    doc.save(str(src))
+    doc.close()
+    return src
+
+
+def test_scan_images_reports_the_same_counts_as_the_separate_walks(tmp_path):
+    # The single scan replaced two separate walks of the document. The numbers
+    # it reports are pinned to what the fixture actually contains, so a future
+    # refactor cannot quietly move a count and still agree with itself.
+    src = _make_mixed_image_pdf(tmp_path)
+    doc = app.open_source_pdf(src)
+    try:
+        items, inline_count = app.scan_images(doc)
+
+        assert len(items) == 2       # photo + logo; logo deduped over 3 pages
+        assert inline_count == 2     # one painted inline image on pages 1 and 2
+
+        # The two surviving public counters must report those same numbers.
+        assert app.count_embedded_images(doc) == 2
+        assert app.count_inline_images(doc) == 2
+
+        # Both distinct images first appear on page 1, and the inline image
+        # does not consume a per-page index (extraction names files from it).
+        assert [(page, index) for _xref, page, index in items] == [(1, 1), (1, 2)]
+
+        # Extraction driven by the carried items writes exactly those files -
+        # the queued runner's path, without a second scan.
+        created = app.extract_embedded_images(doc, tmp_path / "carried", items=items)
+        assert sorted(p.name for p in created) == ["p1_1.png", "p1_2.png"]
+    finally:
+        doc.close()

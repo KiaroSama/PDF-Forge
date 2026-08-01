@@ -668,12 +668,13 @@ def operation_extract_images() -> None:
     total_pages = 0
     pw = None
     image_count = 0
+    image_items = None
     label = None
     jpeg_quality = None
     out_dir = None
 
     def step_source() -> bool:
-        nonlocal source, pdf, total_pages, pw, image_count
+        nonlocal source, pdf, total_pages, pw, image_count, image_items
         if pdf is not None:
             close_doc(pdf)
             pdf = None
@@ -689,8 +690,10 @@ def operation_extract_images() -> None:
             return False
         # Capture the working password for a silent reopen in the runner (A13).
         pw = source_password(pdf)
-        image_count = count_embedded_images(pdf)
-        inline_count = count_inline_images(pdf)
+        # One walk answers both counts and pre-resolves what the runner will
+        # extract; the queue proves the bytes are unchanged before it runs.
+        image_items, inline_count = scan_images(pdf)
+        image_count = len(image_items)
         print_success(
             f"Loaded '{source.name}' - {total_pages} page(s), "
             f"{image_count} distinct image(s)."
@@ -759,6 +762,9 @@ def operation_extract_images() -> None:
                 created = extract_embedded_images(
                     rpdf, out_dir, jpeg_quality,
                     progress=lambda c, t: _print_progress("Extracting images", c, t),
+                    # Plain (xref, page, index) ints from the configure-time
+                    # scan of these same, queue-verified bytes.
+                    items=image_items,
                 )
             except Exception as exc:  # noqa: BLE001 - clean message, log details
                 print_error(f"Failed to extract images: {exc}")
