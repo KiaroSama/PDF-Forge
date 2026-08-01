@@ -19,16 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory, and is dropped when the queue finishes. The rule that an output
   can never be the source PDF is unchanged, and folder outputs keep unique
   names.
-
-### Added
+- **Each finished task reports how long it took**, and the batch reports its
+  own total. The figure is work time: every interval the app spent waiting at a
+  prompt is subtracted, so a conversion that stopped to ask for a password is
+  not credited with the minutes you took to type it. Failed tasks report their
+  duration too.
 - **Encrypted sources now convert on the LibreOffice backend too.** Both
   backends share one local decryptor: neither can be handed an encrypted file
   directly (Office blocks on a modal dialog, LibreOffice loses the UNO bridge),
   so the password is verified and the document decrypted with `msoffcrypto-tool`
   first and only the plain copy reaches the converter. A wrong password is an
   ordinary re-prompt.
-
-### Added
 - **Watermark removal takes several PDFs in one pass.** Enter paths one at a
   time and type `done`; each file is then scanned and asked about on its own
   (`0` there skips just that file), and everything configured is queued as a
