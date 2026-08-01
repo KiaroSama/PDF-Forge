@@ -145,7 +145,8 @@ def render_pdf_to_image_pdf(doc, page_count: int, out_path: Path, dpi: int,
             )
             # Never rebind out_path: the requested and the written name must
             # stay distinguishable all the way back to the caller.
-            written = promote_atomically(tmp_path, out_path)
+            written = promote_atomically(
+                tmp_path, out_path, overwrite=overwrite_approved(out_path))
         except BaseException:  # incl. Ctrl+C: leaked temp survives otherwise
             try:
                 if tmp_path.exists():

@@ -35,7 +35,8 @@ images. The original PDFs are never modified, overwritten, or deleted.
 - Preserves the original page content for extract/split/merge (no rasterizing or
   re-encoding).
 - Writes output safely using temporary files and atomic renames, and never
-  overwrites existing files.
+  overwrites an existing file unless you explicitly answer yes when asked (that
+  question defaults to no).
 
 ## Requirements
 
@@ -179,11 +180,17 @@ highlighted inside the guidance:
 
 These are enforced in code and covered by regression tests:
 
-- **Outputs never overwrite anything.** A final name is claimed atomically
+- **Outputs never overwrite anything unless you ask them to.** When the
+  destination already exists you are asked whether to replace it, and the answer
+  defaults to **no**. Decline - or just press Enter - and the historical
+  behaviour applies exactly: a final name is claimed atomically
   (`O_CREAT|O_EXCL`); if the destination appeared after you configured the task -
   even from another program or a second PDF Forge instance - the output is
   written to the next free `_2`/`_3` name instead. Two concurrent PDF Forge
-  processes cannot select the same final path.
+  processes cannot select the same final path. Answer `y` and that one approved
+  file is replaced atomically, so you are never left without either version, and
+  a replace that fails leaves the original untouched. Consent applies to that one
+  path and is dropped when the queue finishes. Folder outputs are never replaced.
 - **Queued tasks hold no file handles.** An operation carries the source path,
   page selection, captured password and a fingerprint - never an open document -
   so a queued or discarded task never locks your file.
@@ -714,7 +721,9 @@ as each file is accepted.
 
 Each file becomes `<source-stem>.pdf` beside the source. Output paths are
 reserved through the same queue-time system as every other tool, so nothing is
-ever overwritten and two queued jobs cannot collide.
+ever overwritten and two queued jobs cannot collide. Batch conversion always
+takes a unique name; the replace-the-existing-file prompt applies only to the
+single-file output paths you type in yourself.
 
 #### How the conversion stack works
 
@@ -925,7 +934,8 @@ error message instead of a crash.
 - Any output path that resolves to a source PDF is rejected (including every
   source in a merge).
 - Output is written to a temporary file, validated, then atomically renamed.
-- Existing files are never overwritten; a unique name is generated instead.
+- Existing files are never overwritten without explicit consent: you are asked,
+  the answer defaults to no, and declining generates a unique name instead.
 - On a partial failure during a split, already-completed valid files are kept
   and only the current operation's temporary files are removed.
 - A merge opens all sources first and fails before writing if any source cannot
@@ -1033,8 +1043,10 @@ workflow simply installs the runtime and development dependencies and runs
   cannot open a PDF whose password is unknown.
 - **Corrupted PDFs**: If a file cannot be parsed, PDF Forge reports the problem
   and returns to the menu without crashing.
-- **Output folder conflicts**: PDF Forge never overwrites existing files. It
-  generates a unique filename or output folder automatically.
+- **Output folder conflicts**: PDF Forge never overwrites an existing file
+  unless you answer yes to the explicit "Overwrite the existing file?" prompt,
+  which defaults to no. Otherwise it generates a unique filename or output
+  folder automatically. Folder outputs are always given a unique name.
 
 ## License
 

@@ -381,8 +381,11 @@ def _choose_output_dir_for_files(default_dir: Path) -> Optional[Path]:
 def _choose_output_file(default_path: Path, source: Path) -> Optional[Path]:
     """Let the user accept the default output or provide a custom directory/file.
 
-    Guarantees the returned path never resolves to the source PDF and never
-    overwrites an existing file.
+    Guarantees the returned path never resolves to the source PDF, and never
+    overwrites an existing file without explicit consent: when the destination
+    exists the user is asked, the answer defaults to no, and only an explicit
+    yes records an approval for the writer to honour (OW-1). Declining is the
+    historical behaviour - a reserved ``_2``/``_3`` sibling.
     """
     prompt = question_prompt("Output Path", default=f"{default_path.name} beside source")
     while True:
@@ -417,6 +420,23 @@ def _choose_output_file(default_path: Path, source: Path) -> Optional[Path]:
                 default_yes=True,
             ):
                 continue
+
+        # An existing destination is the user's decision, not ours: offer the
+        # replace, defaulting to no. Declining keeps the historical no-clobber
+        # behaviour exactly (OW-1).
+        if chosen.exists() and chosen.is_file():
+            if ask_yes_no(f"Overwrite the existing file?\n  {chosen}",
+                          default_yes=False):
+                if reserve_exact_file(chosen):
+                    approve_overwrite(chosen)
+                    print_warning(
+                        f"{chosen.name} will be replaced when the task runs."
+                    )
+                    return chosen
+                print_warning(
+                    "Another queued task already targets that file; using a "
+                    "unique name instead."
+                )
 
         # Never overwrite an existing file or collide with another queued task's
         # reserved output: pick and reserve a unique name.

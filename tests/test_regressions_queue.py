@@ -98,6 +98,19 @@ def test_running_queue_releases_reservations(tmp_path, monkeypatch):
     assert not app.core._reserved_files
 
 
+def test_overwrite_approval_is_released_with_the_queue(tmp_path):
+    """Consent is for one queue only; it must never leak into the next (OW-1)."""
+    target = tmp_path / "report.pdf"
+    app.approve_overwrite(target)
+    assert app.overwrite_approved(target)
+
+    app.clear_reservations()
+
+    assert not app.overwrite_approved(target), (
+        "an approval outlived the queue it was given for"
+    )
+
+
 def test_empty_queue_finalize_is_a_noop():
     app.taskqueue._task_queue.clear()
     assert app.finalize_queue() is False

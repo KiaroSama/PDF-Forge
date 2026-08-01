@@ -768,8 +768,9 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
                     # converted PDF is a brand-new source the user will usually
                     # want to split, compress or protect next, so it stays
                     # visible to the PDF folder tools and is NOT recorded (C-09).
-                    job["written"] = promote_atomically(final_staging, out,
-                                                        record=False)
+                    job["written"] = promote_atomically(
+                        final_staging, out, record=False,
+                        overwrite=overwrite_approved(out))
                 except _ExitRequested:
                     # 'exit'/'quit' at the protection prompt is a request to
                     # close the app, not a conversion failure. The broad handler

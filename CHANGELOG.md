@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Offer to replace an existing output, defaulting to no.** When the output
+  path you choose already exists, PDF Forge now asks `Overwrite the existing
+  file?` and defaults the answer to **n**. Declining (or pressing Enter) keeps
+  the previous behaviour exactly - a reserved `_2`/`_3` name - so nothing
+  changes unless you opt in. Answering `y` replaces that one file atomically at
+  write time: you are never left without either version, and a failed replace
+  leaves the original intact. The consent covers only that exact path, is
+  refused if another queued task already targets it, never applies to a
+  directory, and is dropped when the queue finishes. The rule that an output
+  can never be the source PDF is unchanged, and folder outputs keep unique
+  names.
+
+### Added
 - **Encrypted sources now convert on the LibreOffice backend too.** Both
   backends share one local decryptor: neither can be handed an encrypted file
   directly (Office blocks on a modal dialog, LibreOffice loses the UNO bridge),

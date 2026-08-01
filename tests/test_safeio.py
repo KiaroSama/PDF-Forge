@@ -104,6 +104,100 @@ def test_promotion_cleans_temp_on_failure(tmp_path):
     assert not tmp.exists(), "temp file must be removed on failure"
 
 
+# --------------------------------------------------------------------------- #
+# OW-1 - promotion can replace a destination the user explicitly approved, and
+# only then. The default stays no-clobber, and a failed overwrite must leave the
+# user's existing file exactly as it was.
+# --------------------------------------------------------------------------- #
+
+def test_promote_without_overwrite_still_never_clobbers(tmp_path):
+    """The default path is unchanged: an occupied name yields a _2 sibling."""
+    final = tmp_path / "out.pdf"
+    original = b"USER DATA THAT MUST SURVIVE"
+    final.write_bytes(original)
+
+    tmp = write_tmp(tmp_path / "staged.tmp")
+    written = app.promote_atomically(tmp, final)
+
+    assert written == tmp_path / "out_2.pdf", "default must allocate a suffix"
+    assert final.read_bytes() == original, "default path overwrote the original"
+    assert written.read_bytes() == b"%PDF-1.7 new output\n"
+    assert not tmp.exists(), "temporary file must be consumed"
+
+
+def test_promote_with_overwrite_replaces_the_destination(tmp_path):
+    """Approved overwrite lands on the exact name and replaces its contents."""
+    final = tmp_path / "out.pdf"
+    final.write_bytes(b"OLD CONTENT THE USER ASKED US TO REPLACE")
+
+    tmp = write_tmp(tmp_path / "staged.tmp")
+    written = app.promote_atomically(tmp, final, overwrite=True)
+
+    assert written == final, "overwrite must not allocate a _2 suffix"
+    assert written.read_bytes() == b"%PDF-1.7 new output\n"
+    assert not (tmp_path / "out_2.pdf").exists(), "no sibling may be created"
+    assert not tmp.exists(), "temporary file must be consumed"
+
+
+def test_overwrite_refuses_a_directory(tmp_path):
+    """A directory destination is never replaceable, approved or not."""
+    target = tmp_path / "out.pdf"
+    target.mkdir()
+    (target / "keep.txt").write_text("user data inside", encoding="utf-8")
+
+    tmp = write_tmp(tmp_path / "staged.tmp")
+    with pytest.raises(IsADirectoryError):
+        app.promote_atomically(tmp, target, overwrite=True)
+
+    assert target.is_dir(), "the directory must survive"
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "user data inside"
+    assert not tmp.exists(), "temporary file must be consumed"
+
+
+def test_overwrite_failure_leaves_the_original_intact(tmp_path, monkeypatch):
+    """A failed replace must not cost the user the file they already had.
+
+    The destination is theirs, not a placeholder this call created, so the
+    cleanup path must never discard it (OW-1).
+    """
+    final = tmp_path / "out.pdf"
+    original = b"THE ONLY COPY THE USER HAS"
+    final.write_bytes(original)
+
+    real_replace = os.replace
+
+    def boom(src, dst, *args, **kwargs):
+        # Scoped to this destination only: os.replace is process-global, and
+        # breaking every caller would take the manifest writer down with it.
+        if Path(dst) == final:
+            raise OSError("replace failed midway")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", boom)
+
+    tmp = write_tmp(tmp_path / "staged.tmp")
+    with pytest.raises(OSError):
+        app.promote_atomically(tmp, final, overwrite=True)
+
+    assert final.exists(), "a failed overwrite deleted the user's file"
+    assert final.read_bytes() == original, "the original bytes must be intact"
+    assert not tmp.exists(), "temporary file must still be consumed"
+
+
+def test_overwrite_still_records_the_generated_output(tmp_path):
+    """Bookkeeping is not skipped just because the name already existed."""
+    make_pdf(tmp_path / "src.pdf", 1)
+    final = tmp_path / "out.pdf"
+    make_pdf(final, 1)  # a real PDF, so folder discovery would otherwise see it
+
+    app.promote_atomically(write_tmp(tmp_path / "staged.tmp"), final,
+                           overwrite=True)
+
+    discovered = [p.name for p in app.discover_pdfs_in_folder(tmp_path)]
+    assert "src.pdf" in discovered
+    assert final.name not in discovered, "overwritten output must be recorded"
+
+
 def _lock_outcome(lock, wait: float = 15.0):
     """Enter ``lock`` on a worker thread; return 'acquired' or the error name.
 
