@@ -330,12 +330,12 @@ def _prompt_convert_password(filename: str, previous_failed: bool) -> Optional[s
     if previous_failed:
         print_error("Incorrect password. Try again, or type 0/back/skip.")
     try:
-        entry = getpass.getpass(
+        entry = _timed_input(lambda: getpass.getpass(
             colorize(
                 f'Password for "{filename}" (hidden; 0/back/skip to skip): ',
                 Color.CYAN,
             )
-        )
+        ))
     except (EOFError, KeyboardInterrupt):
         return None
     nav = entry.strip().lower()

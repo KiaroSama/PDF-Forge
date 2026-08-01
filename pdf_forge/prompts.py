@@ -1,15 +1,59 @@
 from __future__ import annotations
 
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Callable, Dict, Iterator, List, Optional, Sequence
 
 from .constants import *  # noqa: F401,F403
 from .ui import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
-__all__ = ['_input', 'navigate_steps', '_AbortToMenu', 'ask_yes_no', 'prompt_password', 'prompt_new_password',
+__all__ = ['_input', '_timed_input', 'input_seconds', 'work_timer', 'navigate_steps', '_AbortToMenu', 'ask_yes_no', 'prompt_password', 'prompt_new_password',
            'resolve_protection', 'resolve_merge_protection', 'prompt_source_pdf', 'prompt_pdf_paths', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
+
+
+# Seconds this process has spent blocked on a human. Monotonic-increasing and
+# never reset: work_timer only ever reads differences between two samples.
+_input_seconds = 0.0
+
+
+def input_seconds() -> float:
+    """Total seconds this process has spent blocked on user input."""
+    return _input_seconds
+
+
+def _timed_input(read: Callable[[], str]) -> str:
+    """Run a blocking read, charging its duration to the input accumulator.
+
+    Every user-facing prompt goes through here so elapsed-work figures can
+    subtract the time the app spent waiting for a human. ``finally`` means an
+    exit request or Ctrl+C raised from the prompt is still accounted for.
+    """
+    global _input_seconds
+    start = time.monotonic()
+    try:
+        return read()
+    finally:
+        _input_seconds += time.monotonic() - start
+
+
+@contextmanager
+def work_timer() -> Iterator[Dict[str, float]]:
+    """Measure wall time minus the input waiting that happened inside it.
+
+    Yields a dict whose ``"seconds"`` key is filled in on exit, so the caller
+    can read it after the block. ``max(0.0, ...)`` is defensive only: the
+    subtraction cannot legitimately go negative.
+    """
+    started, input_before = time.monotonic(), input_seconds()
+    result = {"seconds": 0.0}
+    try:
+        yield result
+    finally:
+        result["seconds"] = max(
+            0.0, (time.monotonic() - started) - (input_seconds() - input_before))
 
 
 class _AbortToMenu(Exception):
@@ -59,7 +103,7 @@ def _input(prompt) -> str:
     """
     text = prompt.render() if hasattr(prompt, "render") else prompt
     try:
-        return input(text)
+        return _timed_input(lambda: input(text))
     except EOFError:
         # No interactive input available; behave like the exit command.
         return "exit"
@@ -107,11 +151,11 @@ def prompt_password(previous_failed: bool = False) -> Optional[str]:
     else:
         print_warning("This PDF is encrypted.")
     try:
-        entry = getpass.getpass(
+        entry = _timed_input(lambda: getpass.getpass(
             colorize(
                 "Enter PDF password (hidden; 0/back to cancel): ", Color.CYAN
             )
-        )
+        ))
     except (EOFError, KeyboardInterrupt):
         return None
     nav = entry.strip().lower()
@@ -134,9 +178,9 @@ def prompt_new_password(purpose: str) -> Optional[str]:
     print_note(f"Set a password {purpose}. Leave empty to cancel.")
     while True:
         try:
-            first = getpass.getpass(
+            first = _timed_input(lambda: getpass.getpass(
                 colorize("  Enter password (hidden): ", Color.CYAN)
-            )
+            ))
         except (EOFError, KeyboardInterrupt):
             return None
         if first == "":
@@ -144,9 +188,9 @@ def prompt_new_password(purpose: str) -> Optional[str]:
         if first.lower() in ("exit", "quit"):
             raise _ExitRequested()
         try:
-            second = getpass.getpass(
+            second = _timed_input(lambda: getpass.getpass(
                 colorize("  Confirm password (hidden): ", Color.CYAN)
-            )
+            ))
         except (EOFError, KeyboardInterrupt):
             return None
         if first != second:
