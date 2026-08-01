@@ -1244,3 +1244,130 @@ def test_reap_process_group_kills_a_child_after_the_launcher_exits(tmp_path):
                 p.wait(timeout=10)
             except Exception:  # noqa: BLE001
                 pass
+
+
+# --------------------------------------------------------------------------- #
+# C-03 - the POSIX reap must give SIGTERM a real chance, and must only ever
+# signal a group this process can still prove it owns.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group signalling")
+def test_reap_gives_sigterm_a_window_before_escalating(monkeypatch):
+    """SIGTERM, then a probe, then SIGKILL - not both signals back to back.
+
+    Sending SIGTERM and SIGKILL with nothing in between made the graceful path
+    unreachable: unoserver never got to close its soffice.bin cleanly.
+    """
+    import signal
+
+    calls = []
+    monkeypatch.setattr(office_server.os, "killpg",
+                        lambda pgid, sig: calls.append(sig))
+    monkeypatch.setattr(office_server.time, "sleep", lambda _s: None)
+
+    office_server._reap_process_group(4242)
+
+    assert calls[0] == signal.SIGTERM, "the graceful signal must come first"
+    assert signal.SIGKILL in calls, "a group that ignores SIGTERM must be killed"
+    probes = [s for s in calls[1:calls.index(signal.SIGKILL)] if s == 0]
+    assert probes, "SIGKILL was sent without ever checking whether it was needed"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group signalling")
+def test_reap_does_not_escalate_when_the_group_exits_on_sigterm(monkeypatch):
+    """A group that goes away on SIGTERM is never SIGKILLed."""
+    import signal
+
+    calls = []
+
+    def fake_killpg(pgid, sig):
+        calls.append(sig)
+        if sig == 0:
+            raise ProcessLookupError  # every member has exited
+
+    monkeypatch.setattr(office_server.os, "killpg", fake_killpg)
+    monkeypatch.setattr(office_server.time, "sleep", lambda _s: None)
+
+    office_server._reap_process_group(4242)
+
+    assert signal.SIGKILL not in calls, "a group that already exited was killed"
+
+
+def test_stop_signals_the_group_before_the_launcher_is_reaped(monkeypatch,
+                                                             tmp_path):
+    """The reap must run BEFORE _terminate, which waits on (and so reaps) the
+    launcher.
+
+    Once the launcher is reaped its PID is free for reuse, and the stored pgid
+    equals that PID - so signalling afterwards can hit whatever inherited the
+    number. Ordering is the whole ownership proof (C-03).
+    """
+    order = []
+
+    class _DeadProcess:
+        pid = 4242
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(office_server, "_reap_process_group",
+                        lambda pgid: order.append("reap"))
+    monkeypatch.setattr(office_server, "_terminate",
+                        lambda proc: order.append("terminate"))
+    monkeypatch.setattr(office_server, "_kill_profile_owners",
+                        lambda profile: None)
+    monkeypatch.setattr(office_server, "_remove_profile", lambda path: None)
+
+    office_server.ConversionServer(
+        process=_DeadProcess(), port=1, profile_dir=tmp_path,
+        soffice=tmp_path / "soffice", pgid=4242,
+    ).stop()
+
+    assert order == ["reap", "terminate"], (
+        f"the group must be signalled while we still own the PID, got {order}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# SEC-02 - Windows helpers must not be resolved through the current directory,
+# which is an untrusted document folder by design.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.skipif(os.name != "nt", reason="CreateProcess argv[0] resolution")
+@pytest.mark.parametrize("name", ["taskkill", "powershell"])
+def test_windows_helpers_resolve_to_an_absolute_path(name):
+    resolved = office_server._system32(name)
+    assert os.path.isabs(resolved), f"{name} is still resolved by bare name"
+    assert Path(resolved).is_file(), f"{resolved} does not exist"
+    assert Path(resolved).name.lower() == f"{name}.exe"
+
+
+def test_system32_falls_back_to_the_bare_name(monkeypatch, tmp_path):
+    """A non-standard SystemRoot must keep working rather than crash."""
+    monkeypatch.setenv("SystemRoot", str(tmp_path))
+    assert office_server._system32("taskkill") == "taskkill"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the taskkill path is Windows-only")
+def test_terminate_invokes_taskkill_by_absolute_path(monkeypatch):
+    seen = {}
+
+    class _LiveProcess:
+        pid = 4242
+        _polls = 0
+
+        def poll(self):
+            # Alive for the taskkill branch, dead afterwards so _terminate stops.
+            self._polls += 1
+            return None if self._polls == 1 else 0
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        raise OSError  # nothing further should be needed for this assertion
+
+    monkeypatch.setattr(office_server.subprocess, "run", fake_run)
+    office_server._terminate(_LiveProcess())
+
+    assert os.path.isabs(seen["argv"][0]), (
+        f"taskkill was invoked by bare name: {seen['argv'][0]}"
+    )

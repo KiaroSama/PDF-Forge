@@ -85,6 +85,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A UTF-8 CSV is handed to Excel with a byte-order mark. Without one Excel
   guesses the system code page, so non-Latin text arrived as mojibake
   ("سلام" imported as "Ø³Ù„Ø§Ù…"). The source file is never modified.
+- **A second PDF Forge no longer deletes the previews the first one is showing
+  you.** Watermark previews now go in a per-run folder, and startup only clears
+  folders whose owning process is provably gone - identified by process id *and*
+  start time, so a recycled id cannot make a finished run look alive. Previously
+  launching a second instance wiped the shared `temp` folder while the first was
+  still asking which candidate to remove.
+- **A LibreOffice download that 404s now falls back to the archive mirror.** The
+  pinned installer is removed from the stable path when a new version ships,
+  which broke first-time setup until the pin was bumped. Both locations are
+  tried in order and verified against the same pinned checksum; a checksum
+  failure stays terminal and never advances to the next candidate. When every
+  location fails, the error names the version, the file holding the pin, and the
+  reason.
+- The LibreOffice teardown gives its process group a real chance to exit: on
+  POSIX `SIGTERM` and `SIGKILL` were sent back to back, so the graceful path
+  never happened. It also signals the group *before* waiting on the launcher,
+  because waiting frees the launcher's id - and the group is identified by that
+  id, so signalling afterwards could reach an unrelated process.
+- Windows helper tools (`taskkill`, `powershell`, `sc`) are invoked by absolute
+  path. A bare name is resolved through a search order that includes the current
+  directory, and this tool is pointed at untrusted document folders by design.
+
+### Removed
+- Six submenu render wrappers and `msoffice.is_available()`, none of which had
+  a caller. No behaviour change.
 
 ## [2.0.1] - 2026-07-19
 

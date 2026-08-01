@@ -6,6 +6,7 @@ override) and PF-037 (the version comes from the binary; a marker is only a
 cache hint, so a forged one cannot make the runtime report ready).
 """
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -486,3 +487,143 @@ def test_steady_growth_resets_the_no_progress_timer(tmp_path, monkeypatch):
     # returning early on a process it thought had already exited.
     assert process.polls == 3
     assert clock.sleeps == 3, "one bounded wait per iteration, none of them real"
+
+
+# --------------------------------------------------------------------------- #
+# Download candidates - surviving a rotated LibreOffice download URL
+#
+# The pin points at the mirror's stable/ path, which The Document Foundation
+# rotates aged releases out of. Provisioning therefore tries the archive copy
+# too. The security-critical half is the part that must NOT be resilient: a
+# candidate that downloads but fails the pinned checksum is terminal, never a
+# reason to ask the next mirror until one happens to verify.
+#
+# All of these run through the injected `download` seam and never touch the
+# network; extraction is stubbed out so no msiexec runs either.
+# --------------------------------------------------------------------------- #
+
+_MSI_BYTES = b"pretend-libreoffice-payload"
+_MSI_SHA256 = hashlib.sha256(_MSI_BYTES).hexdigest()
+_PRIMARY_URL = "https://mirror.invalid/libreoffice/stable/25.8.7/LibreOffice.msi"
+_ARCHIVE_URL = "https://archive.invalid/libreoffice/old/25.8.7.2/LibreOffice.msi"
+_REACHED_EXTRACTION = "reached the extraction step"
+
+
+def _stub_provisioning(tmp_path, monkeypatch, sha256=_MSI_SHA256):
+    """Point provisioning at tmp_path with two candidate URLs and no msiexec.
+
+    Extraction is replaced by a sentinel error, so a run that ends in
+    ``_REACHED_EXTRACTION`` proves the download AND the pinned-checksum
+    verification both succeeded - there is no other way to get that far.
+    """
+    monkeypatch.setattr(ort_discovery, "libreoffice_dir", lambda: tmp_path / "rt")
+    monkeypatch.setattr(ort_discovery, "runtime_root", lambda: tmp_path)
+    monkeypatch.setattr(ort_discovery, "load_runtime_meta", lambda: {
+        "version": "25.8.7",
+        "windows": {
+            "url": _PRIMARY_URL,
+            "fallback_url": _ARCHIVE_URL,
+            "filename": "LibreOffice_25.8.7_Win_x86-64.msi",
+            "sha256": sha256,
+        },
+    })
+
+    def refuse_to_extract(*_a, **_k):
+        raise ort.OfficeRuntimeError(_REACHED_EXTRACTION)
+
+    monkeypatch.setattr(ort_provision, "_admin_extract_msi", refuse_to_extract)
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="Windows-only administrative-extraction path")
+def test_primary_url_is_tried_first(tmp_path, monkeypatch):
+    """With both candidates healthy the archive fallback must never be touched."""
+    _stub_provisioning(tmp_path, monkeypatch)
+    tried = []
+
+    def fake_download(url, dest):
+        tried.append(url)
+        Path(dest).write_bytes(_MSI_BYTES)
+
+    with pytest.raises(ort.OfficeRuntimeError) as excinfo:
+        ort.provision_runtime(download=fake_download)
+
+    assert _REACHED_EXTRACTION in str(excinfo.value), (
+        "the pinned URL's download must have passed checksum verification"
+    )
+    assert tried == [_PRIMARY_URL], "the pin wins; the fallback stays unused"
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="Windows-only administrative-extraction path")
+def test_falls_back_to_the_archive_url_on_404(tmp_path, monkeypatch):
+    """A release rotated out of stable/ must not end provisioning in a bare 404."""
+    _stub_provisioning(tmp_path, monkeypatch)
+    tried = []
+
+    def fake_download(url, dest):
+        tried.append(url)
+        if url == _PRIMARY_URL:
+            raise ort.OfficeRuntimeError("Download failed: HTTP Error 404: Not Found")
+        Path(dest).write_bytes(_MSI_BYTES)
+
+    with pytest.raises(ort.OfficeRuntimeError) as excinfo:
+        ort.provision_runtime(download=fake_download)
+
+    assert _REACHED_EXTRACTION in str(excinfo.value), (
+        "the archive copy must download and pass the same pinned checksum"
+    )
+    assert tried == [_PRIMARY_URL, _ARCHIVE_URL], "candidates are tried in order"
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="Windows-only administrative-extraction path")
+def test_a_checksum_mismatch_does_not_try_the_next_candidate(tmp_path, monkeypatch):
+    """Security: wrong bytes abort provisioning, they never advance the candidate.
+
+    Falling through on a verification failure would let a wrong or hostile
+    mirror be retried against every remaining candidate until one passed,
+    silently turning the fail-closed checksum gate into
+    retry-until-something-verifies. Only a *transport* failure may advance.
+    """
+    _stub_provisioning(tmp_path, monkeypatch)
+    tried = []
+
+    def fake_download(url, dest):
+        tried.append(url)
+        Path(dest).write_bytes(b"tampered")      # downloads fine, wrong bytes
+
+    with pytest.raises(ort.OfficeRuntimeError) as excinfo:
+        ort.provision_runtime(download=fake_download)
+
+    message = str(excinfo.value)
+    assert "checksum verification" in message, "the checksum gate must be what fired"
+    assert _REACHED_EXTRACTION not in message, "nothing may be extracted"
+    assert tried == [_PRIMARY_URL], (
+        "a checksum failure is terminal; the fallback must not be attempted"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="Windows-only administrative-extraction path")
+def test_all_candidates_failing_names_the_pin(tmp_path, monkeypatch):
+    """When nothing answers, say what is pinned, where the pin lives, and why."""
+    _stub_provisioning(tmp_path, monkeypatch)
+    tried = []
+
+    def fake_download(url, _dest):
+        tried.append(url)
+        raise ort.OfficeRuntimeError("Download failed: HTTP Error 404: Not Found")
+
+    with pytest.raises(ort.OfficeRuntimeError) as excinfo:
+        ort.provision_runtime(download=fake_download)
+
+    message = str(excinfo.value)
+    assert tried == [_PRIMARY_URL, _ARCHIVE_URL], "every candidate must be tried"
+    # The phrase, not the bare number: the candidate URLs echoed into the
+    # message already contain "25.8.7", so a substring check on the version
+    # alone would pass even if the message never named the pin itself.
+    assert "LibreOffice 25.8.7" in message, "the pinned version must be named"
+    assert "office_runtime_meta.json" in message, "the file holding the pin must be named"
+    assert "retired" in message, "the likely cause must be stated"
+    assert "Traceback" not in message, "user-facing text, not a stack trace"
