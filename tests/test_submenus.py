@@ -20,27 +20,28 @@ import pdf_forge as app  # noqa: E402
 from pdf_forge import menus  # noqa: E402
 
 
-# Each entry: the loop function, its renderer, the operation names it dispatches
-# to in order (choice "1", "2", ...), the title fragment, and the exact invalid
+# Each entry: the loop function, its ``menus._SUBMENUS`` key (the test renders
+# with ``menus._render_submenu(key)``), the operation names it dispatches to in
+# order (choice "1", "2", ...), the title fragment, and the exact invalid
 # message (which lists the valid option numbers).
 SUBMENUS = [
-    (menus.page_tools_menu, menus.show_page_tools_menu,
+    (menus.page_tools_menu, "page_tools",
      ["operation_extract_pages", "operation_split_chunks"],
      "Page tools:", "Please choose 1, 2, or 0."),
-    (menus.pdf_to_images_menu, menus._show_pdf_to_images_menu,
+    (menus.pdf_to_images_menu, "pdf_to_images",
      ["operation_images_all_pages", "operation_images_selected_pages",
       "operation_images_batch_folder"],
      "PDF to images:", "Please choose 1, 2, 3, or 0."),
-    (menus.pdf_to_image_pdf_menu, menus._show_image_pdf_menu,
+    (menus.pdf_to_image_pdf_menu, "image_pdf",
      ["operation_pdf_to_image_pdf", "operation_image_pdf_batch_folder"],
      "PDF to image-only PDF:", "Please choose 1, 2, or 0."),
-    (menus.delete_pages_menu, menus._show_delete_pages_menu,
+    (menus.delete_pages_menu, "delete_pages",
      ["operation_delete_pages_single", "operation_delete_pages_batch"],
      "Delete pages:", "Please choose 1, 2, or 0."),
-    (menus.compress_menu, menus._show_compress_menu,
+    (menus.compress_menu, "compress",
      ["operation_compress_pdf", "operation_compress_pdf_batch"],
      "Compress PDF:", "Please choose 1, 2, or 0."),
-    (menus.protect_menu, menus._show_protect_menu,
+    (menus.protect_menu, "protect",
      ["operation_protect_open_password", "operation_protect_restrict"],
      "Protect PDF:", "Please choose 1, 2, or 0."),
 ]
@@ -60,10 +61,10 @@ def _stub_operations(monkeypatch, op_names, log):
                             raising=False)
 
 
-@pytest.mark.parametrize("loop,render,ops,title,invalid", SUBMENUS, ids=IDS)
-def test_submenu_renders_its_title_and_options(loop, render, ops, title,
+@pytest.mark.parametrize("loop,key,ops,title,invalid", SUBMENUS, ids=IDS)
+def test_submenu_renders_its_title_and_options(loop, key, ops, title,
                                                invalid, capsys):
-    render()
+    menus._render_submenu(key)
     out = capsys.readouterr().out
     assert title in out, f"the title '{title}' was not rendered"
     assert "0." in out and "Back" in out, "the Back option is missing"
@@ -73,8 +74,8 @@ def test_submenu_renders_its_title_and_options(loop, render, ops, title,
     assert "[1]" in out, "the Enter=1 default marker is missing"
 
 
-@pytest.mark.parametrize("loop,render,ops,title,invalid", SUBMENUS, ids=IDS)
-def test_enter_selects_option_one(loop, render, ops, title, invalid,
+@pytest.mark.parametrize("loop,key,ops,title,invalid", SUBMENUS, ids=IDS)
+def test_enter_selects_option_one(loop, key, ops, title, invalid,
                                   monkeypatch):
     log = []
     _stub_operations(monkeypatch, ops, log)
@@ -84,8 +85,8 @@ def test_enter_selects_option_one(loop, render, ops, title, invalid,
     assert log == [ops[0]], f"Enter did not select option 1: ran {log}"
 
 
-@pytest.mark.parametrize("loop,render,ops,title,invalid", SUBMENUS, ids=IDS)
-def test_each_number_dispatches_to_its_operation(loop, render, ops, title,
+@pytest.mark.parametrize("loop,key,ops,title,invalid", SUBMENUS, ids=IDS)
+def test_each_number_dispatches_to_its_operation(loop, key, ops, title,
                                                  invalid, monkeypatch):
     log = []
     _stub_operations(monkeypatch, ops, log)
@@ -95,16 +96,16 @@ def test_each_number_dispatches_to_its_operation(loop, render, ops, title,
     assert log == ops, f"dispatch order wrong: {log} != {ops}"
 
 
-@pytest.mark.parametrize("loop,render,ops,title,invalid", SUBMENUS, ids=IDS)
-def test_zero_returns(loop, render, ops, title, invalid, monkeypatch):
+@pytest.mark.parametrize("loop,key,ops,title,invalid", SUBMENUS, ids=IDS)
+def test_zero_returns(loop, key, ops, title, invalid, monkeypatch):
     _stub_operations(monkeypatch, ops, [])
     _feed(monkeypatch, ["0"])
     loop()  # must simply return, no exception
 
 
 @pytest.mark.parametrize("word", ["exit", "quit"])
-@pytest.mark.parametrize("loop,render,ops,title,invalid", SUBMENUS, ids=IDS)
-def test_exit_and_quit_raise(loop, render, ops, title, invalid, word,
+@pytest.mark.parametrize("loop,key,ops,title,invalid", SUBMENUS, ids=IDS)
+def test_exit_and_quit_raise(loop, key, ops, title, invalid, word,
                              monkeypatch):
     _stub_operations(monkeypatch, ops, [])
     _feed(monkeypatch, [word])
@@ -112,8 +113,8 @@ def test_exit_and_quit_raise(loop, render, ops, title, invalid, word,
         loop()
 
 
-@pytest.mark.parametrize("loop,render,ops,title,invalid", SUBMENUS, ids=IDS)
-def test_invalid_choice_prints_the_exact_message(loop, render, ops, title,
+@pytest.mark.parametrize("loop,key,ops,title,invalid", SUBMENUS, ids=IDS)
+def test_invalid_choice_prints_the_exact_message(loop, key, ops, title,
                                                  invalid, monkeypatch, capsys):
     _stub_operations(monkeypatch, ops, [])
     # An out-of-range number is invalid; then 0 to leave.
@@ -124,8 +125,8 @@ def test_invalid_choice_prints_the_exact_message(loop, render, ops, title,
     )
 
 
-@pytest.mark.parametrize("loop,render,ops,title,invalid", SUBMENUS, ids=IDS)
-def test_keyboardinterrupt_returns_to_the_loop(loop, render, ops, title,
+@pytest.mark.parametrize("loop,key,ops,title,invalid", SUBMENUS, ids=IDS)
+def test_keyboardinterrupt_returns_to_the_loop(loop, key, ops, title,
                                                invalid, monkeypatch, capsys):
     def boom():
         raise KeyboardInterrupt
