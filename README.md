@@ -517,10 +517,13 @@ How it works:
 2. PDF Forge scans the document and lists the images that repeat across pages,
    ranked by how many pages they cover (the watermark is usually the top
    candidate at or near 100%).
-3. A **preview PNG** of each candidate is written to the project-local `temp`
-   folder (`PDF Forge/temp`) so you can open them and confirm which image is the
-   watermark before removing anything. That folder is removed automatically when
-   the operation finishes, and cleared at startup if anything was left behind.
+3. A **preview PNG** of each candidate is written to a folder of its own under
+   the project-local `temp` folder (`PDF Forge/temp/run-<id>/`) so you can open
+   them and confirm which image is the watermark before removing anything. The
+   exact path is printed for you. That folder is removed automatically when the
+   operation finishes, and leftovers are cleared at startup — but only those
+   belonging to a PDF Forge that has actually exited, so running a second copy
+   while the first is waiting at this prompt no longer deletes its previews.
 4. Choose the candidate(s) to remove (e.g. `1`, or `1,3` for several). `0` here
    skips just that file and moves on to the next one.
 5. Review the summary and pick the output path (Enter accepts
