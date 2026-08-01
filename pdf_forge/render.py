@@ -50,7 +50,15 @@ def open_render_document(path: Path, password_prompt=None, password=None):
 
 
 def _validate_image_file(path: Path) -> None:
-    """Reopen a freshly written image and confirm it is a valid, non-empty file."""
+    """Reopen a freshly written image and confirm it is a valid, non-empty file.
+
+    The decoder is deliberately *independent* of the one that wrote the file:
+    self-verifying with PyMuPDF cannot catch a PyMuPDF writer bug. This is not
+    theoretical - on a PNG corrupted mid-IDAT, PyMuPDF's own decoder accepts the
+    file and hands back different pixels without raising, because it does not
+    check the chunk CRC, while Pillow's ``verify()`` rejects it. That is the
+    whole reason Pillow is a runtime dependency; see requirements.txt.
+    """
     Image = _import_pillow()
     if path.stat().st_size <= 0:
         raise PdfOpenError("Output validation failed: the image file is empty.")

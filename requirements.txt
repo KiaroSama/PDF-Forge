@@ -6,7 +6,14 @@
 # Note: PyMuPDF is licensed under the AGPL.
 pymupdf==1.28.0
 
-# Image validation for rendered PNGs and watermark preview handling.
+# Independent image decoder. Every rendered/extracted image is reopened and
+# verified with it before being promoted to the user's output
+# (pdf_forge/render.py, _validate_image_file). Deliberately NOT PyMuPDF:
+# self-verifying with the library that wrote the file cannot catch a writer bug.
+# Measured on a PNG corrupted mid-IDAT, PyMuPDF's decoder accepts the file and
+# returns *different pixels* with no error - it does not check the chunk CRC -
+# where Pillow's verify() rejects it. Same reasoning as the test-only pypdf
+# cross-checker in requirements-dev.txt.
 pillow==12.3.0
 
 # CLI/control layer for the "Convert documents/spreadsheets/presentations to
