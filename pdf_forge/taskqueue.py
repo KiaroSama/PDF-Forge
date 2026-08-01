@@ -124,6 +124,12 @@ def finalize_queue() -> bool:
     cleanly first, never surfaced as an unexpected top-level error).
     """
     if not _task_queue:
+        # An empty queue owns no tasks, but a configuration that was abandoned
+        # before queueing (e.g. the converter install was declined after output
+        # paths were reserved) can still hold reservations. Releasing here is
+        # safe by construction: with no queued task, no reservation can be
+        # referenced by anything (C-01).
+        _discard_queue()
         return False
     print_heading(f"\nComplete summary - {len(_task_queue)} task(s) queued")
     for index, task in enumerate(_task_queue, start=1):

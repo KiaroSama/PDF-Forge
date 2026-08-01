@@ -103,6 +103,25 @@ def test_empty_queue_finalize_is_a_noop():
     assert app.finalize_queue() is False
 
 
+def test_empty_queue_finalize_releases_stale_reservations(tmp_path):
+    """A configuration abandoned before queueing must not poison later runs.
+
+    Reserving an output and then finalizing an empty queue is exactly what the
+    office flow does when the converter install is declined after
+    `_build_jobs` reserved one path per file (C-01).
+    """
+    target = tmp_path / "report.pdf"
+    first = app.core.reserve_unique_file(target)
+    assert first == target, "a free path must reserve under its own name"
+
+    assert app.taskqueue.finalize_queue() is False
+
+    second = app.core.reserve_unique_file(target)
+    assert second == target, (
+        f"the reservation was never released; got {second.name}"
+    )
+
+
 def test_password_never_appears_in_a_task_repr(tmp_path):
     # The task must carry a real SourceRef holding a real password. Built with
     # sources=() and no password anywhere, both assertions below were
