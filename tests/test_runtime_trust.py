@@ -140,8 +140,12 @@ def test_probe_timeout_does_not_raise(tmp_path, monkeypatch):
     assert ort.probe_soffice_version(tmp_path / "soffice.exe") is None
 
 
-@pytest.mark.skipif(not ort.runtime_status(verify_version=False)["soffice"],
-                    reason="no provisioned LibreOffice on this machine")
+# The gate is an environment flag, never runtime_status(): a skip condition that
+# calls the function the test asserts about turns a regression in that function
+# into a silent skip instead of a failure.
+@pytest.mark.skipif(
+    os.environ.get("PDF_FORGE_E2E") != "1",
+    reason="needs the provisioned LibreOffice runtime (PDF_FORGE_E2E=1)")
 def test_real_runtime_reports_a_probed_version():
     """With a real runtime present, the version must come from the binary."""
     status = ort.runtime_status(verify_version=True)
@@ -269,10 +273,11 @@ def test_provisioning_rebuilds_an_incomplete_runtime(tmp_path, monkeypatch):
     assert calls["download"] == 1, "a broken runtime must trigger a rebuild"
 
 
+@pytest.mark.skipif(
+    os.environ.get("PDF_FORGE_E2E") != "1",
+    reason="needs the provisioned LibreOffice runtime (PDF_FORGE_E2E=1)")
 def test_real_runtime_verifies_completely():
     """The provisioned runtime on this machine must pass the full tuple check."""
-    if not ort.runtime_status(verify_version=False)["soffice"]:
-        pytest.skip("no provisioned LibreOffice on this machine")
     result = ort.verify_runtime_directory(ort.libreoffice_dir())
     assert result.complete, result.reason
     assert result.python and result.version
@@ -377,3 +382,107 @@ def test_hardened_profile_is_isolated_and_removed(tmp_path, monkeypatch):
     assert len(written) == 1
     # It lives inside the per-run profile, which teardown deletes.
     assert profile in written[0].parents
+
+
+# --------------------------------------------------------------------------- #
+# The MSI extraction stall guard - characterization
+#
+# _await_extraction is what turns a hung Windows Installer into an actionable
+# error during first-run provisioning, so its untested failure mode was "the
+# application hangs forever". These tests pin its CURRENT behaviour: both
+# failure branches and the progress reset between them.
+#
+# They drive a bounded fake clock instead of sleeping. The value list is finite
+# on purpose: a guard that failed to terminate exhausts it and raises
+# StopIteration, so a broken guard fails the test rather than hanging it.
+# --------------------------------------------------------------------------- #
+
+class _FakeClock:
+    """Stands in for the ``time`` module that ``office_provision`` reads.
+
+    ``monotonic`` walks a finite list; running off the end raises StopIteration.
+    ``sleep`` only counts, so the loop costs no wall time.
+    """
+
+    def __init__(self, values):
+        self._values = iter(values)
+        self.sleeps = 0
+
+    def monotonic(self) -> float:
+        return next(self._values)
+
+    def sleep(self, _seconds) -> None:
+        self.sleeps += 1
+
+
+class _FakeProcess:
+    """Stands in for the msiexec ``Popen``.
+
+    Reports "still running" for ``alive_polls`` polls and then exits 0. The
+    first ``grow_for`` of those also write a file into ``target`` - that growth
+    is the only progress signal the guard has.
+    """
+
+    def __init__(self, target, alive_polls, grow_for=0):
+        self.target = target
+        self.alive_polls = alive_polls
+        self.grow_for = grow_for
+        self.polls = 0
+        self.returncode = None
+
+    def poll(self):
+        if self.polls >= self.alive_polls:
+            self.returncode = 0
+            return 0
+        if self.polls < self.grow_for:
+            (self.target / f"payload{self.polls}.dat").write_text("", encoding="utf-8")
+        self.polls += 1
+        return None
+
+
+def test_extraction_that_never_finishes_hits_the_overall_deadline(tmp_path, monkeypatch):
+    """A process that never exits must fail with the timeout error, not hang."""
+    # Exactly three clock reads are available: the deadline, the initial
+    # last_change, and the first deadline check - which already exceeds it.
+    monkeypatch.setattr(ort_provision, "time", _FakeClock([0, 0, 1000]))
+    process = _FakeProcess(tmp_path, alive_polls=10)   # never exits
+
+    with pytest.raises(ort.OfficeRuntimeError) as excinfo:
+        ort_provision._await_extraction(process, tmp_path, 100, no_progress_timeout=50)
+
+    message = str(excinfo.value)
+    assert "did not finish within 100s" in message
+    assert "Nothing was installed system-wide" in message
+
+
+def test_extraction_that_stops_growing_hits_the_no_progress_guard(tmp_path, monkeypatch):
+    """A live process writing nothing must fail with the stall error."""
+    # The clock never approaches the 1000s overall deadline, so only the
+    # no-progress branch can fire: 99s elapse without a single new file.
+    monkeypatch.setattr(ort_provision, "time", _FakeClock([0, 0, 1, 1, 2, 100]))
+    process = _FakeProcess(tmp_path, alive_polls=10, grow_for=0)   # writes nothing
+
+    with pytest.raises(ort.OfficeRuntimeError) as excinfo:
+        ort_provision._await_extraction(process, tmp_path, 1000, no_progress_timeout=30)
+
+    message = str(excinfo.value)
+    assert "wrote nothing for 30s" in message
+    assert "did not finish within" not in message, "the overall-deadline branch fired"
+
+
+def test_steady_growth_resets_the_no_progress_timer(tmp_path, monkeypatch):
+    """Slow-but-progressing extraction must NOT be killed."""
+    # Two files arrive 100s apart. Each gap alone exceeds the 30s no-progress
+    # budget, so without the reset the second iteration would abort a perfectly
+    # healthy extraction. The third poll writes nothing, but only 20s after the
+    # last file appeared - inside the budget, and must be tolerated.
+    clock = _FakeClock([0, 0, 100, 100, 200, 200, 220, 220])
+    monkeypatch.setattr(ort_provision, "time", clock)
+    process = _FakeProcess(tmp_path, alive_polls=3, grow_for=2)
+
+    ort_provision._await_extraction(process, tmp_path, 100_000, no_progress_timeout=30)
+
+    # Non-vacuity: the guard really did run every iteration rather than
+    # returning early on a process it thought had already exited.
+    assert process.polls == 3
+    assert clock.sleeps == 3, "one bounded wait per iteration, none of them real"

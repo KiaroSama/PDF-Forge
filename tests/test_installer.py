@@ -72,7 +72,7 @@ def test_path_cleanup_is_not_limited_to_the_current_checkout():
         "PATH cleanup must be able to recognise a PDF Forge bin at any location"
     )
     # Ownership is verified against project marker files, not just the name.
-    assert "pdf_forge\__init__.py" in text or "pdf_forge\\__init__.py" in text
+    assert r"pdf_forge\__init__.py" in text
     assert "Run.ps1" in text
 
 

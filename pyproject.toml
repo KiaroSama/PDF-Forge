@@ -31,8 +31,10 @@ version = { attr = "pdf_forge.constants.APP_VERSION" }
 minversion = "8.0"
 testpaths = ["tests"]
 # -q keeps output readable; --durations surfaces a slow test before it becomes a
-# CI problem; strict markers stop silent typos in @pytest.mark names.
-addopts = "-q --strict-markers --durations=10"
+# CI problem; strict markers stop silent typos in @pytest.mark names. -rs names
+# every skip and its reason: without it a run reports only a count, and a test
+# that quietly stopped running cannot be told apart from one that never ran.
+addopts = "-q --strict-markers --durations=10 -rs"
 filterwarnings = ["error::DeprecationWarning:pdf_forge.*"]
 
 [tool.ruff]
