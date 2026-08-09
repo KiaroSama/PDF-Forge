@@ -147,9 +147,25 @@ def finalize_queue() -> bool:
     for index, task in enumerate(_task_queue, start=1):
         print_kv(f"Task {index}", task.summary, Color.AQUA)
 
+    keep = False
     try:
         try:
             start = ask_yes_no("\nStart now?", default_yes=True)
+        except _BackRequested:
+            # 0 = one step back: return to the menu with the queue INTACT. It is
+            # the only non-destructive way out of this prompt - 'n' discards
+            # everything - and it matters most for exactly the task worth
+            # keeping, the one that took a long time to configure. The main menu
+            # grows a "run the queue" entry while tasks are waiting, so nothing
+            # is stranded.
+            keep = True
+            print_info(
+                f"Kept {len(_task_queue)} queued task(s); start them from the "
+                "main menu when you are ready."
+            )
+            logger.info("Queue kept via 0/back at the Start confirmation (%d task(s)).",
+                        len(_task_queue))
+            return False
         except _ExitRequested:
             print_warning("Exiting; the queued task(s) were discarded.")
             logger.info("Queue discarded via exit/quit at the Start confirmation.")
@@ -166,5 +182,9 @@ def finalize_queue() -> bool:
         return False
     finally:
         # Whatever happened - ran, cancelled, exited, or an unexpected
-        # BaseException - the queue and its reservations are released here.
-        _discard_queue()
+        # BaseException - the queue and its reservations are released here. The
+        # single exception is 0/back, which exists precisely to keep them: the
+        # reservations must outlive this call or a kept task could lose the
+        # output name it was configured with.
+        if not keep:
+            _discard_queue()

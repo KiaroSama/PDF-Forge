@@ -214,13 +214,15 @@ def _prompt_csv_correction(path: Path, dialect: "CsvDialect") -> "CsvDialect":
         raw = _input(prompt).strip().lower()
         if raw == "":
             return dialect  # accept the guess
+        if raw in ("0", "back"):
+            raise _BackRequested()  # 0 is one step back at every prompt
         if raw in ("exit", "quit"):
             raise _ExitRequested()
         if raw in mapping:
             dialect.delimiter = mapping[raw]
             dialect.confidence = "high"
             return dialect
-        print_error("Choose 1-5, or Enter to accept the guess.")
+        print_error("Choose 1-5, 0 to go back, or Enter to accept the guess.")
 
 
 def _csv_default_choice(delimiter: str) -> str:
@@ -368,7 +370,10 @@ def _prompt_output_protection(filename: str):
         if raw == "2":
             return "same", None
         if raw == "3":
-            new = prompt_new_password("to open the converted PDF")
+            try:
+                new = prompt_new_password("to open the converted PDF")
+            except _BackRequested:
+                continue  # 0 there = back to this protection choice
             if new is None:
                 continue
             return "different", new
@@ -817,10 +822,19 @@ def operation_convert_files() -> None:
     print_heading("\nConvert to PDF: add files")
     logger.info("Operation started: Convert to PDF (files).")
 
-    files = prompt_office_source_files()
-    if files is None:
-        return
-    _configure_and_queue(files, mode="files")
+    # 0 anywhere inside the configuration means one step back, and the step
+    # before it is choosing the files - so re-ask for them rather than dropping
+    # the user at the menu. This tool has no navigate_steps driver (it has a
+    # single back-capable config prompt), so the loop is the driver.
+    while True:
+        files = prompt_office_source_files()
+        if files is None:
+            return
+        try:
+            _configure_and_queue(files, mode="files")
+            return
+        except _BackRequested:
+            continue
 
 
 def operation_convert_folder() -> None:
@@ -829,10 +843,15 @@ def operation_convert_folder() -> None:
     print_heading("\nConvert to PDF: folder")
     logger.info("Operation started: Convert to PDF (folder).")
 
-    files = prompt_office_source_folder()
-    if files is None:
-        return
-    _configure_and_queue(files, mode="folder")
+    while True:
+        files = prompt_office_source_folder()
+        if files is None:
+            return
+        try:
+            _configure_and_queue(files, mode="folder")
+            return
+        except _BackRequested:
+            continue  # 0 inside the configuration -> back to the folder prompt
 
 
 def _resolve_backend(families=()):

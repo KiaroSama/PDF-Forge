@@ -11,7 +11,7 @@ from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
 
 __all__ = ['_input', '_timed_input', 'input_seconds', 'work_timer', 'navigate_steps', '_AbortToMenu', 'ask_yes_no', 'prompt_password', 'prompt_new_password',
-           'resolve_protection', 'resolve_merge_protection', 'prompt_source_pdf', 'prompt_pdf_paths', '_ExitRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
+           'resolve_protection', 'resolve_merge_protection', 'prompt_source_pdf', 'prompt_pdf_paths', '_ExitRequested', '_BackRequested', '_choose_output_dir_for_files', '_choose_output_file', '_choose_output_dir', '_print_merge_order', 'prompt_image_quality', '_prompt_custom_dpi', 'prompt_source_folder_pdfs']
 
 
 # Seconds this process has spent blocked on a human. Monotonic-increasing and
@@ -85,6 +85,11 @@ def navigate_steps(steps) -> bool:
             advance = steps[index]()
         except _AbortToMenu:
             return False  # deliberate cancel -> menu
+        except _BackRequested:
+            # A prompt inside the step signalled 0/back but could not say so in
+            # its return value (ask_yes_no's bool has no spare state). Same
+            # meaning as the step returning False: one step back.
+            advance = False
         if advance:
             index += 1
         else:
@@ -112,12 +117,20 @@ def _input(prompt) -> str:
 def ask_yes_no(question: str, default_yes: bool = True) -> bool:
     """Ask a yes/no question. Empty input selects the default (Yes by default).
 
+    ``0``/``back`` raises :class:`_BackRequested`: in this application ``0``
+    means "one prompt back" at EVERY prompt, with no exceptions - a yes/no
+    question is not a special case, and an inconsistent ``0`` is worse than no
+    ``0`` at all because the user has to discover which prompts obey it.
+
+    Back is signalled by an exception rather than by a third return value on
+    purpose: every caller here does ``if ask_yes_no(...)``, so returning
+    ``None`` would silently take the "no" branch at any site not updated. An
+    unhandled exception is loud; a silently wrong answer is not.
+
     Typing 'exit' or 'quit' raises _ExitRequested to close the application.
     """
     default_char = "y" if default_yes else "n"
-    prompt = question_prompt(
-        question, details="y/n", default=default_char, back="quit=exit"
-    )
+    prompt = question_prompt(question, details="y/n", default=default_char)
     while True:
         answer = _input(prompt).strip().lower()
         if answer == "":
@@ -126,9 +139,13 @@ def ask_yes_no(question: str, default_yes: bool = True) -> bool:
             return True
         if answer in ("n", "no"):
             return False
+        if answer in ("0", "back"):
+            raise _BackRequested()
         if answer in ("exit", "quit"):
             raise _ExitRequested()
-        print_error("Please answer with 'y', 'n', or type 'exit' to quit.")
+        print_error(
+            "Please answer with 'y', 'n', 0 to go back, or 'exit' to quit."
+        )
 
 
 def prompt_password(previous_failed: bool = False) -> Optional[str]:
@@ -170,21 +187,27 @@ def prompt_new_password(purpose: str) -> Optional[str]:
     """Ask for a new password (hidden), entered twice to confirm.
 
     ``purpose`` is shown in the prompt (e.g. "to open the file"). Returns the
-    password, or ``None`` if the user cancels with an empty entry. Raises
-    ``_ExitRequested`` on 'exit'/'quit'.
+    password, or ``None`` if the user cancels with an empty entry. ``0``/``back``
+    raises :class:`_BackRequested` - one step back, as at every other prompt.
+    Raises ``_ExitRequested`` on 'exit'/'quit'.
+
+    As in :func:`prompt_password`, the entry is hidden, so those words cannot
+    double as a literal password: the same documented, intentional limitation.
     """
     import getpass
 
-    print_note(f"Set a password {purpose}. Leave empty to cancel.")
+    print_note(f"Set a password {purpose}. Leave empty to cancel, 0 to go back.")
     while True:
         try:
             first = _timed_input(lambda: getpass.getpass(
-                colorize("  Enter password (hidden): ", Color.CYAN)
+                colorize("  Enter password (hidden; 0=back): ", Color.CYAN)
             ))
         except (EOFError, KeyboardInterrupt):
             return None
         if first == "":
             return None
+        if first.lower() in ("0", "back"):
+            raise _BackRequested()
         if first.lower() in ("exit", "quit"):
             raise _ExitRequested()
         try:
@@ -363,6 +386,15 @@ class _ExitRequested(Exception):
     """Internal signal that the user asked to exit the whole application."""
 
 
+class _BackRequested(Exception):
+    """Internal signal that the user typed ``0``/back at a prompt.
+
+    Raised by prompts whose return type cannot express "back" - notably
+    :func:`ask_yes_no`, whose ``bool`` has no spare value. ``navigate_steps``
+    turns it into a step back; a caller outside a step handles it itself.
+    """
+
+
 def _choose_output_dir_for_files(default_dir: Path) -> Optional[Path]:
     """Choose an output directory for multi-file extraction (Enter = source folder)."""
     prompt = question_prompt("Output folder", default="beside source PDF")
@@ -414,19 +446,28 @@ def _choose_output_file(default_path: Path, source: Path) -> Optional[Path]:
         # it here: the directory is created inside the task runner so a queued
         # task that is later discarded leaves no empty folder behind (A18).
         if not chosen.parent.exists():
-            if not ask_yes_no(
-                f"Directory does not exist (it will be created when the task "
-                f"runs):\n  {chosen.parent}\nUse it?",
-                default_yes=True,
-            ):
+            try:
+                use_it = ask_yes_no(
+                    f"Directory does not exist (it will be created when the "
+                    f"task runs):\n  {chosen.parent}\nUse it?",
+                    default_yes=True,
+                )
+            except _BackRequested:
+                continue  # 0 here means "let me retype the path"
+            if not use_it:
                 continue
 
         # An existing destination is the user's decision, not ours: offer the
         # replace, defaulting to no. Declining keeps the historical no-clobber
         # behaviour exactly (OW-1).
         if chosen.exists() and chosen.is_file():
-            if ask_yes_no(f"Overwrite the existing file?\n  {chosen}",
-                          default_yes=False):
+            try:
+                replace_it = ask_yes_no(
+                    f"Overwrite the existing file?\n  {chosen}",
+                    default_yes=False)
+            except _BackRequested:
+                continue  # 0 here means "let me retype the path"
+            if replace_it:
                 if reserve_exact_file(chosen):
                     approve_overwrite(chosen)
                     print_warning(

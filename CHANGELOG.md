@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`0` now goes back one prompt at *every* prompt, yes/no questions
+  included.** They were the one kind that rejected it, so `0` at "Overwrite the
+  existing file?", "Continue?", "Install the converter now?" or "Do you want to
+  queue another task?" only printed an error. It now re-shows the previous
+  question, exactly as it already did everywhere else.
+- **`0` at "Start now?" keeps the queue.** Previously the only way out of that
+  prompt without running the batch was `n`, which discarded every task you had
+  configured — worst for the long-running batch that took the most effort to
+  set up. `0` returns you to the menu with the queue intact; the menu's
+  "run the queue" entry starts it whenever you are ready. `n` still discards,
+  unchanged.
+
+### Fixed
+- A folder in `temp/` whose name contained an unusual digit form (`²`, `②`)
+  could stop PDF Forge from starting: the startup cleanup guarded an `int()`
+  with `isdigit()`, which accepts characters `int()` refuses. The same pattern
+  in the LibreOffice version check is fixed too, and a malformed version pin
+  now fails closed instead of silently degrading to a major-version-only match.
+
 ## [2.1.0] - 2026-08-01
 
 ### Added

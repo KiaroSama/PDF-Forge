@@ -184,3 +184,118 @@ def test_compress_level_back_returns_to_source(tmp_path, monkeypatch):
         app.ops_compress.operation_compress_pdf()
 
     assert source_calls["n"] == 2, "0 at the level prompt must re-show the source prompt"
+
+
+# --------------------------------------------------------------------------- #
+# 0 means "one prompt back" at EVERY prompt, yes/no questions included.
+# --------------------------------------------------------------------------- #
+
+def test_zero_at_a_yes_no_question_asks_to_go_back(monkeypatch):
+    """`ask_yes_no` must signal back, not argue about y/n.
+
+    It cannot say so in its return value - the bool has no spare state - so it
+    raises. That is deliberate: a third return value would silently read as
+    "no" at every call site not updated.
+    """
+    _feed(monkeypatch, ["0"])
+    with pytest.raises(app.prompts._BackRequested):
+        app.prompts.ask_yes_no("Anything?", default_yes=True)
+
+    _feed(monkeypatch, ["back"])
+    with pytest.raises(app.prompts._BackRequested):
+        app.prompts.ask_yes_no("Anything?", default_yes=False)
+
+
+def test_a_yes_no_prompt_advertises_back(monkeypatch):
+    """The hint must say back=0. A prompt that hides it is how 0 got missed."""
+    seen = []
+    monkeypatch.setattr("builtins.input", lambda text="": (seen.append(text), "y")[1])
+    app.prompts.ask_yes_no("Anything?")
+    assert "back=0" in seen[0], f"the yes/no prompt does not offer back: {seen[0]!r}"
+
+
+def test_back_inside_a_step_steps_back_rather_than_aborting(monkeypatch):
+    """navigate_steps turns _BackRequested from a step into one step back."""
+    visited = []
+
+    def first():
+        visited.append("first")
+        return True
+
+    def second():
+        visited.append("second")
+        if visited.count("second") == 1:
+            raise app.prompts._BackRequested()
+        return True
+
+    assert app.prompts.navigate_steps([first, second]) is True
+    assert visited == ["first", "second", "first", "second"], (
+        f"back did not re-show the previous step: {visited}")
+
+
+def test_zero_at_start_now_keeps_the_queue(monkeypatch, tmp_path):
+    """The one that matters: 0 must NOT discard what you just configured.
+
+    'n' at this prompt throws the whole queue away, so before this there was no
+    non-destructive way out - worst for exactly the task worth keeping, the one
+    that took the longest to set up.
+    """
+    ran = []
+    # queue_task signals "configured, back to the menu" by raising; that is the
+    # normal path, not an error.
+    with pytest.raises(app.taskqueue._TaskQueued):
+        app.taskqueue.queue_task("a long job", lambda: ran.append(True))
+    assert app.taskqueue.queued_count() == 1
+
+    _feed(monkeypatch, ["0"])
+    exited = app.taskqueue.finalize_queue()
+
+    assert exited is False, "0 is a step back, not an application exit"
+    assert not ran, "0 must not start the queue"
+    assert app.taskqueue.queued_count() == 1, (
+        "the queued task was discarded by a back request")
+
+
+def test_declining_at_start_now_still_discards(monkeypatch):
+    """The historical 'n' behaviour is unchanged - back is a NEW third answer."""
+    ran = []
+    with pytest.raises(app.taskqueue._TaskQueued):
+        app.taskqueue.queue_task("a job", lambda: ran.append(True))
+
+    _feed(monkeypatch, ["n"])
+    assert app.taskqueue.finalize_queue() is False
+    assert not ran
+    assert app.taskqueue.queued_count() == 0, "'n' must still discard the queue"
+
+
+def test_every_prompt_in_the_package_offers_back():
+    """0 means back at EVERY prompt - so no prompt may be added without one.
+
+    This is a structural guard, not a behavioural one: it reads the source of
+    every function that blocks on user input and requires a literal "0" in it.
+    Without this, the next prompt someone adds silently becomes the one that
+    rejects 0, which is exactly how ask_yes_no stayed inconsistent.
+    """
+    import ast
+    import re
+
+    package = Path(__file__).resolve().parent.parent / "pdf_forge"
+    # _input/_timed_input are the plumbing every prompt reads THROUGH; they
+    # decide nothing and have no answer to interpret.
+    plumbing = {"_input", "_timed_input"}
+    missing = []
+    for source_file in sorted(package.glob("*.py")):
+        text = source_file.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        for node in ast.walk(ast.parse(text)):
+            if not isinstance(node, ast.FunctionDef) or node.name in plumbing:
+                continue
+            body = "\n".join(lines[node.lineno - 1:node.end_lineno])
+            if not re.search(r"\b_input\(|getpass\.getpass", body):
+                continue
+            if not re.search(r'["\']0["\']', body):
+                missing.append(f"{source_file.name}:{node.lineno} {node.name}")
+
+    assert not missing, (
+        "these prompts read user input but never interpret '0' as back:\n  "
+        + "\n  ".join(missing))

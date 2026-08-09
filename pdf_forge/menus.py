@@ -262,6 +262,10 @@ def main_menu() -> int:
                 add_more = ask_yes_no(
                     "\nDo you want to queue another task?", default_yes=False
                 )
+            except _BackRequested:
+                # 0 = one step back, which from here is the menu you just came
+                # from, with the queue still holding what you configured.
+                add_more = True
             except _ExitRequested:
                 finalize_queue()
                 return _goodbye()

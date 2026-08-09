@@ -114,11 +114,15 @@ def _choose_output_file_for_merge(default_path: Path,
         # Confirm intent for a not-yet-existing directory, but defer creation to
         # the task runner (no empty folder left if the task is discarded).
         if not chosen.parent.exists():
-            if not ask_yes_no(
-                f"Directory does not exist (it will be created when the task "
-                f"runs):\n  {chosen.parent}\nUse it?",
-                default_yes=True,
-            ):
+            try:
+                use_it = ask_yes_no(
+                    f"Directory does not exist (it will be created when the "
+                    f"task runs):\n  {chosen.parent}\nUse it?",
+                    default_yes=True,
+                )
+            except _BackRequested:
+                continue  # 0 here means "let me retype the path"
+            if not use_it:
                 continue
 
         # Never overwrite / collide with another queued output: reserve a name.

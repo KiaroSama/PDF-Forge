@@ -115,6 +115,14 @@ pdf-forge
 
 ## Menus
 
+**`0` always means "go back one prompt."** Every prompt in PDF Forge accepts
+it — path prompts, page selections, quality choices, and yes/no questions alike
+— and it re-shows the *previous* question rather than abandoning what you were
+doing. `0` at the very first prompt of a tool returns to the menu. This holds
+without exception, including at "Start now?", where `0` keeps everything you
+queued and hands you back to the menu (the queue is only discarded if you
+answer `n`). `exit` or `quit` closes the application from anywhere.
+
 ```
 PDF Forge Main menu:
   1. Page tools [1]
