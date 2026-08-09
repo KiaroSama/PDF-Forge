@@ -627,3 +627,19 @@ def test_all_candidates_failing_names_the_pin(tmp_path, monkeypatch):
     assert "office_runtime_meta.json" in message, "the file holding the pin must be named"
     assert "retired" in message, "the likely cause must be stated"
     assert "Traceback" not in message, "user-facing text, not a stack trace"
+
+
+def test_a_version_with_a_non_decimal_digit_is_rejected_not_a_traceback():
+    """`_version_compatible` must refuse odd digits, not raise on them.
+
+    '²'.isdigit() is True while int('²') raises, so an isdigit() guard in front
+    of int() turns a malformed version string into an uncaught ValueError in a
+    trust gate. isdecimal() ends the parse cleanly instead.
+    """
+    from pdf_forge.office_provision import _version_compatible
+
+    assert _version_compatible("25.8.7", "25.8.7") is True
+    assert _version_compatible("25.8.7.3", "25.8.7") is True
+    # Must return a verdict rather than raise.
+    assert _version_compatible("25.\u00b2.7", "25.8.7") is False
+    assert _version_compatible("25.8.7", "25.\u2461.7") is False

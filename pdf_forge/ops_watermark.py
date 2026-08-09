@@ -41,7 +41,7 @@ def _run_dir() -> Path:
     """
     start = _process_start(os.getpid()) or _ALIVE_UNKNOWN
     # Keep the name filename-safe: _ALIVE_UNKNOWN is '?', illegal on Windows.
-    stamp = start if start.isdigit() else "unknown"
+    stamp = start if start.isdecimal() else "unknown"
     return _temp_dir() / f"run-{os.getpid()}-{stamp}"
 
 
@@ -53,7 +53,12 @@ def _owner_is_gone(name: str) -> bool:
     for), while a live or merely unreadable owner is never reported as gone.
     """
     parts = name.split("-")
-    if len(parts) != 3 or parts[0] != "run" or not parts[1].isdigit():
+    # isdecimal(), NOT isdigit(): '²' and '②' are isdigit() but int() refuses
+    # them, so the guard would pass and the int() below would raise - and this
+    # runs from cleanup_temp_dir() at every startup, so one oddly-named folder
+    # in temp/ would stop the app from starting. isdecimal() is exactly the set
+    # int() accepts, so '٣' and other real digit forms still work.
+    if len(parts) != 3 or parts[0] != "run" or not parts[1].isdecimal():
         return True  # legacy or foreign leftover, no owner to respect
     current = _process_start(int(parts[1]))
     if current is None:

@@ -144,12 +144,22 @@ def _version_compatible(reported: str, expected: str) -> bool:
     def parts(v: str):
         out = []
         for tok in str(v).split("."):
-            if not tok.strip().isdigit():
+            # isdecimal(), NOT isdigit(): int() refuses '²'/'②' although
+            # isdigit() accepts them, which would raise here instead of ending
+            # the parse. isdecimal() matches int() exactly.
+            if not tok.strip().isdecimal():
                 break
             out.append(int(tok))
         return out
 
     exp = parts(expected)
+    # The PIN must parse completely. Truncating it silently would re-create the
+    # very bug this function replaced: a pin of "25.x.7" would collapse to [25]
+    # and then accept any 25.* runtime. Truncating what the BINARY reports is
+    # different and intended - that is how the 4-component build 25.8.7.3
+    # satisfies the 3-component pin 25.8.7.
+    if len(exp) != len(str(expected).split(".")):
+        return False
     return bool(exp) and parts(reported)[:len(exp)] == exp
 
 

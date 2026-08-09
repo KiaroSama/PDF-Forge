@@ -378,3 +378,46 @@ def test_startup_cleanup_clears_legacy_leftovers(monkeypatch, tmp_path):
     ops_watermark.cleanup_temp_dir()
 
     assert not legacy.exists(), "a pre-isolation leftover was never cleared"
+
+
+def test_startup_cleanup_survives_a_unicode_digit_folder_name(monkeypatch,
+                                                              tmp_path):
+    """A folder named with a non-decimal digit must not stop the app starting.
+
+    `'²'.isdigit()` is True but `int('²')` raises, so guarding an int() with
+    isdigit() lets exactly the wrong input through. cleanup_temp_dir() runs at
+    every startup over whatever is in temp/, so one such folder would turn a
+    launch into a traceback. isdecimal() is the predicate that matches int().
+    """
+    root = _temp_root(monkeypatch, tmp_path)
+    for odd in ("run-\u00b2-123", "run-\u2461-9"):
+        (root / odd).mkdir()
+
+    ops_watermark.cleanup_temp_dir()          # must not raise
+
+    for odd in ("run-\u00b2-123", "run-\u2461-9"):
+        assert not (root / odd).exists(), (
+            f"{odd} has no readable owner, so it is stale and should be cleared")
+
+
+def test_a_real_arabic_indic_pid_is_still_understood(monkeypatch, tmp_path):
+    """The fix must narrow the guard, not break locales int() accepts.
+
+    `int('٣')` is 3, so a folder stamped with those digits still has a readable
+    owner and must be judged on that owner, not discarded as unparseable.
+    """
+    root = _temp_root(monkeypatch, tmp_path)
+    seen = {}
+
+    def fake_start(pid):
+        seen["pid"] = pid
+        return "777"                          # alive, and the stamp matches
+
+    monkeypatch.setattr(ops_watermark, "_process_start", fake_start)
+    live = root / "run-\u0663-777"             # '٣' == 3
+    live.mkdir()
+
+    ops_watermark.cleanup_temp_dir()
+
+    assert seen.get("pid") == 3, "the Arabic-Indic pid was not parsed as 3"
+    assert live.exists(), "a live owner's folder was deleted"
