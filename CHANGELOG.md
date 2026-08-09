@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-08-09
+
 ### Changed
 - **`0` now goes back one prompt at *every* prompt, yes/no questions
   included.** They were the one kind that rejected it, so `0` at "Overwrite the
@@ -26,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `isdigit()`, which accepts characters `int()` refuses. The same pattern
   in the LibreOffice version check is fixed too, and a malformed version pin
   now fails closed instead of silently degrading to a major-version-only match.
+
+### Security
+- `pypdf` 6.14.2 → 6.15.0 (CVE-2026-71852, CVE-2026-71870) and `cryptography`
+  49.0.0 → 50.0.0 (PYSEC-2026-3552, a Bleichenbacher oracle in PKCS#7
+  `EnvelopedData` decryption). `cryptography` reaches this project only through
+  `msoffcrypto-tool`, which declares `cryptography>=39.0`, so the major bump is
+  within its constraint. PDF Forge does not use the PKCS#7 path, but the fix is
+  taken rather than reasoned around.
 
 ## [2.1.0] - 2026-08-01
 

@@ -50,7 +50,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # The one concrete anchor. Everything else is read from its source, so this is
 # what catches the case the cross-checks cannot: all four surfaces drifting
 # together to the same wrong number.
-EXPECTED_VERSION = "2.1.0"
+EXPECTED_VERSION = "2.2.0"
 
 # Names that mean "a build happened here". Checked across the checkout so the
 # proof is not limited to the root.
