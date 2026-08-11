@@ -4,7 +4,7 @@
 # The single PDF engine (MuPDF bindings): every operation - page tools,
 # merging, PNG rendering, image-only PDFs, compression, and watermark removal.
 # Note: PyMuPDF is licensed under the AGPL.
-pymupdf==1.28.0
+pymupdf==1.28.2
 
 # Independent image decoder. Every rendered/extracted image is reopened and
 # verified with it before being promoted to the user's output
