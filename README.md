@@ -1049,6 +1049,17 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
+Two environment variables redirect where PDF Forge writes, and the test suite
+sets both so a run never touches real machine state:
+
+- `PDF_FORGE_STATE_DIR` — the generated-output manifest, which must survive
+  between runs. It is project-local by default (`.pdfforge_state`).
+- `PDF_FORGE_TEMP_DIR` — the throwaway working directories (a conversion
+  profile, image staging, preview fallback). The system temp folder by default,
+  because scratch is disposable and a read-only or removable checkout must not
+  be written to on every conversion. An unusable value warns and falls back
+  rather than failing the conversion.
+
 The same on Linux or macOS (four of the CI legs are Ubuntu):
 
 ```bash

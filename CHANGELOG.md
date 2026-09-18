@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The throwaway folders PDF Forge creates during a conversion are now
+  redirectable.** They still default to the system temp folder, which is where
+  disposable scratch belongs, but `PDF_FORGE_TEMP_DIR` moves them — useful when
+  the temp drive is small, or when you want a run's leftovers somewhere you can
+  find them. A value that cannot be used warns and falls back instead of
+  failing the conversion. The decrypted copy of an encrypted source is
+  deliberately excluded and always stays on the system temp.
+
 ## [2.2.0] - 2026-08-09
 
 ### Changed
