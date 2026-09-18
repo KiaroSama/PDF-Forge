@@ -21,6 +21,9 @@ from typing import Optional
 
 from .constants import *  # noqa: F401,F403
 from .safeio import scratch_dir
+from .office_diagnostics import stall_report
+from .office_processes import soffice_processes
+from .office_processes import kill_profile_owners as _kill_profile_owners
 from .office_discovery import (
     CONVERT_TIMEOUT_MAX, OfficeRuntimeError, SERVER_START_TIMEOUT,
     conversion_timeout_for, find_soffice, find_soffice_python,
@@ -122,51 +125,6 @@ class ConversionServer:
 
 
 
-def _kill_profile_owners(profile_dir: Path) -> None:
-    """Kill LibreOffice processes still using *our* profile, and only ours.
-
-    ``_terminate`` takes down the whole process tree, but only while the
-    unoserver parent is alive to define it. Once that parent has exited, its
-    soffice.bin child is orphaned: nothing reaps it, it recreates the
-    user-installation directory moments after ``stop()`` deleted it, and it sits
-    on hundreds of megabytes. Measured: two survivors after one suite run, and a
-    later server refusing to start.
-
-    Matching on the profile path is what makes this safe. That directory is a
-    fresh ``mkdtemp`` owned by this process, so a LibreOffice the user has open
-    cannot match it - the promise of "task-owned processes, nothing else" holds.
-    """
-    if os.name != "nt":
-        # POSIX orphans are not addressed here; the measured failure and the
-        # runtime this ships against are Windows.
-        return
-    script = (
-        "Get-CimInstance Win32_Process -Filter "
-        "\"Name='soffice.bin' or Name='soffice.exe'\" | "
-        "Where-Object { $_.CommandLine -like $env:PDFFORGE_PROFILE_GLOB } | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
-        "-ErrorAction SilentlyContinue }"
-    )
-    try:
-        subprocess.run(
-            [_system32("powershell"), "-NoProfile", "-NonInteractive",
-             "-Command", script],
-            capture_output=True, timeout=30,
-            # Match the URI form, which is what is actually on the command
-            # line: we pass --user-installation a plain path, but unoserver
-            # converts it with Path(...).as_uri() before launching soffice.
-            # A glob built from the native path contains backslashes, which
-            # PowerShell's -like treats literally, so it can never match the
-            # forward-slash URI. Measured against a live process: the native
-            # form matched 0 processes, this one matched 2.
-            #
-            # Through the environment, so a path containing backslashes,
-            # spaces or quotes cannot be reinterpreted as PowerShell syntax.
-            env=dict(os.environ,
-                     PDFFORGE_PROFILE_GLOB=f"*{profile_dir.resolve().as_uri()}*"),
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
 
 
 def _reap_process_group(pgid: Optional[int]) -> None:
@@ -610,6 +568,10 @@ def _wait_until_ready(server: ConversionServer, timeout: int) -> None:
     from unoserver.client import UnoClient
 
     deadline = time.monotonic() + timeout
+    # Sampled now so the timeout path below can report CPU *movement* across the
+    # whole wait rather than one meaningless instant. Costs nothing on the happy
+    # path and needs no extra waiting on the failure path (B-01).
+    baseline = soffice_processes(server.profile_dir)
     client = UnoClient(server="127.0.0.1", port=str(server.port))
     while time.monotonic() < deadline:
         if server.process.poll() is not None:
@@ -638,8 +600,12 @@ def _wait_until_ready(server: ConversionServer, timeout: int) -> None:
             logger.info("Conversion server ready on 127.0.0.1:%d.", server.port)
             return
         time.sleep(0.5)
+    # stop() deletes the profile and reaps the processes moments from now, so
+    # this is the last instant the evidence exists. B-01 had to be diagnosed by
+    # hand precisely because nothing captured it here.
     raise OfficeRuntimeError(
-        f"The conversion server did not become ready within {timeout}s."
+        f"The conversion server did not become ready within {timeout}s.\n"
+        + stall_report(server.profile_dir, server.read_log(), baseline)
     )
 
 
