@@ -101,3 +101,44 @@ def test_the_report_carries_the_log_tail_and_points_at_the_bug(tmp_path, no_live
     assert "line 19" in report      # the tail is present
     assert "line 0" not in report   # and it is bounded
     assert "B-01" in report
+
+
+def test_a_server_without_a_profile_still_raises_the_real_error(monkeypatch):
+    """A diagnostic must never become the failure. CI caught this one.
+
+    The first version sampled ``server.profile_dir`` directly at the top of
+    ``_wait_until_ready``, which runs on the HAPPY path. Every existing test
+    double lacks that attribute, so six suites turned an
+    "it did not become ready" error into an ``AttributeError`` - the diagnostic
+    reporting itself instead of the thing it exists to observe.
+    """
+    from pdf_forge.office_diagnostics import baseline_for, report_for
+
+    class ServerDouble:
+        """No profile_dir, and a log that raises - the hostile shape."""
+
+        def read_log(self, *_args):
+            raise OSError("no log here")
+
+    double = ServerDouble()
+    assert baseline_for(double) == []
+    report = report_for(double, None)
+    assert "no profile to inspect" in report
+
+
+def test_an_unreadable_profile_degrades_instead_of_raising(tmp_path, monkeypatch):
+    """Same contract on the failure path: report what is missing, raise nothing."""
+    from pdf_forge.office_diagnostics import report_for
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("WMI is unavailable")
+
+    monkeypatch.setattr("pdf_forge.office_diagnostics.soffice_processes", explode)
+
+    class ServerDouble:
+        profile_dir = tmp_path
+
+        def read_log(self, *_args):
+            return BOUND
+
+    assert "unavailable" in report_for(ServerDouble(), None)

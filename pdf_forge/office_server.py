@@ -21,8 +21,7 @@ from typing import Optional
 
 from .constants import *  # noqa: F401,F403
 from .safeio import scratch_dir
-from .office_diagnostics import stall_report
-from .office_processes import soffice_processes
+from .office_diagnostics import baseline_for, report_for
 from .office_processes import kill_profile_owners as _kill_profile_owners
 from .office_discovery import (
     CONVERT_TIMEOUT_MAX, OfficeRuntimeError, SERVER_START_TIMEOUT,
@@ -571,7 +570,7 @@ def _wait_until_ready(server: ConversionServer, timeout: int) -> None:
     # Sampled now so the timeout path below can report CPU *movement* across the
     # whole wait rather than one meaningless instant. Costs nothing on the happy
     # path and needs no extra waiting on the failure path (B-01).
-    baseline = soffice_processes(server.profile_dir)
+    baseline = baseline_for(server)
     client = UnoClient(server="127.0.0.1", port=str(server.port))
     while time.monotonic() < deadline:
         if server.process.poll() is not None:
@@ -605,7 +604,7 @@ def _wait_until_ready(server: ConversionServer, timeout: int) -> None:
     # hand precisely because nothing captured it here.
     raise OfficeRuntimeError(
         f"The conversion server did not become ready within {timeout}s.\n"
-        + stall_report(server.profile_dir, server.read_log(), baseline)
+        + report_for(server, baseline)
     )
 
 

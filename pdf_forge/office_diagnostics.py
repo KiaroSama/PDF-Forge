@@ -28,7 +28,7 @@ from typing import Optional
 
 from .office_processes import SofficeSample, soffice_processes
 
-__all__ = ['stall_report']
+__all__ = ['stall_report', 'baseline_for', 'report_for']
 
 def _profile_silence(profile_dir: Path) -> Optional[float]:
     """Seconds since anything was last written anywhere under the profile.
@@ -118,3 +118,41 @@ def stall_report(
     lines.append('  See BUGS.md B-01. This is the evidence that bug asks for; '
                  'attach it there rather than re-deriving it by hand.')
     return '\n'.join(lines)
+
+
+def baseline_for(server: object) -> list[SofficeSample]:
+    """The starting CPU sample for *server*, tolerating a server that has none.
+
+    This runs on the HAPPY path, before anything has gone wrong, which makes it
+    the one place in this module where an exception would do real damage: it
+    would turn a working conversion into a failure, and a test double into an
+    AttributeError. CI caught exactly that. A diagnostic observes; it never
+    decides whether the observed thing works, so anything it cannot sample it
+    simply does not sample.
+    """
+    profile = getattr(server, 'profile_dir', None)
+    if profile is None:
+        return []
+    try:
+        return soffice_processes(Path(profile))
+    except Exception:  # noqa: BLE001 - see the docstring: never raise from here
+        return []
+
+
+def report_for(server: object, baseline: Optional[list[SofficeSample]]) -> str:
+    """The stall report for *server*, or a note saying why there is none.
+
+    Same contract as :func:`baseline_for` on the failure path: the caller is
+    already raising a real error and must not have it replaced by this one.
+    """
+    profile = getattr(server, 'profile_dir', None)
+    try:
+        log_text = server.read_log()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - a log we cannot read is not a new failure
+        log_text = ''
+    if profile is None:
+        return '  (no profile to inspect, so no stall evidence was collected.)'
+    try:
+        return stall_report(Path(profile), log_text, baseline)
+    except Exception as exc:  # noqa: BLE001 - as above
+        return f'  (stall diagnostics unavailable: {exc})'
