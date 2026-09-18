@@ -8,7 +8,7 @@ from typing import List, Optional
 
 # The project's process-identity primitive: a PID alone is not an owner, so the
 # start time is paired with it (see safeio). Imported rather than reimplemented.
-from .safeio import _ALIVE_UNKNOWN, _process_start
+from .safeio import _ALIVE_UNKNOWN, _process_start, scratch_dir
 from .constants import *  # noqa: F401,F403
 from .ui import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
@@ -174,7 +174,8 @@ def _configure_watermark_removal(source: Path, preview_dirs: list) -> Optional[d
         try:
             preview_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
-            preview_dir = Path(tempfile.mkdtemp(prefix="pdfforge_wm_preview_"))
+            preview_dir = Path(tempfile.mkdtemp(prefix="pdfforge_wm_preview_",
+                                                dir=str(scratch_dir())))
         preview_dirs.append(preview_dir)
         logger.info("Watermark previews at: %s", preview_dir)
         print_heading("\nWatermark candidates")

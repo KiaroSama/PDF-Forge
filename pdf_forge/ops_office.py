@@ -19,7 +19,7 @@ from .constants import *  # noqa: F401,F403
 from .ui import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 from .pdf_io import *  # noqa: F401,F403
-from .safeio import promote_atomically
+from .safeio import promote_atomically, scratch_dir
 from .encrypt import *  # noqa: F401,F403
 from .office import *  # noqa: F401,F403
 from . import office_runtime as ort
@@ -608,7 +608,8 @@ def _convert_one(server, job, backend=None) -> str:
             # Apply the sniffed CSV dialect by converting a canonical copy (the
             # converter API cannot take import-filter options). Source untouched.
             try:
-                csv_dir = Path(tempfile.mkdtemp(prefix="pdfforge_csv_"))
+                csv_dir = Path(tempfile.mkdtemp(prefix="pdfforge_csv_",
+                                                dir=str(scratch_dir())))
                 source_for_convert = normalize_csv_for_import(
                     src, job["csv_dialect"], csv_dir / src.name
                 )
@@ -709,6 +710,12 @@ def _convert_one_body(server, job, source_for_convert, backend=None) -> str:
                         # (SEC-01). The converted PDF still stages in out.parent
                         # so the final promotion stays a same-volume atomic
                         # replace.
+                        # Deliberately NOT routed through scratch_dir(): the
+                        # plaintext location is a security boundary, and an
+                        # env-var-redirectable one could be pointed at an
+                        # indexed or synced folder. It also cannot leak the way
+                        # a LibreOffice profile does - TemporaryDirectory
+                        # removes it on every exit path.
                         with tempfile.TemporaryDirectory(
                                 prefix="pdfforge_decrypt_") as plain_dir:
                             plain = decrypt_to_temp(source_for_convert, password,

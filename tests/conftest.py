@@ -15,6 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pdf_forge as app  # noqa: E402
 
+#: Project-local scratch root for the whole suite (git-ignored). One directory
+#: rather than one per test: a LibreOffice profile is large, and the app already
+#: creates a uniquely-named subdirectory inside whatever root it is given.
+_TEST_SCRATCH = Path(__file__).resolve().parent.parent / ".pdfforge_test_tmp"
+_TEST_SCRATCH.mkdir(exist_ok=True)
+
 
 @pytest.fixture(autouse=True)
 def isolate_global_state(tmp_path_factory, monkeypatch):
@@ -23,6 +29,12 @@ def isolate_global_state(tmp_path_factory, monkeypatch):
     # suite never touches real machine state (and never the checkout).
     state = tmp_path_factory.mktemp("pdfforge_state")
     monkeypatch.setenv("PDF_FORGE_STATE_DIR", str(state))
+    # Keep the app's scratch inside the project too. A LibreOffice profile is a
+    # ~200 MB tree that a killed run leaves behind, and in the user's %TEMP% it
+    # is anonymous - nothing ties it back to the project that made it. Project
+    # test artifacts belong under the project root, where the residue sweep can
+    # see and attribute them.
+    monkeypatch.setenv("PDF_FORGE_TEMP_DIR", str(_TEST_SCRATCH))
     app.clear_reservations()
     app.taskqueue._task_queue.clear()
     app.set_operation_prompt(None)

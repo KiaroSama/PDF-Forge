@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from .constants import LOG_PREFIX
+from .safeio import scratch_dir as _scratch_root
 from .office import validate_office_file
 from .office_decrypt import (
     DecryptError, DecryptPasswordError, decrypt_to_temp,
@@ -359,7 +360,8 @@ class MsOfficeSession:
             raise MsOfficeError(f"Unsupported source family: {family}")
         handler = {"word": _convert_word, "excel": _convert_excel,
                    "powerpoint": _convert_powerpoint}[app_name]
-        with tempfile.TemporaryDirectory(prefix="pdfforge_msoffice_") as scratch:
+        with tempfile.TemporaryDirectory(prefix="pdfforge_msoffice_",
+                                         dir=str(_scratch_root())) as scratch:
             scratch_dir = Path(scratch)
             if encrypted:
                 # Office never sees the encrypted file - see office_decrypt.

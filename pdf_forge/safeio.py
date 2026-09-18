@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import platform
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,7 +35,7 @@ from .constants import *  # noqa: F401,F403
 
 __all__ = [
     'PromotionError', 'OutputResult', 'promote_atomically', 'claim_unique_path',
-    'state_dir', 'manifest_path', 'file_identity', 'FileLock',
+    'state_dir', 'scratch_dir', 'manifest_path', 'file_identity', 'FileLock',
     'LockError', 'LockTimeout', 'LockUnavailable',
     'load_generated_outputs', 'record_generated_output',
     'forget_generated_outputs',
@@ -198,6 +199,7 @@ def promote_atomically(tmp_path: Path, final_path: Path,
 # --------------------------------------------------------------------------- #
 
 _STATE_ENV = "PDF_FORGE_STATE_DIR"
+_TEMP_ENV = "PDF_FORGE_TEMP_DIR"
 _warning_shown = False
 
 
@@ -252,6 +254,36 @@ def _is_writable_dir(path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+def scratch_dir() -> Path:
+    """Root for this app's short-lived working directories.
+
+    The system temp folder by default, and that is deliberate: a conversion
+    profile is throwaway, the OS already cleans that location, and a checkout on
+    read-only or removable media must not be written to on every run. This is
+    the opposite trade-off from :func:`state_dir`, which is project-local
+    because its contents must SURVIVE.
+
+    ``PDF_FORGE_TEMP_DIR`` redirects it. That is how the test suite keeps its
+    artifacts inside the project instead of scattering LibreOffice profiles
+    through the user's temp folder, where a killed run leaves them behind and
+    nothing ties them back to the project that made them.
+
+    An override that cannot be created falls back to the system temp rather than
+    failing: scratch placement is a hygiene preference, never a reason to abort
+    the conversion the user asked for.
+    """
+    override = os.environ.get(_TEMP_ENV)
+    if override:
+        candidate = Path(override)
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        except OSError:
+            logger.warning("PDF_FORGE_TEMP_DIR is unusable (%s); using the "
+                           "system temp folder instead.", override)
+    return Path(tempfile.gettempdir())
 
 
 def manifest_path() -> Path:

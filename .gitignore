@@ -62,6 +62,7 @@ htmlcov/
 # Machine-local state (the generated-output manifest and its lock), kept inside
 # the project so a portable checkout is self-contained, but never committed.
 /.pdfforge_state/
+/.pdfforge_test_tmp/
 /.pdfforge_outputs.json
 /generated-outputs.json
 

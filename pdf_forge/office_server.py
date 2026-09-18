@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from .constants import *  # noqa: F401,F403
+from .safeio import scratch_dir
 from .office_discovery import (
     CONVERT_TIMEOUT_MAX, OfficeRuntimeError, SERVER_START_TIMEOUT,
     conversion_timeout_for, find_soffice, find_soffice_python,
@@ -499,7 +500,8 @@ def _launch_conversion_server_once(
 ) -> ConversionServer:
     """One start attempt on the given ports; cleans up its own process and
     profile on any failure before raising, so the caller can retry cleanly."""
-    profile_dir = Path(tempfile.mkdtemp(prefix="pdfforge_loprofile_"))
+    profile_dir = Path(tempfile.mkdtemp(prefix="pdfforge_loprofile_",
+                                        dir=str(scratch_dir())))
     # Always hardened unless explicitly disabled for debugging. Beyond the
     # safety it enforces, disabling link/index updates is what keeps Writer
     # exports from crashing the UNO bridge in this runtime (measured).
@@ -784,7 +786,8 @@ def warm_up(server: "ConversionServer") -> "ConversionServer":
     use (a replacement when the warm-up had to restart it).
     """
     for attempt in range(2):
-        scratch = Path(tempfile.mkdtemp(prefix="pdfforge_warmup_"))
+        scratch = Path(tempfile.mkdtemp(prefix="pdfforge_warmup_",
+                                        dir=str(scratch_dir())))
         try:
             probe = scratch / "warmup.txt"
             probe.write_text("warmup\n", encoding="utf-8")
@@ -846,8 +849,10 @@ def convert_via_soffice_cli(soffice: Path, in_path: Path, out_path: Path,
     if timeout is None:
         timeout = conversion_timeout_for(in_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    profile = Path(tempfile.mkdtemp(prefix="pdfforge_cliprof_"))
-    outdir = Path(tempfile.mkdtemp(prefix="pdfforge_cliout_"))
+    profile = Path(tempfile.mkdtemp(prefix="pdfforge_cliprof_",
+                                   dir=str(scratch_dir())))
+    outdir = Path(tempfile.mkdtemp(prefix="pdfforge_cliout_",
+                                  dir=str(scratch_dir())))
     # This fallback runs automatically on bridge loss, so it must carry exactly
     # the same macro and link-update lockdown as the server path. A fresh empty
     # profile means LibreOffice defaults, i.e. macros enabled - the retry would
