@@ -212,6 +212,7 @@ def test_wedged_conversion_times_out_and_is_abandoned(monkeypatch):
     then the very next statement blocked on the same hung worker, wedging the
     run indefinitely. The worker is now a daemon thread that is never re-joined.
     """
+    import threading
     import time
     import types
 
@@ -223,6 +224,13 @@ def test_wedged_conversion_times_out_and_is_abandoned(monkeypatch):
         def is_alive(self):
             return True
 
+    # The fake must NOT return: the production timeout ending the call IS the
+    # behaviour under test. A blocked Event says "never" exactly - no duration
+    # to choose, nothing that can expire early on a slow runner - and the test
+    # releases it in finally, so the abandoned worker thread dies with the test
+    # instead of living on inside the rest of the suite.
+    never_returns = threading.Event()
+
     fake = types.ModuleType("unoserver.client")
 
     class UnoClient:
@@ -230,25 +238,28 @@ def test_wedged_conversion_times_out_and_is_abandoned(monkeypatch):
             pass
 
         def convert(self, **kwargs):
-            time.sleep(60)  # never returns within the test's timeout
+            never_returns.wait()
 
     fake.UnoClient = UnoClient
     monkeypatch.setitem(sys.modules, "unoserver", types.ModuleType("unoserver"))
     monkeypatch.setitem(sys.modules, "unoserver.client", fake)
 
     started = time.monotonic()
-    with pytest.raises(app.office_runtime.OfficeRuntimeError) as excinfo:
-        app.office_runtime.convert_to_pdf(FakeServer(), "in.docx", "out.pdf", timeout=2)
-    elapsed = time.monotonic() - started
+    try:
+        with pytest.raises(app.office_runtime.OfficeRuntimeError) as excinfo:
+            app.office_runtime.convert_to_pdf(FakeServer(), "in.docx", "out.pdf",
+                                              timeout=2)
+        elapsed = time.monotonic() - started
 
-    assert app.office_runtime.is_bridge_lost(excinfo.value)
-    assert elapsed < 15, f"timeout did not release promptly ({elapsed:.1f}s)"
+        assert app.office_runtime.is_bridge_lost(excinfo.value)
+        assert elapsed < 15, f"timeout did not release promptly ({elapsed:.1f}s)"
+    finally:
+        never_returns.set()
 
 
 def test_convert_worker_thread_is_daemon(monkeypatch):
     """The abandoned worker must not be able to hold up interpreter exit."""
     import threading
-    import time
     import types
 
     class FakeServer:
@@ -267,6 +278,13 @@ def test_convert_worker_thread_is_daemon(monkeypatch):
         created["daemon"] = thread.daemon
         return thread
 
+    # The fake must NOT return: the production timeout ending the call IS the
+    # behaviour under test. A blocked Event says "never" exactly - no duration
+    # to choose, nothing that can expire early on a slow runner - and the test
+    # releases it in finally, so the abandoned worker thread dies with the test
+    # instead of living on inside the rest of the suite.
+    never_returns = threading.Event()
+
     fake = types.ModuleType("unoserver.client")
 
     class UnoClient:
@@ -274,13 +292,17 @@ def test_convert_worker_thread_is_daemon(monkeypatch):
             pass
 
         def convert(self, **kwargs):
-            time.sleep(30)
+            never_returns.wait()
 
     fake.UnoClient = UnoClient
     monkeypatch.setitem(sys.modules, "unoserver", types.ModuleType("unoserver"))
     monkeypatch.setitem(sys.modules, "unoserver.client", fake)
     monkeypatch.setattr(threading, "Thread", capture)
 
-    with pytest.raises(app.office_runtime.OfficeRuntimeError):
-        app.office_runtime.convert_to_pdf(FakeServer(), "in.docx", "out.pdf", timeout=1)
-    assert created.get("daemon") is True
+    try:
+        with pytest.raises(app.office_runtime.OfficeRuntimeError):
+            app.office_runtime.convert_to_pdf(FakeServer(), "in.docx", "out.pdf",
+                                              timeout=1)
+        assert created.get("daemon") is True
+    finally:
+        never_returns.set()

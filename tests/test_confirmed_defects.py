@@ -980,9 +980,85 @@ def test_server_ports_are_distinct_non_vacuously(monkeypatch, tmp_path):
 # and _remove_profile must reap an owner that still holds a stuck profile.
 # --------------------------------------------------------------------------- #
 
+#: How long a helper process stays alive when the test does not kill it first.
+#: These processes exist to BE reaped - the tests never wait for them, they wait
+#: on their own bounded deadline (``time.monotonic() + 15``, polling 0.1 s). The
+#: number therefore has to be comfortably LONGER than any plausible run, not
+#: shorter: a helper that exits on its own would make "it is gone" pass because
+#: it quit, not because the reaper worked, which is a silently vacuous test.
+#: What keeps it from becoming a five-minute orphan is the cleanup, not the
+#: number - every test below kills the whole tree, grandchild included, in
+#: ``finally``.
+_HELPER_LIFETIME_SECONDS = 300
+
+#: The body every helper process runs. Imported as source text into a child, so
+#: it is deliberately a single self-contained expression.
+_STAY_ALIVE = f"import time; time.sleep({_HELPER_LIFETIME_SECONDS})"
+
+
+def _stay_alive_source() -> str:
+    """The child program that idles until the test reaps it."""
+    return _STAY_ALIVE
+
+
+def _kill_pid(pid: int) -> None:
+    """Kill one process by pid, best effort, on either platform.
+
+    Used by the cleanup paths below to reap a GRANDCHILD, which no Popen handle
+    in the test refers to: ``finally`` blocks that only kill the objects they
+    hold leave that one running, which is exactly the orphan class these tests
+    are about.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, timeout=15, check=False)
+        else:
+            import signal as _signal
+
+            os.kill(pid, _signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def _pid_alive(pid: int) -> bool:
     from pdf_forge import safeio
     return safeio._process_start(pid) is not None
+
+
+def test_kill_pid_reaps_a_bare_pid_so_a_failed_test_leaks_nothing(tmp_path):
+    """The cleanup path's own guarantee, tested directly.
+
+    The tests below reap a GRANDCHILD that no Popen handle refers to, so their
+    ``finally`` has only a bare pid to work with. If that kill does not work,
+    every failure in those tests leaks a process for the helper's full lifetime
+    - and the leak would be invisible, because the assertion that failed is the
+    one being reported. Hence a direct test rather than trust.
+    """
+    helper = subprocess.Popen([sys.executable, "-c", _stay_alive_source()])
+    try:
+        assert helper.poll() is None, "the helper should be running"
+
+        _kill_pid(helper.pid)
+
+        # wait() is the assertion: it returns only once the process has really
+        # died, and raises TimeoutExpired otherwise. _pid_alive is deliberately
+        # NOT used here - on Windows a killed child's pid stays queryable while
+        # this Popen still holds an open handle to it, so it would report
+        # "alive" for a process that is already dead and say nothing about
+        # whether _kill_pid worked. It is the right check in the tests below,
+        # where the launcher holding the handle is itself killed.
+        helper.wait(timeout=15)
+        assert helper.poll() is not None, "_kill_pid left the process running"
+    finally:
+        try:
+            helper.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            helper.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def test_terminate_kills_the_whole_process_tree(tmp_path):
@@ -991,12 +1067,12 @@ def test_terminate_kills_the_whole_process_tree(tmp_path):
     import time
     import textwrap
 
-    launcher = textwrap.dedent("""
+    launcher = textwrap.dedent(f"""
         import subprocess, sys, time
         child = subprocess.Popen([sys.executable, "-c",
-                                  "import time; time.sleep(90)"])
+                                  {_STAY_ALIVE!r}])
         print(child.pid, flush=True)
-        time.sleep(90)
+        time.sleep({_HELPER_LIFETIME_SECONDS})
     """)
     kwargs = {"stdout": subprocess.PIPE}
     if os.name != "nt":
@@ -1004,8 +1080,9 @@ def test_terminate_kills_the_whole_process_tree(tmp_path):
 
     # An unrelated control process that must SURVIVE the reap.
     control = subprocess.Popen([sys.executable, "-c",
-                                "import time; time.sleep(90)"])
+                                _stay_alive_source()])
     proc = subprocess.Popen([sys.executable, "-c", launcher], **kwargs)
+    child_pid = None
     try:
         child_pid = int(proc.stdout.readline().decode().strip())
         assert _pid_alive(child_pid), "the child should be running before terminate"
@@ -1020,6 +1097,12 @@ def test_terminate_kills_the_whole_process_tree(tmp_path):
         assert not _pid_alive(child_pid), "the spawned child survived _terminate"
         assert control.poll() is None, "an unrelated process was killed"
     finally:
+        # The grandchild first, and unconditionally: no Popen handle in this
+        # test refers to it, so if anything above failed before _terminate
+        # reaped it, nothing else here would. Killing an already-dead pid is a
+        # no-op, which is what makes doing it on the success path safe too.
+        if child_pid is not None:
+            _kill_pid(child_pid)
         for p in (control, proc):
             try:
                 p.kill()
@@ -1205,15 +1288,15 @@ def test_reap_process_group_kills_a_child_after_the_launcher_exits(tmp_path):
     import textwrap
     import time
 
-    launcher = textwrap.dedent("""
+    launcher = textwrap.dedent(f"""
         import subprocess, sys
         child = subprocess.Popen([sys.executable, "-c",
-                                  "import time; time.sleep(90)"])
+                                  {_STAY_ALIVE!r}])
         print(child.pid, flush=True)
         # the launcher exits immediately, orphaning the child in its group
     """)
     control = subprocess.Popen([sys.executable, "-c",
-                                "import time; time.sleep(90)"])
+                                _stay_alive_source()])
     proc = subprocess.Popen([sys.executable, "-c", launcher],
                             stdout=subprocess.PIPE, start_new_session=True)
     pgid = os.getpgid(proc.pid)     # captured while the launcher is alive
