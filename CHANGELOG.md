@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **A conversion server that never starts now says why.** The error used to be
+  just "the conversion server did not become ready within Ns". It now carries
+  the evidence with it: which phase the server stalled in, how much CPU each
+  LibreOffice process used while you waited, how long its working folder had
+  been untouched, and the last lines of its own log. Nothing about a successful
+  conversion changes.
 - **The throwaway folders PDF Forge creates during a conversion are now
   redirectable.** They still default to the system temp folder, which is where
   disposable scratch belongs, but `PDF_FORGE_TEMP_DIR` moves them — useful when

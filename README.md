@@ -1021,6 +1021,10 @@ pdf_forge/            Main application package (run with: python -m pdf_forge)
   office_decrypt.py   Decrypts a password-protected Office file before convert
   office_discovery.py Where the LibreOffice runtime lives and whether it is usable
   office_server.py    Runs a task-owned headless LibreOffice and converts through it
+  office_processes.py The LibreOffice processes using this task's own profile:
+                      finding them, and reaping them when one is left behind
+  office_diagnostics.py  Why a conversion server never became ready - the phase
+                      it stalled in, CPU movement, profile silence, log tail
   office_provision.py Installs, verifies, trims and removes that runtime
   office_runtime.py   Re-export facade over office_discovery / office_server /
                       office_provision, so callers keep one namespace
