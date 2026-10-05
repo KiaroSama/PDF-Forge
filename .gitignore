@@ -97,3 +97,7 @@ desktop.ini
 
 # Advisor implementation plans (local working notes)
 /plans/
+
+/.specify/
+/specs/
+/.codebase-memory/
