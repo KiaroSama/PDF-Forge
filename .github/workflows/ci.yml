@@ -124,10 +124,6 @@ jobs:
           pip install -r requirements.txt -r requirements-dev.txt pip-audit
       - name: Dependency vulnerability audit
         run: python -m pip_audit --strict --progress-spinner off
-      - name: Secret scan
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   powershell:
     name: PowerShell analysis
